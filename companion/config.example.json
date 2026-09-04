@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy to config.json and edit. Forward slashes even on Windows.",
+
+  "ps5_ip": "192.168.1.50",
+
+  "dpi": { "mode": "v2", "port_v2": 12800, "port_v1": 9090 },
+
+  "ftp": { "port": 2121 },
+  "console": { "app_db_path": "/system_data/priv/mms/app.db" },
+
+  "shadowmount": { "port": 9021 },
+
+  "library": {
+    "local_paths": [
+      "C:/PS4 PKG GAMES"
+    ],
+    "sources_file": "sources.json",
+    "serve_local_over_http": true
+  },
+
+  "sources": [],
+  "_sources_example": [
+    { "name": "home-box", "type": "tunnel", "base_url": "http://home-box.tailnet:8710/library/", "priority": 20 },
+    { "name": "my-cloud", "type": "cloud", "base_url": "https://your-own-private-bucket.example/pkg/", "priority": 40, "auth": { "header": "X-Token", "value": "REPLACE_ME" } }
+  ],
+
+  "companion": { "host": "0.0.0.0", "port": 8710 },
+
+  "drives": ["internal", "usb0"],
+
+  "content_ownership_ack": false
+}
