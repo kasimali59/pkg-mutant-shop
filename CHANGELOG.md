@@ -199,6 +199,20 @@ Start queue releases them.
   `LICENSE` (GPL-3.0) and `THIRD-PARTY-NOTICES.md` exist. `config.example.json` mirrors
   `DEFAULT_CONFIG`.
 
+### Addendum, 2026-09-04 (later the same day) - ShadowMountPlus updated
+
+The ShadowMountPlus build embedded in the console ELF (`payload_bundle.h` ->
+`payloads/shadowmountplus.elf`) was replaced with the newly released one: 2,465,896 bytes,
+md5 `3aaf3e4f…`, in place of the 24 August build (1,762,880 bytes, md5 `faa6cf21…`). The ELF was
+rebuilt at the same version - **3.61.0 stays 3.61.0** - and redeployed; the exe does not carry
+ShadowMountPlus and was not touched. Nothing else changed.
+
+Two things worth knowing. The shop writes this copy to `/data/pkg-mutant-shop/payloads/` and
+starts it only when nothing owns port 10101, so the ShadowMountPlus that was already running
+keeps running until the console's next boot or rest-wake cycle; the new build takes over then.
+And the copy under `ps5_autoloader/` on the Desktop is the user's own autoloader file - the app
+never reads it.
+
 ### What was deliberately left alone
 
 - The install verdict conditions (`_bgft_before_ok`, following a live bgft job from a
