@@ -327,11 +327,25 @@ def deploy_elf(path, ip, ftp_port, expect, quit_wait=120, up_wait=90, force=Fals
     #    shop's own state were checked in step 0, before the upload - this is the point of no return.
     if shop_up or tcp_ok(ip, SHOP_PORT, 2.0):
         print("  asking the running shop to quit (/api/quit) ...")
-        http_get("http://%s:%d/api/quit" % (ip, SHOP_PORT), timeout=8)
+        ok_quit, quit_body = http_get("http://%s:%d/api/quit" % (ip, SHOP_PORT), timeout=8)
+        acknowledged = ok_quit and '"bye"' in (quit_body or "")
+        # THIS CONSOLE DOES NOT REFUSE. A connect to a port nobody owns on the PS5 is dropped, not
+        # reset, so it TIMES OUT - and the first version of this loop waited for an active
+        # ConnectionRefusedError that never came, gave up after two minutes, and left the shop
+        # down with the new file uploaded and nothing loaded (measured 2026-09-04: the shop had
+        # answered {"ok":true,"bye":true} and _exit()ed within a second). "Gone" is therefore:
+        # the shop acknowledged the quit, and the port has stopped accepting - twice in a row,
+        # because a single failed connect can also be a busy accept loop. A wedged listener still
+        # accepts (the socket connects), so it still keeps this loop waiting, which is the point.
         t0 = time.time()
+        misses = 0
         while time.time() - t0 < quit_wait:
-            if tcp_refused(ip, SHOP_PORT, 2.0):
-                break
+            if tcp_ok(ip, SHOP_PORT, 2.0):
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 2 and (acknowledged or time.time() - t0 > 10):
+                    break
             time.sleep(1.5)
         else:
             print(R + "  :%d is still owned after %ds. A live shop cannot be replaced - the new "
