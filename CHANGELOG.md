@@ -207,11 +207,14 @@ md5 `3aaf3e4f…`, in place of the 24 August build (1,762,880 bytes, md5 `faa6cf
 rebuilt at the same version - **3.61.0 stays 3.61.0** - and redeployed; the exe does not carry
 ShadowMountPlus and was not touched. Nothing else changed.
 
-Two things worth knowing. The shop writes this copy to `/data/pkg-mutant-shop/payloads/` and
-starts it only when nothing owns port 10101, so the ShadowMountPlus that was already running
-keeps running until the console's next boot or rest-wake cycle; the new build takes over then.
-And the copy under `ps5_autoloader/` on the Desktop is the user's own autoloader file - the app
-never reads it.
+Two things worth knowing, read out of `payload_bootstrap()`. The shop writes its embedded copy to
+`/data/pkg-mutant-shop/payloads/` and launches it **only when nothing already owns port 10101** -
+with ShadowMountPlus up, the whole step is skipped, so after this reload the on-console copy was
+still the old 1,762,880-byte file and the running instance is unchanged; the new build lands
+there at the next boot or rest-wake where ShadowMountPlus is not yet running. And the launch goes
+through Payload Manager, which resolves `/loadpayload` **by basename to its own registered copy**
+when it has one (the pldmgr trap): so the copy Payload Manager holds must be updated too - the
+file under `ps5_autoloader/` on the Desktop is that one, and the app never reads it.
 
 ### What was deliberately left alone
 
