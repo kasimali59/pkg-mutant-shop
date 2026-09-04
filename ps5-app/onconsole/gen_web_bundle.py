@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """Generate web_bundle.h — embeds the web/ UI into the on-console ELF so that LOADING the ELF delivers the
 whole shop UI to the PS5 (the ELF self-extracts these to WEB_ROOT on boot). Run by build-wsl.sh before the
-compile. Usage: gen_web_bundle.py <web_dir> <out_header>"""
+compile. Usage: gen_web_bundle.py <web_dir> <out_header>
+
+WHAT IS SHIPPED is an allow-list, not "everything in web/ minus .ico". The console serves exactly
+three things: index.html, config.js and assets/*. Anything else that lands in web/ - an editor
+backup, a scratch copy of the page, a screenshot - used to be mapped into console RAM and written
+to /data on every boot without anyone noticing.
+
+Each embedded file also gets its sha256 in a comment. tools/ready_check.py used to compare only
+the LENGTH of the embedded index.html against the one on disk, so a same-size edit shipped an ELF
+whose console UI differed from web/index.html while the check stayed green.
+"""
+import hashlib
 import os
 import sys
 
@@ -10,6 +21,14 @@ web_dir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
 out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(__file__), "web_bundle.h")
 SKIP_EXT = {".ico"}          # Windows exe icon — not served by the web UI
 
+
+def wanted(rel):
+    """The allow-list: the page, its config shim, and the assets folder. Nothing else."""
+    if rel in ("index.html", "config.js"):
+        return True
+    return rel.startswith("assets/") and "/" not in rel[len("assets/"):]
+
+
 files = []
 for root, _dirs, names in os.walk(web_dir):
     for n in names:
@@ -17,8 +36,13 @@ for root, _dirs, names in os.walk(web_dir):
             continue
         ap = os.path.join(root, n)
         rel = os.path.relpath(ap, web_dir).replace("\\", "/")
+        if not wanted(rel):
+            print("web_bundle.h: skipping %s (not on the allow-list)" % rel)
+            continue
         files.append((rel, ap))
 files.sort()
+if not any(rel == "index.html" for rel, _ in files):
+    sys.exit("gen_web_bundle: no index.html under %s - refusing to write an empty bundle" % web_dir)
 
 
 def octal_literals(data, chunk=4096):
@@ -39,7 +63,9 @@ for i, (rel, ap) in enumerate(files):
     with open(ap, "rb") as f:
         data = f.read()
     name = "web_file_%d" % i
-    table.append((rel, name, len(data)))
+    digest = hashlib.sha256(data).hexdigest()
+    table.append((rel, name, len(data), digest))
+    lines.append("/* %s  %d bytes  sha256 %s */" % (rel, len(data), digest))
     lines.append("static const unsigned char %s[] =" % name)
     for lit in octal_literals(data):
         lines.append("  " + lit)
@@ -47,7 +73,7 @@ for i, (rel, ap) in enumerate(files):
 lines.append("")
 lines.append("typedef struct { const char *path; const unsigned char *data; unsigned int len; } web_file_t;")
 lines.append("static const web_file_t WEB_FILES[] = {")
-for rel, name, ln in table:
+for rel, name, ln, _d in table:
     lines.append('  {"%s", %s, %d},' % (rel, name, ln))
 lines.append("};")
 lines.append("static const int WEB_FILES_COUNT = %d;" % len(table))

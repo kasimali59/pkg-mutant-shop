@@ -113,10 +113,13 @@ parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeU
 String Number Boolean Array Object Date Math JSON RegExp Error Promise Map Set WeakMap Symbol
 document window navigator location history localStorage sessionStorage console screen
 XMLHttpRequest FormData Blob URL Image Audio Event CustomEvent MutationObserver IntersectionObserver
-escape unescape btoa atob structuredClone queueMicrotask getComputedStyle matchMedia
-cancelAnimationFrame DOMParser TextDecoder TextEncoder AbortController Notification
-WebSocket Worker Intl Uint8Array Int32Array Float64Array ArrayBuffer DataView
+escape unescape btoa atob getComputedStyle matchMedia
+cancelAnimationFrame DOMParser TextDecoder TextEncoder Notification
+WebSocket Worker Uint8Array Int32Array Float64Array ArrayBuffer DataView
 """.split())
+# structuredClone, queueMicrotask, AbortController and Intl are NOT in the list: the PS5 browser
+# does not have them, and listing them here meant a call to one passed the gate and threw on the
+# console. Nothing in the page uses them today; a future use should fail here, not there.
 
 
 def check_calls(src, base_line):
@@ -138,7 +141,6 @@ def check_calls(src, base_line):
     defined |= set(re.findall(r"\bvar\s+([A-Za-z_$][\w$]*)", code))
     # `var a=1, b=function(){}` and `X.y = function` style
     defined |= set(re.findall(r"[,{]\s*([A-Za-z_$][\w$]*)\s*=\s*function", code))
-    defined |= set(re.findall(r"\bfunction\s*\(([^)]*)\)", code and "" or ""))  # no-op, params below
     for params in re.findall(r"\bfunction\b[^(]*\(([^)]*)\)", code):
         for p in params.split(","):
             p = p.strip()
@@ -156,15 +158,89 @@ def check_calls(src, base_line):
     return problems
 
 
+def code_only(src):
+    """`src` with every comment, string, template and regex literal blanked to spaces (newlines
+    kept, so line numbers survive). The same state machine as scan_strings, because the regex
+    stripping in check_calls loses its place on a string that contains an escaped quote followed
+    by an apostrophe - and a rule that fires on text inside a string stops a build for nothing."""
+    out = []
+    i, n = 0, len(src)
+    state, quote, prev_sig = "code", "", ""
+    templates = []
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "/" and nxt == "/":
+                state = "line_comment"; out.append("  "); i += 2; continue
+            if c == "/" and nxt == "*":
+                state = "block_comment"; out.append("  "); i += 2; continue
+            if c == "/" and prev_sig in "(,=:[!&|?{};+-*%~^<>":
+                state = "regex"; out.append(" "); i += 1; continue
+            if c in "'\"":
+                state = "string"; quote = c; out.append(" "); i += 1; continue
+            if c == "`":
+                state = "template"; templates.append(i); out.append(" "); i += 1; continue
+            if not c.isspace():
+                prev_sig = c
+            out.append(c); i += 1; continue
+        if state == "line_comment":
+            if c == "\n":
+                state = "code"
+            out.append(c if c == "\n" else " "); i += 1; continue
+        if state == "block_comment":
+            if c == "*" and nxt == "/":
+                state = "code"; out.append("  "); i += 2; continue
+            out.append(c if c == "\n" else " "); i += 1; continue
+        if state == "regex":
+            if c == "\\":
+                out.append("  "); i += 2; continue
+            if c in "\n/":
+                state = "code"
+            out.append(c if c == "\n" else " "); i += 1; continue
+        if state == "template":
+            if c == "\\":
+                out.append("  "); i += 2; continue
+            if c == "`":
+                state = "code"
+            out.append(c if c == "\n" else " "); i += 1; continue
+        if state == "string":
+            if c == "\\":
+                out.append("  "); i += 2; continue
+            if c == "\n" or c == quote:
+                state = "code"
+            out.append(c if c == "\n" else " "); i += 1; continue
+    return "".join(out), templates
+
+
+# The page runs in the PS5's WebKit, which is ES5 plus a few named extras (Promise, fetch, Set).
+# node --check accepts ES2020, so an arrow function or a template literal parsed clean here and
+# blanked the app on the console. These are the post-ES5 forms a generated edit actually
+# produces; each is matched only in code, never in a string or a comment.
+ES5_RULES = (
+    (r"=>", "an arrow function (=>) - write function(){}"),
+    (r"\b(let|const)\s+[A-Za-z_$]", "let/const - use var"),
+    (r"\basync\s+function\b", "async function - use Promise.then()"),
+    (r"\bawait\b", "await - use Promise.then()"),
+    (r"\bclass\s+[A-Za-z_$][\w$]*\s*(\{|extends\b)", "a class declaration - use function + prototype"),
+    (r"\bfunction\s*\*|\byield\b", "a generator - not available"),
+)
+
+
 def check_ps5_isms(src, base_line):
     """Things the PS5's browser does not do, whatever the parser thinks."""
     out = []
-    code = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
-    code = re.sub(r"(^|[^:])//[^\n]*", lambda m: m.group(1), code)
+    code, templates = code_only(src)
     for m in re.finditer(r"classList\.toggle\s*\([^),]*,", code):
         out.append((base_line + code.count("\n", 0, m.start()),
                     "classList.toggle(name, force) - the second argument is not supported; "
                     "use add()/remove()"))
+    for pos in templates:
+        out.append((base_line + src.count("\n", 0, pos),
+                    "a template literal (`...`) - the PS5 browser does not parse it; use \"\" + concatenation"))
+    for pat, why in ES5_RULES:
+        for m in re.finditer(pat, code):
+            out.append((base_line + code.count("\n", 0, m.start()), why))
     return out
 
 

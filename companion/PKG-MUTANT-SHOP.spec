@@ -18,21 +18,32 @@ _HERE = os.path.dirname(os.path.abspath(SPEC))
 _ROOT = os.path.dirname(_HERE)
 
 
-def _gate(script, fatal):
+def _gate(script, fatal, args=()):
     path = os.path.join(_ROOT, "tools", script)
     if not os.path.exists(path):
+        # A missing gate is a build with one less guard, not a build that is fine. Say so loudly.
+        if fatal:
+            raise SystemExit("ABORT: tools/%s is missing - not building without its check." % script)
         print("spec: %s missing - skipping" % script)
         return
-    rc = subprocess.call([sys.executable, path], cwd=_ROOT)
+    rc = subprocess.call([sys.executable, path] + list(args), cwd=_ROOT)
     if rc != 0:
         if fatal:
-            raise SystemExit("ABORT: %s failed (rc=%d) - not building an exe with a broken UI."
+            raise SystemExit("ABORT: %s failed (rc=%d) - not building an exe that ships this."
                              % (script, rc))
         print("spec: warning - %s returned %d" % (script, rc))
 
 
-_gate("stamp_version.py", False)   # keep APP_VERSION in step with companion/server.py VERSION
-_gate("check_web.py", True)        # refuse to package a UI whose script will not parse
+# EVERY GATE IS FATAL. stamp_version used to be a warning, so a version drift scrolled past in
+# the middle of a long build and two artifacts labelled the same number differed. The three
+# gates below it were wired into NO build at all - test_storage_tiles guards a regression that
+# came back once, and the i18n and message gates were cited as passing by the changelog while
+# nothing ran them. A gate that only runs when someone remembers is not a gate.
+_gate("stamp_version.py", True)            # APP_VERSION / SHOP_VERSION / homebrew.js == server.py VERSION
+_gate("check_web.py", True)                # refuse to package a UI whose script will not parse
+_gate("i18n_report.py", True, ["--check"])  # every language covers every key the app uses
+_gate("message_report.py", True, ["--check"])  # every user-facing sentence is on house style
+_gate("test_storage_tiles.py", True)       # the M.2 duplicate tile must not come back a third time
 
 
 a = Analysis(
@@ -44,7 +55,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # numpy is pulled in by Pillow's hook and imported by nothing here: 26.5 MB unpacked into
+    # %TEMP% on EVERY launch of the one-file exe (55 MB total, half of it numpy). Pillow does
+    # not need it for anything the companion does (open, resize, save WebP).
+    excludes=['numpy'],
     noarchive=False,
     optimize=0,
 )
@@ -60,7 +74,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # upx=True only did something on a machine with UPX installed - a second machine-dependent
+    # variable in an exe whose bytes should depend on the source alone. UPX is not a build
+    # dependency of this project, so the flag is off everywhere.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

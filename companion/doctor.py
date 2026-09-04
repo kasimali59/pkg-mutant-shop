@@ -9,6 +9,18 @@ One command to check everything is wired before (and during) the first real inst
                                          # (companion server must be running in another window)
 
 Direct checks need nothing running. The --install test drives the companion API.
+
+WHAT THE CONSOLE SIDE IS, TODAY. This used to probe :12800 for a "DPI v2 host" and tell the user
+to start Elf Arsenal / ps5-dpi-v2 / etaHEN when nothing answered. None of that ships any more, and
+the engine REQUIRES that port to be closed - so the first console line was red on every correctly
+configured console, and named the software we removed. The engine as it is:
+
+    the shop ELF        :8710   /api/health answers with on_console:true, version, engine_ready
+    Payload Manager     :8084   spawns pms-installer.elf for every install; engine_ready means this
+    ShadowMountPlus     loopback-only on the console; the PC cannot probe it. The shop reports it
+                                in /api/health as "shadowmount" (true/false/null = unknown)
+    FTP                 optional. 2121 (ftpsrv) or 1337 - probe both, never assume
+    the companion       :8710 on THIS PC
 """
 import json
 import socket
@@ -49,15 +61,19 @@ def diagnostics(cfg):
     print(" PKG MUTANT SHOP - doctor")
     print("=" * 60)
 
-    ip = cfg.get("ps5_ip")
-    dpi = cfg["dpi"]["port_v2"]
-    ftp = cfg.get("ftp", {}).get("port", 2121)
-    cport = cfg["companion"]["port"]
+    cons = cfg.get("consoles") or []
+    ip = (cons[0].get("ip") if cons and isinstance(cons[0], dict) else None) or cfg.get("ps5_ip")
+    # .get() all the way down: an older config.json may carry a "dpi" section with none of these
+    # keys, and a KeyError here used to be the whole output of the doctor.
+    pl_port = int((cfg.get("dpi") or {}).get("pldmgr_port", 8084) or 8084)
+    ftp = int((cfg.get("ftp") or {}).get("port", 2121) or 2121)
+    shop_port = int((cfg.get("console") or {}).get("shop_port", 8710) or 8710)
+    cport = int((cfg.get("companion") or {}).get("port", 8710) or 8710)
 
     print("\n- Config")
-    line("OK" if ip else "WARN", "PS5 IP", ip or "(not set — edit config.json)")
-    line("OK", "DPI v2 port", str(dpi))
-    line("OK", "FTP port", str(ftp))
+    line("OK" if ip else "WARN", "PS5 IP", ip or "(not set - edit config.json or let the app discover it)")
+    line("OK", "Payload Manager port", str(pl_port))
+    line("OK", "FTP port (configured)", str(ftp))
     line("OK", "This PC (LAN)", lan_ip())
 
     print("\n- Companion")
@@ -68,20 +84,53 @@ def diagnostics(cfg):
         server_up = True
         line("OK", "server running", "v%s on :%d" % (h.get("version"), cport))
     except Exception:
-        line("WARN", "server running", "not detected — run: python server.py")
+        line("WARN", "server running", "not detected - run: python server.py")
 
-    print("\n- Console reachability (%s)" % (ip or "?"))
+    print("\n- Console (%s)" % (ip or "?"))
     if ip:
-        dpi_ok = tcp(ip, dpi)
-        line("OK" if dpi_ok else "FAIL", "DPI v2 :%d" % dpi,
-             "reachable" if dpi_ok else "no route — is a DPI v2 host running? (Elf Arsenal / ps5-dpi-v2 / etaHEN)")
-        # Try both known FTP ports, not just the configured one. etaHEN serves FTP on 1337 and
-        # leaves 2121 closed, so a doctor that only probed the config said "FTP: no route" on a
-        # perfectly healthy console.
-        live_ftp = next((p for p in dict.fromkeys((ftp, 1337, 2121)) if tcp(ip, p)), 0)
-        line("OK" if live_ftp else "WARN", "FTP :%d" % (live_ftp or ftp),
-             ("reachable" + ("" if live_ftp == ftp else "  (config says :%d)" % ftp))
-             if live_ftp else "no route on 2121 or 1337 — needed for install-detection")
+        # THE SHOP ELF FIRST. It is what we ship, and its health answer is the honest source for
+        # everything below it - engine readiness, ShadowMount, which FTP is live.
+        health = None
+        if tcp(ip, shop_port, 2.5):
+            try:
+                health = api("http://%s:%d" % (ip, shop_port), "/api/health")
+            except Exception:
+                health = None
+        if health and health.get("on_console"):
+            line("OK", "shop ELF :%d" % shop_port,
+                 "v%s built %s" % (health.get("version"), health.get("built")))
+        elif health:
+            line("FAIL", "shop ELF :%d" % shop_port,
+                 "something answers on :%d but it is not the console - is this address a PC?"
+                 % shop_port)
+        else:
+            line("FAIL", "shop ELF :%d" % shop_port,
+                 "not answering - load PKG-MUTANT-SHOP.elf from Payload Manager")
+
+        pl_up = tcp(ip, pl_port)
+        line("OK" if pl_up else "FAIL", "Payload Manager :%d" % pl_port,
+             "reachable - installs can be spawned" if pl_up
+             else "no route - installs cannot start until Payload Manager is running")
+        if health is not None:
+            ready = bool(health.get("engine_ready"))
+            line("OK" if ready else "FAIL", "engine ready",
+                 "%s (engine=%s)" % ("yes" if ready else "no", health.get("engine")))
+            # ShadowMount binds loopback on the console; only the console can see it. null means
+            # the ELF could not tell, which is not the same as "not running".
+            smp = health.get("shadowmount")
+            line("OK" if smp else ("WARN" if smp is None else "FAIL"), "ShadowMountPlus",
+                 "running (reported by the shop)" if smp
+                 else ("unknown - the shop did not say" if smp is None
+                       else "not running - PS5 backups will not mount"))
+        # FTP is optional: nothing in the install lane needs it any more. Probe both known ports
+        # rather than only the configured one - which FTP is up depends on which payload is loaded.
+        live_ftp = next((p for p in dict.fromkeys((ftp, 2121, 1337)) if tcp(ip, p)), 0)
+        if live_ftp:
+            line("OK", "FTP :%d" % live_ftp,
+                 "reachable" + ("" if live_ftp == ftp else "  (config says :%d)" % ftp)
+                 + " - optional, used by deploy.py elf")
+        else:
+            line("WARN", "FTP", "none on 2121 or 1337 - optional; only deploy.py elf needs it")
     else:
         line("WARN", "console", "set ps5_ip first")
 
@@ -89,7 +138,7 @@ def diagnostics(cfg):
     lib = Library(cfg)
     lib.scan()
     if lib.is_empty:
-        line("WARN", "titles", "0 found — point library.local_paths at your PKG folder")
+        line("WARN", "titles", "0 found - point library.local_paths at your PKG folder")
     else:
         line("OK", "titles", "%d game(s)" % len(lib.games))
         for g in lib.games[:12]:
@@ -104,7 +153,7 @@ def diagnostics(cfg):
 
 
 def do_install(cfg, title_id):
-    base = "http://127.0.0.1:%d" % cfg["companion"]["port"]
+    base = "http://127.0.0.1:%d" % int((cfg.get("companion") or {}).get("port", 8710) or 8710)
     try:
         lib = api(base, "/api/library")
     except Exception:
@@ -121,14 +170,16 @@ def do_install(cfg, title_id):
 
     item = game["base"][0]
     print("\nInstalling: %s  (%s)" % (game["name"], title_id))
+    # No "drive" field: the PKG destination is the CONSOLE's own setting and no API selects it.
+    # The route ignored the field, and sending it taught readers that it meant something.
     r = api(base, "/api/install", "POST", {
         "install_key": item["install_key"], "title_id": title_id,
-        "name": game["name"], "kind": "base", "drive": "internal"})
+        "name": game["name"], "kind": "base"})
     if r.get("error"):
-        print(R + "Install rejected: %s" % r["error"] + X)
+        print(R + "Install rejected: %s" % (r.get("message") or r["error"]) + X)
         return
     job = r["ids"][0]
-    print("job %s  source %s  url %s\n" % (job, r.get("source"), r["url"]))
+    print("job %s  source %s  url %s\n" % (job, r.get("source"), r.get("url")))
 
     last = None
     while True:

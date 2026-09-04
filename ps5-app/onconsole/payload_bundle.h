@@ -35,22 +35,21 @@ PB_INCBIN(pb_installer,   "payloads/pms-installer.elf")
          exactly what wedges installs), and treat a bound port as "already running".
       0  ship the file but never auto-start it.
 
-   Elf Arsenal is deliberately NO LONGER BUNDLED. It and etaHEN both serve DPI v2 on :12800 and
-   cannot coexist - whoever binds first keeps it, and etaHEN retries forever, so running both left
-   the console spewing "DPIv2 error: bind | Address already in use" notifications and a 2 MB log.
-   etaHEN is the better host anyway: it validates a URL before queueing (so a bad one leaves no
-   parked bgft job), reports the real SCE_* error, and brings no dashboard-tile auto-installer that
-   crashes SceShellCore's job queue. Arsenal also dragged in nanodns, garlic and ftpsrv.
-
-   etaHEN is carried but NEVER auto-started (port 0). It ships so the user always has the build we
-   tested against and Payload Manager can offer it, but starting it is their decision, not ours.
-
-   This was briefly port 12800 and that was a mistake. etaHEN patches the kernel/ShellCore, and this
-   console's own boot chain (pldmgr -> kstuff_lite -> shadowmountplus, per the user's autoload.txt,
-   which lists etaHEN-2.6B.bin nowhere) deliberately does not run it. Auto-starting it put a second
-   kernel-touching daemon next to kstuff_lite that had never been part of a working boot - and the
-   first fake-signed PS4 title launched afterwards panicked the console. A payload that changes the
-   jailbreak layer is the user's call to make, never a side effect of installing our app. */
+   Neither Elf Arsenal nor etaHEN is bundled, and neither is the install host. Installs go through
+   OUR spawned installer (pms-installer, below), which needs nothing to be running beforehand
+   except Payload Manager. The history, kept because it explains the shape of this table:
+   Arsenal and etaHEN both served DPI v2 on :12800 and could not coexist - whoever bound first
+   kept it and the other retried forever, spewing "bind | Address already in use" notifications
+   and a 2 MB log; Arsenal also dragged in nanodns, garlic and ftpsrv. etaHEN was then carried for
+   a while at port 0, and briefly at 12800, which was a mistake: it patches the kernel/ShellCore,
+   this console's own boot chain (pldmgr -> kstuff_lite -> shadowmountplus, per the user's
+   autoload.txt) deliberately does not run it, and auto-starting it put a second kernel-touching
+   daemon next to kstuff_lite that had never been part of a working boot - the first fake-signed
+   PS4 title launched afterwards panicked the console. A payload that changes the jailbreak layer
+   is the user's call to make, never a side effect of installing our app. Since 3.33.0 it is not
+   embedded at all (see above), so there is no etaHEN entry in the table and nothing of ours can
+   start it by accident. server.c's REST_STOP still names it, only to stand down a copy the user
+   runs before rest mode. */
 typedef struct { const char *name; const char *filename; int port;
                  const unsigned char *data; const unsigned char *end; } pb_entry_t;
 

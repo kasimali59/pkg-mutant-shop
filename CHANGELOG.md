@@ -9,6 +9,219 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.61.0] - 2026-09-04 - "The audit pass: 262 findings, and the sync that never converged" `[VERIFIED]`
+
+### Where this release came from
+
+A read-only audit of 3.60.0, end to end: the companion, the console payload, the page, the tools,
+the build and every document. Fifteen readers, one subsystem and one lens each; then an
+adversarial verifier per finding told to assume it was wrong and re-read the cited lines. 339 raw
+findings became **262 confirmed, 12 refuted, 65 left unverified** when a usage limit cut the
+verification short. The report is the audit dossier; this entry is what was done about it.
+
+Then a fix pass on four file lanes (companion, console, page, tools+docs), each change reviewed
+adversarially against a git baseline and re-checked by hand. **This release also starts the
+repository's history**: commit `4fe2409` is byte-identical 3.60.0, so every line below is a
+`git diff` away. A folder copy of 3.60.0 and its shipped exe/elf sits in `backups/` beside the repo.
+
+Nothing here changes what the app does. The install lane came through the audit clean and was
+not touched where it matters - see "What was deliberately left alone" at the end.
+
+### The cheat library re-sent 2,092 files every fifteen minutes
+
+Every `[cheats] console is missing 2092 file(s)` line in pms.log since 25 August was the same
+arithmetic. The console's directory listing was capped at **96,000 bytes** - about 1,265 entries -
+and the three big cheat folders are larger than that:
+
+| folder | on the PC | console reported | re-sent |
+|---|---|---|---|
+| json | 1994 | 1265 | 729 |
+| mc4 | 2142 | 1262 | 880 |
+| shn | 1763 | 1280 | 483 |
+
+729 + 880 + 483 = **2092**. The four small folders (376, 369, 369, 9) reported correctly. The
+console said so honestly - `"truncated":true` on every capped page - and the PC never read the
+flag, so it computed "missing" from a partial listing, re-sent files that were already there, and
+did it again fifteen minutes later. About 30 MB and 45-90 s of console I/O per pass, on the
+single-threaded accept loop the UI and installs share.
+
+Both halves are fixed. The console lists into a 1 MiB heap buffer that doubles to 8 MiB before it
+will admit truncation. The PC honours `truncated`: a folder it cannot list in full falls back to
+the FTP listing when there is one, and otherwise is reported as unknown and **nothing is sent to
+it**. The 15-minute thread and `POST /api/cheats/sync` are mutually exclusive now.
+
+The library itself lost its dead weight. `xml/`, `xml_orbis/` and `xml_prospero/` were 747 files
+the console writes to disk on every boot and never reads (368 of 369 in each are byte-identical to
+`patches/`; the three that were not are copied into `patches/` by the packer). The 706
+`<name>.mc4.xml` twins in `mc4/` are unreadable by the engine and produced phantom versions like
+`01.00.mc4` in the version list. The pack went from **7,022 files / 32.2 MB to 5,569 / 27.2 MB**,
+and the companion syncs the same four folders the console reads.
+
+### Four protective holds that raised instead of holding
+
+`Queue._pause_pending` was decorated `@staticmethod` and declared `self`. Its four callers - no
+verdict from the installer, an unknown host, a wedged hand-off, and the console being switched
+off with jobs queued - each passed two arguments to a function that wanted three. Every one of
+those safety paths raised `TypeError`, the worker's catch-all painted the job red with "This one
+stopped unexpectedly", and the rest of the queue marched into the same failure. The behaviour
+described in 3.17-3.29 had never once run. The decorator is gone; the four holds now hold, and
+Start queue releases them.
+
+### The install lane, tightened without being changed
+
+- **A stopwatch no longer overrides the evidence.** The promoting loop's 600 s cap sat below the
+  1,800 s "row has not moved" rule, so that rule was dead code and a large title still copying
+  after ten minutes ended as `stale_install` with advice to delete it. The cap is 2,100 s; when it
+  is reached with no evidence either way the job ends `install_unconfirmed` and says the console
+  may still be installing. The acceptance conditions are byte-for-byte what they were.
+- The loop's heavy reads (a full app.db pull plus four folder scans, ~40 requests per 3 s tick)
+  run every 15 s; the bgft row stays on the 3 s cadence.
+- `install_spawn` pops its 120 s debounce entry on every early return, so the retry-once and a
+  Start pressed on a held job are no longer refused by our own debounce with the real cause lost.
+- Cancel is read between phases, not only at the top of `_run`; a cancel during the mount pull
+  lane asks the console to stop the download.
+- **The verdict now carries a token.** The shop writes a per-request token as line 3 of
+  `installer-req.txt`; `pms-installer.elf` echoes it into `installer-res.json`, and a verdict
+  without this request's token is ignored, so a late result from an installer that was still
+  pre-allocating when the lane gave up can no longer be read as the next job's. The installer
+  consumes the request file the moment it has read it, so a copy launched by hand from Payload
+  Manager installs nothing. Both ends keep every existing field and the file names.
+- The spawn latch's check-then-set is one step under a mutex; `pm_get` counts only an HTTP 2xx (or
+  the loader's `OK`) as a spawn and waits 10 s, not 30, on the accept thread.
+- Every hand-off and every verdict is one dated line in pms.log now, with the task id.
+
+### Console safety
+
+- **The move lane wrote into a watch folder under its final name.** `move_thread` copied straight
+  to `<drive>/homebrew/<name>`, which is the partial-mount trap recorded in 3.24 on a different
+  lane. It copies to `.part`, keeps the size comparison, and renames. `/api/move` accepts only a
+  backup under the homebrew roots and checks the destination drive is really mounted (the same
+  `st_dev` test `/api/devices` uses) before copying.
+- Rest mode refuses - unless forced - while a spawn hand-off is live, a move is running, or an
+  upload is in flight, not only during a download. The PC relay stops answering "safe to rest" on
+  a timeout: only a connection the console closed after acknowledging counts, and it refuses while
+  our own queue has a running task.
+- `restart_shadowmount()` asked `running_title()` for `title_id`; that function returns `titleId`.
+  The busy guard could never fire, so ShadowMount could be reloaded under a game running off a
+  backup. One key name.
+- Delete-backup uses `lstat` and never follows a symlink; a container that is still mounted is
+  reported as staying playable until the console restarts, which is what happens.
+- Cheat engine: the expect-gate ran only when the on and off byte strings were the same length -
+  549 real entries were written blind. It now reads `max(on, off)` bytes and gates every non-forced
+  write. The patch undo file was truncated on every Apply; it is created once (per installed
+  version) and appended, so a second Apply cannot destroy the originals. A partly applied patch says
+  so. `hex2bytes` refuses an odd digit count instead of dropping a nibble. Cheat lines up to 64 KiB
+  and entries up to 4,096 bytes parse instead of vanishing; a mod with dropped entries is refused
+  rather than reported ON.
+
+### The console API
+
+- **Uploads no longer freeze the console.** `/api/fs/write` runs on its own thread with the socket,
+  exactly like `/pkgfile/`, with a 120 s receive timeout instead of the accept loop's 8 s - so a
+  brief PC stall no longer aborts a 90 GB push, and the UI keeps answering during it. A body with
+  no Content-Length is refused instead of becoming an empty file.
+- Any page in any browser on the LAN could fire a state-changing GET with no Origin and no
+  Referer. Both servers now also refuse `Sec-Fetch-Mode: no-cors|navigate` and image/script/frame
+  destinations on state-changing routes only; absent headers stay allowed, and the app's own
+  `fetch()` calls are untouched. `host_is_private` consumes the whole token, so
+  `10.0.0.1.attacker.example` is a name, not a private address.
+- `/api/fs/delete` and `/api/fs/mkdir` are bounded to the roots the file API already trusts;
+  `/api/engine/lprobe` and `/api/engine/install-url` sit behind the diagnostics flag. The notify
+  icon probe no longer sleeps on the accept loop. Cheat routes parse a document once per request.
+- `appinst_once()` runs under a mutex. `sceAppInstUtilInitialize` is still called exactly once,
+  lazily, and `sceAppInstUtilAppInstallPkg` still has exactly its two call sites.
+
+### The companion
+
+- The page is sent gzipped with an ETag and answers 304, and static assets carry a week of cache;
+  `index.html` is compressed once per build and served from memory.
+- A 300 s idle timeout reaps connections that never send a request line; the socket a package
+  streams over is explicitly exempt. Listen backlog 64. HEAD answers what GET would.
+- `_origin_ok` gained the same Sec-Fetch rule, applies to the state-changing GET relays too, and
+  accepts the page's own hostname - so opening the PC by name no longer gets 403 on every POST.
+- `config.example.json` is a template again, not a live config layer; a saved `shadowmount.port`
+  of 9021 (elfldr) is read as 10101 in memory. `/api/engine/state` says `spawn`, which is the
+  only lane there is.
+- `helper_status()` is memoised for 5 s (its comment always said so), `console_usb_packages()`
+  for 20 s, missing console icons for 10 minutes; `federation_self()` asks for the LAN address
+  once per call, not once per game. A peer that re-identifies drops its old entry.
+- `installed.json` is written only when it changes, under the lock. pms.log rotates at write time,
+  not only at start. Handler exceptions log one line and answer 500 JSON instead of an empty reply.
+- At boot the frozen exe sweeps its own orphaned `_MEI*` extraction folders (170 of them, 1.2 GB,
+  were in %TEMP%); only folders carrying our page and older than a day, never the live one.
+- A backup file name outside latin-1 no longer aborts `/library/<key>` before the first byte
+  (RFC 6266 `filename*`). `/api/hash` refuses files over 8 GiB instead of reading them on the
+  request thread.
+
+### The page
+
+- `api()` has a timeout (12 s default, longer where a route is known to be slow) and a non-2xx
+  answer reaches the caller as a refusal with the server's words. `refreshHealth` cannot pile up.
+- **The console page fails over.** When the PC companion misses three health polls in a row the
+  page repoints itself at the console's own API, says so in the pill, and keeps looking.
+- Toasts are set as text (never markup), stay 6.5 s for errors, dismiss on click, stack to five.
+  Peer names, library paths and format strings are escaped everywhere they reach `innerHTML`.
+- Save in Settings and a language change no longer push a second panel entry that froze grid
+  virtualisation and swallowed a Back press. A mod tile keeps its name after one toggle. The drive
+  picker re-reads free space when its list is stale or was the static fallback. Queue rows say
+  "PS5 decides the drive" for a package instead of printing `internal`, and the queue keeps polling
+  while the dock is open so installs started from another device appear.
+- `Open it on the TV` read `/http://10.0.0.99:8710`: the start-ellipsis on `.svc .v.ell` uses
+  `direction:rtl`, which moves a trailing slash to the visual front. The value is written into a
+  left-to-right span with an LRM guard. The Installing card explained the engine twice; it now
+  keeps the server's sentence.
+- The 29 keys used only through `tsub()` had never been translated into the eight newest
+  languages, and the gate could not see them. They are translated; the gate counts them.
+- Contrast (`--muted2` to 5.0:1), 44 px touch targets under a coarse pointer, reduced motion
+  covering every animation, focus moved into a panel on open and back on close, RTL mirroring for
+  the search glyph and chevrons, a sticky Settings header. "Running v1.05" became "Installed
+  v1.05"; the header pill says "ready to install" instead of engine jargon.
+
+### Tools, build and documents
+
+- `tools/i18n_report.py` counts `tsub()` and ternary keys. `tools/message_report.py` bans the
+  words its docstring promised (etaHEN, Elf Arsenal, DPI, :12800) and now sees server-side error
+  sentences: 438 messages checked, 0 off style. `tools/check_web.py` has real ES5 rules, not only
+  a parse. `tools/stamp_version.py` stamps three targets and refuses if one is missing.
+- The exe excludes numpy (Pillow never needed it): **26.8 MB to 15.6 MB**, and 26 MB less unpacked
+  per launch. The spec and `build-wsl.sh` run the i18n, message and storage-tile gates as fatal,
+  `build-wsl.sh` refuses to link a stale bundle, and the web bundle is an allow-list.
+- `tools/ready_check.py` no longer deletes a real-looking title id or writes into a watch folder,
+  and refuses to hand the console `127.0.0.1`. `tools/verify_console.py` clears the install latch
+  only when it is stale, and stages 5-7 are opt-in. `doctor.py` checks the engine that exists.
+- `deploy.py app` is retired (it pushed the whole 92 MB `ps5-app/` tree into ShadowMount's watch
+  folder). **`deploy.py elf` is the scripted console update**: FTP probe, `.part` upload to Payload
+  Manager's registered path, pre-quit busy checks, quit, reload, and a wait for the new version.
+  `register_tile.py --apply` refuses without an explicit flag.
+- `SETUP.md` is the one current runbook. README is rewritten to the truth; ARCHITECTURE, TOOLCHAIN,
+  ROADMAP, ROADMAP-OVERHAUL, BUILD-PS5-APP and SETUP-REMOTE carry dated superseded banners and
+  corrected sentences; the engine manual's sections marked current were re-read against the code.
+  `LICENSE` (GPL-3.0) and `THIRD-PARTY-NOTICES.md` exist. `config.example.json` mirrors
+  `DEFAULT_CONFIG`.
+
+### What was deliberately left alone
+
+- The install verdict conditions (`_bgft_before_ok`, following a live bgft job from a
+  `console_busy` hold, gating the retry-once on SCE codes). Each changes when a job is called done;
+  that is an owner decision, not a fix.
+- HTTP/1.1 keep-alive on the companion, moving the console's state-changing routes to POST, and
+  reflecting Origin instead of `*`: each needs the console page verified on hardware first.
+- The ~216 dictionary keys nothing uses (about 110 KB of the page): a cleanup, not a fix.
+- Bounding cheat writes to the game's image needs the module map the engine does not read.
+- Naming (Add-ons vs DLC, Installed vs MOUNT vs Mounted) and a confirmation before Re-send backup.
+
+### Verified
+
+`py_compile` on every Python file; `check_web` (node-parsed, ES5 rules); i18n 15 languages x 291
+live keys; message style 438/0; `test_storage_tiles`; `prospero-clang -Wall -fsyntax-only` on
+`server.c` and `installer_probe.c` - the same 7 pre-existing warnings as 3.60.0 and none new
+(two dead-declaration warnings went away). Install call-site counts, the `RUNNING` set, and the
+`/api/health` key set (plus one additive key, `config_path`) compared against the baseline. The
+ELF embeds the rebuilt `pms-installer.elf` (built `-g`) and the 3.61.0 page verbatim; the exe
+carries the same page.
+
+---
+
 ## [3.60.0] - 2026-09-02 - "Fifteen languages, and the panel says what it is" `[VERIFIED]`
 
 ### Fifteen languages, all complete

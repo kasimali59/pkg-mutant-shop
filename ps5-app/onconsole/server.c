@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.60.0"
+#define SHOP_VERSION "3.61.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the
@@ -332,10 +332,12 @@ static const char *install_error_text(unsigned rc) {
     return "The console refused it - nothing was installed";
 }
 
-/* Said three times, in three files, with three different second lines. Once, here. */
+/* Said three times, in three files, with three different second lines. Once, here.
+   The section on a game's panel is labelled "Mods & Patches" (gp_sec_mods_patches in
+   web/index.html); this used to send the user looking for a section called "Cheats". */
 static void notify_cheats_filed(int filed) {
     if (filed <= 0) return;
-    notifyf("Added %d cheat file%s\nOpen any game in the shop and look under Cheats",
+    notifyf("Added %d cheat file%s\nOpen any game in the shop and look under Mods & Patches",
             filed, filed == 1 ? "" : "s");
 }
 
@@ -407,6 +409,12 @@ static void cheat_result_toast(const char *what, int want, int rc,
         else
             notifyf("%s not applied\nThe game's code does not match this cheat file - it is "
                     "probably built for another version. Nothing was written.", what);
+    } else if (rc == -4) {
+        /* Refused whole: part of this mod could not be read out of its file (an entry larger than
+           the engine holds, or malformed hex). Writing the rest would leave a multi-part hook half
+           installed - the classic way to hang a game - so nothing was written. */
+        notifyf("%s could not be applied\nPart of this cheat is too large or unreadable for the "
+                "engine, so none of it was written", what);
     } else {
         /* rc between -1 and -99: the early returns in cheat_apply_mod (unreadable file, no such
            mod, no memory entries). The write loop never ran, so "nothing was written" is certain
@@ -1081,10 +1089,14 @@ static void titles_cb(void *ctx, int ncol, char **v) {
     title_t *t = &c->rows[c->n];
     memset(t, 0, sizeof(*t));
     snprintf(t->tid, sizeof(t->tid), "%s", tid);
-    snprintf(t->cid, sizeof(t->cid), "%s", v[c->ci_cid]);
+    /* sq_col_index() answers -1 for a column that is not in this firmware's CREATE TABLE, and
+       read_console_titles only insists on titleId/titleName/AppInfoJson. These three were indexed
+       unguarded, so a schema that drops or renames one of them would have read v[-1] - the word
+       before the calloc'd array - and handed it to snprintf. Absent means empty, not garbage. */
+    snprintf(t->cid, sizeof(t->cid), "%s", c->ci_cid >= 0 ? v[c->ci_cid] : "");
     snprintf(t->name, sizeof(t->name), "%s", v[c->ci_name][0] ? v[c->ci_name] : tid);
-    t->size = strtoll(v[c->ci_size], NULL, 10);
-    t->loc  = atoi(v[c->ci_loc]);
+    t->size = c->ci_size >= 0 ? strtoll(v[c->ci_size], NULL, 10) : 0;
+    t->loc  = c->ci_loc  >= 0 ? atoi(v[c->ci_loc]) : 0;
     appinfo_version(v[c->ci_json], t->ver, sizeof(t->ver));
     c->n++;
 }
@@ -1191,8 +1203,13 @@ static int find_backup_for_tid(const char *want_tid, char *out, size_t outsz, lo
                all and is identified by what is inside it. Filtering on the name alone made a folder
                backup invisible here - the endpoint answered "nothing to delete" while the tree sat
                in the watch folder and re-mounted on the next scan. */
+            /* lstat, and a symlink is never a candidate. remove_tree() lstat()s its CHILDREN but
+               this is where its root is chosen, and stat() resolved a link named like a dump to
+               wherever it pointed - so a link inside a watch folder passed under_homebrew_root by
+               its own name and the delete emptied the target's contents instead. */
             struct stat cst;
-            if (stat(cand, &cst) != 0) continue;
+            if (lstat(cand, &cst) != 0) continue;
+            if (S_ISLNK(cst.st_mode)) continue;
             if (!is_backup_ext(nm)) {
                 if (!S_ISDIR(cst.st_mode)) continue;
                 if (!looks_like_game_folder(cand)) continue;
@@ -1220,7 +1237,8 @@ static int find_backup_for_tid(const char *want_tid, char *out, size_t outsz, lo
             char cand[512];
             snprintf(cand, sizeof(cand), "%s/%s", DRIVE_ROOTS[r], nm);
             struct stat cst;
-            if (stat(cand, &cst) != 0 || !S_ISREG(cst.st_mode)) continue;
+            /* lstat: S_ISREG on a link's TARGET would let a link at a drive root pass as a file. */
+            if (lstat(cand, &cst) != 0 || !S_ISREG(cst.st_mode)) continue;
             snprintf(out, outsz, "%s", cand);
             if (size_out) *size_out = (long long)cst.st_size;
             if (is_dir_out) *is_dir_out = 0;
@@ -2366,15 +2384,14 @@ static void *dl_worker(void *arg) {
     rewrite_for_install(g_job.path, fixed, sizeof(fixed));
     char icid[64] = {0};
 
-    /* A LADDER, not one call — this is what actually installs on 12.70.
-       sceAppInstUtilInstallByPackage is the "real" installer but it is unreliable from any
-       process (it answers 0x80B2116F here, and Elf Arsenal falls back for the same reason on the
-       same URLs). sceAppInstUtilAppInstallPkg is the call that DOES work from this process — it
-       is what installs our own dashboard tile — and it is how this engine installed DARK SOULS
-       (7.27 GB) and MARVEL (4.05 GB) end to end. Try the first, fall back to the second, then go
-       and CHECK: the title must actually appear in the console's own title list. rc alone is not
-       proof, and neither is a browsable /user/app — game data lands in managed storage, which is
-       exactly why the earlier "it only writes metadata" reading of this call was wrong. */
+    /* ONE call, in-process, and this half of dl_worker is a DIAGNOSTIC now (install-url sits
+       behind allow-diagnostics). The "ladder" this comment used to describe - InstallByPackage,
+       then fall back to AppInstallPkg - no longer exists here and must not come back: the
+       fallback is what registered games with no data behind them (see below). In-process
+       InstallByPackage answers 0x80B2116F for a base game on this firmware; the product's real
+       lane is the SPAWNED installer (/api/engine/install-spawn, spawn_install_wait). What is left
+       here: make the call, then go and CHECK - the title must appear in the console's own title
+       list AND have its app.pkg, because rc alone is not proof. */
     int used = 0;
     const char *via = "InstallByPackage";
     int irc = install_full(fixed, 0, icid, sizeof(icid), &used);
@@ -2511,8 +2528,9 @@ static void serve_static(int fd, const char *path) {
 /* PC companion URL, pushed here by the companion (server.py) whenever it's running + can reach the PS5.
    The shop UI reads /api/companion and upgrades to it → PS5 auto-finds the PC, both directions. */
 static char g_pc_url[128] = {0};
-static int install_pkg(const char *install_path);            /* metadata-only (tile) — defined below */
-static int install_pkg_full(const char *pkg_path, int cred_pid); /* full data install (games) — defined below */
+/* install_pkg() / install_pkg_full() used to be declared here "defined below". Neither was ever
+   defined or called; the tile goes through install_pkg_local() and games through the spawned
+   installer. Gone, so nobody links against an API that does not exist. */
 /* InstallByPackage from THIS process (the real data install) */
 static int install_by_package_inproc(const char *uri, char *cid_out, size_t cid_sz);
 static int install_by_package_inproc_ex(const char *uri, char *cid_out, size_t cid_sz,
@@ -2525,8 +2543,9 @@ static int mem_read(pid_t pid, intptr_t addr, void *buf, size_t len);
 static int mem_write(pid_t pid, intptr_t addr, const void *buf, size_t len);
 static int hex2bytes(const char *hex, unsigned char *out, size_t cap);
 static int running_game(char *title, size_t tsz, pid_t *out_pid, intptr_t *out_base);
-static const char *cheat_mod_state(const char *json, int index, pid_t pid, intptr_t base,
-                                   int non_json);
+static const char *cheat_mod_state_blk(const char *json, const char *blk, const char *end,
+                                       pid_t pid, intptr_t base, int non_json);
+static size_t patch_unescape(const char *in, size_t len, char *out, size_t outsz);
 /* Our own library. The ELF creates it and migrates whatever it finds in the old CheatRunner
    location, so the app owns everything it needs under one directory. */
 #define SHOP_DATA_DIR     "/data/pkg-mutant-shop"
@@ -2538,10 +2557,15 @@ static const char *cheat_mod_state(const char *json, int index, pid_t pid, intpt
 #define LEGACY_CHEAT_ROOT "/data/cheatrunner/cheats"
 #define LEGACY_PATCH_DIR  "/data/cheatrunner/patches"
 /* Sized from the real library, not guessed: across a 400-file sample the largest file held
-   74 mods, the largest mod 41 entries, and the largest single patch 520 bytes. */
+   74 mods, the largest mod 41 entries, and the largest single patch 520 bytes.
+   CHEAT_MAX_BYTES was 1024. Measured over the WHOLE shipped library that quietly dropped 5 JSON
+   entries and 7 .shn cheatlines (1-4 KB code caves, e.g. CUSA01875_01.01 "Max Items"): the rest
+   of the mod was written and the toast said ON with the hook missing a piece. 4096 holds every
+   entry except four ~470 KB caves nobody should write blind; those, and anything malformed, are
+   now COUNTED (parse_mod_entries_ex) and refuse the whole mod instead of applying part of it. */
 #define CHEAT_MAX_MODS    256
 #define CHEAT_MAX_ENTRIES 128
-#define CHEAT_MAX_BYTES   1024
+#define CHEAT_MAX_BYTES   4096
 typedef struct {
     unsigned long long offset;
     unsigned char on[CHEAT_MAX_BYTES];  int on_len;
@@ -2550,9 +2574,18 @@ typedef struct {
 } cheat_entry_t;
 /* Canonical x86-64 user range: outside this we risk kernel space or PS5 MMIO. */
 #define ADDR_OK(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
-/* An entry array is now ~265 KB, far too much for a thread stack — always heap-allocate. */
+/* An entry array is now ~1 MB, far too much for a thread stack — always heap-allocate. */
 #define CHEAT_ENTS_BYTES ((size_t)CHEAT_MAX_ENTRIES * sizeof(cheat_entry_t))
 static int parse_mod_entries(const char *blk, const char *blk_end, cheat_entry_t *out, int max);
+static int parse_mod_entries_ex(const char *blk, const char *blk_end, cheat_entry_t *out, int max,
+                                int *dropped_out);
+static const char *next_mod_block(const char *from, const char **end);
+static const char *mods_array_start(const char *json);
+static int cheat_apply_mod_doc(const char *json, int non_json, int index, int want_on, pid_t pid,
+                               intptr_t base, int force, char *detail, size_t dsz);
+static int cheat_apply_blk(const char *json, int non_json, const char *blk, const char *end,
+                           int index, int want_on, pid_t pid, intptr_t base, int force,
+                           char *detail, size_t dsz);
 static char *slurp(const char *path, long *out_len);
 static const char *json_str_after(const char *p, const char *key, char *out, size_t outsz);
 static const char *find_mod_block(const char *json, int index, const char **end);
@@ -2610,9 +2643,9 @@ static int  patch_encode_value(const char *type, size_t tlen, const char *val, s
 static int  patch_parse_lines(const char *blk, const char *end, patch_line_t *out, int max,
                               int *unsupported_out);
 static int appinst_once(void);      /* resolve+init libSceAppInstUtil exactly once */
-static int  patch_apply(const char *tid, int index, pid_t pid, intptr_t base, int force,
-                        int dry, char *detail, size_t dsz);
-static int  patch_revert(const char *tid, int index, pid_t pid, intptr_t base,
+static int  patch_apply(const char *tid, int index, const char *iver, pid_t pid, intptr_t base,
+                        int force, int dry, char *detail, size_t dsz);
+static int  patch_revert(const char *tid, int index, const char *iver, pid_t pid, intptr_t base,
                          char *detail, size_t dsz);
 static size_t patches_json(const char *tid, const char *iver, char *out, size_t outsz);
 static void patch_action_json(const char *tid, int index, int force, int dry, int is_revert,
@@ -2863,10 +2896,28 @@ static const char *xml_child(const char *chunk, const char *name, size_t *len_ou
 
 /* ==================== Trainer XML  ->  our cheat JSON ==================== */
 
+/* Attribute text out of the Trainer XML, entities decoded, into the JSON. The names used to be
+   copied raw, so 74 cheats showed '&quot;' and '&amp;' literally on the panel (the UI escapes
+   what it is given, as it should). The same decoder the patch Values already use fixes it. */
+static void tbuf_put_json_xml(tbuf_t *b, const char *s, size_t n) {
+    char tmp[2048];
+    size_t l = patch_unescape(s, n, tmp, sizeof(tmp));
+    tbuf_put_json(b, tmp, l);
+}
+
+/* One <Cheatline> is copied out to be scanned. This was a 4 KB stack chunk and a longer line
+   was skipped in silence: 14 .shn and 2 .mc4 cheatlines in the shipped library are longer (a
+   10 KB one in CUSA01875_01.01 "Max Items"), so the rest of the mod was written and the toast
+   said ON while the hook was missing a piece. Heap now, and generous; a line beyond even this
+   is COUNTED as dropped so the mod can say so instead of pretending. */
+#define SHN_CHUNK_MAX ((size_t)64 << 10)
+
 /* Returns a malloc'd JSON document in the shape our engine already parses, or NULL. */
 static char *shn_xml_to_json(const char *xml, size_t xml_len) {
     (void)xml_len;
     if (!xml) return NULL;
+    char *chunk = (char *)malloc(SHN_CHUNK_MAX);
+    if (!chunk) return NULL;
     tbuf_t o = {0};
     size_t al = 0;
     const char *v;
@@ -2884,7 +2935,7 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
 
     tbuf_puts(&o, "{\"name\":\"");
     if (hdr[0] && ((v = xml_attr(hdr, "Game", &al)) || (v = xml_attr(hdr, "GameName", &al))))
-        tbuf_put_json(&o, v, al);
+        tbuf_put_json_xml(&o, v, al);
     tbuf_puts(&o, "\",\"id\":\"");
     if (hdr[0] && ((v = xml_attr(hdr, "Cusa", &al)) || (v = xml_attr(hdr, "TitleId", &al))))
         tbuf_put_json(&o, v, al);
@@ -2913,13 +2964,13 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
         tbuf_puts(&o, "{\"name\":\"");
         if ((v = xml_attr(ch, "Text", &al)) || (v = xml_attr(ch, "CheatName", &al)) ||
             (v = xml_attr(ch, "Name", &al)))
-            tbuf_put_json(&o, v, al);
+            tbuf_put_json_xml(&o, v, al);
         tbuf_puts(&o, "\",\"type\":\"");
         v = xml_attr(ch, "Type", &al);
         tbuf_puts(&o, (v && al >= 6 && (v[0] == 'b' || v[0] == 'B')) ? "button" : "checkbox");
         tbuf_puts(&o, "\",\"memory\":[");
 
-        int first_mem = 1;
+        int first_mem = 1, dropped = 0;
         const char *lc = close;
         while (lc < body_end && (lc = strstr(lc, "<Cheatline")) != NULL && lc < body_end) {
             const char *lclose = strstr(lc, "</Cheatline>");
@@ -2929,9 +2980,8 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
             else if (lself) lend = lself + 2;
             else break;
 
-            char chunk[4096];
             size_t cl = (size_t)(lend - lc);
-            if (cl >= sizeof(chunk)) { lc = lend; continue; }
+            if (cl >= SHN_CHUNK_MAX) { dropped++; lc = lend; continue; }   /* counted, not hidden */
             memcpy(chunk, lc, cl); chunk[cl] = 0;
 
             size_t ol = 0, onl = 0, offl = 0, abl = 0;
@@ -2955,10 +3005,19 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
             }
             lc = lend;
         }
-        tbuf_puts(&o, "]}");
+        tbuf_puts(&o, "]");
+        if (dropped) {
+            /* Read back by parse_mod_entries_ex: a mod with a dropped line is never applied and
+               its state says so, instead of claiming ON for the part that was readable. */
+            char dn[40];
+            snprintf(dn, sizeof(dn), ",\"dropped\":%d", dropped);
+            tbuf_puts(&o, dn);
+        }
+        tbuf_putc(&o, '}');
         cur = body_end + 8;
     }
     tbuf_puts(&o, "]}");
+    free(chunk);
     return o.buf;
 }
 
@@ -3197,7 +3256,13 @@ static int cheat_intake_all(void) {
    carries ~32 MB which the loader maps into RAM; that is the deliberate trade for self-containment.
 
    Extraction is incremental and idempotent: a file that already exists is left alone, so the first
-   boot writes the library and every later boot costs one access() per entry and writes nothing.
+   boot writes the library and every later boot costs one stat() per entry and writes nothing.
+   The one exception is a ZERO-byte file: open(O_CREAT) used to create the name before the write
+   loop, so a /data that ran out of space mid-extract left an empty file that passed the exists
+   test on every later boot and was never repaired. Now the bytes go to <name>.part and are
+   renamed into place only when complete, and an empty file on disk is treated as missing.
+   (The xml* folders are still created here, harmlessly; the bundle no longer ships them - see
+   gen_cheat_bundle.py - because only CHEAT_PATCH_DIR is ever read.)
    Returns the number of files actually created. */
 static int cheat_bundle_extract(void) {
     static const char *SUBS[] = { "json", "mc4", "shn", "patches", "xml", "xml_orbis", "xml_prospero" };
@@ -3209,10 +3274,12 @@ static int cheat_bundle_extract(void) {
     int wrote = 0;
     for (int i = 0; i < CHEAT_FILES_COUNT; i++) {
         const cheat_file_t *e = &CHEAT_FILES[i];
-        char out[320];
+        char out[320], part[330];
         snprintf(out, sizeof(out), "%s/%s", CHEAT_ROOT, e->path);
-        if (access(out, F_OK) == 0) continue;         /* already on disk - never overwrite */
-        int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+        struct stat st;
+        if (stat(out, &st) == 0 && st.st_size > 0) continue;   /* already on disk - never overwrite */
+        snprintf(part, sizeof(part), "%s.part", out);
+        int fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
         if (fd < 0) continue;
         const unsigned char *src = cb_pack + e->off;
         unsigned left = e->len;
@@ -3222,7 +3289,8 @@ static int cheat_bundle_extract(void) {
             src += w; left -= (unsigned)w;
         }
         close(fd);
-        if (left == 0) wrote++;
+        if (left == 0 && rename(part, out) == 0) wrote++;
+        else unlink(part);                                   /* nothing half-written is left behind */
     }
     return wrote;
 }
@@ -3315,9 +3383,16 @@ static int cheat_pick_file(const char *tid, const char *ver, char *out, size_t o
 }
 
 /* Every version we hold a cheat file for, for one title. Lets the UI say
-   "cheats exist for 01.03, your game is 01.00" instead of just going quiet. */
+   "cheats exist for 01.03, your game is 01.00" instead of just going quiet.
+
+   Only names in a format the engine opens count, and exactly that extension is cut off. The
+   version used to be whatever sat between the underscore and the LAST dot, with no look at the
+   extension, so the 706 decrypted '<TID>_<ver>.mc4.xml' twins in mc4/ (never readable by the
+   engine - cheat_pick_file skips them for the same reason) produced versions like "01.00.mc4"
+   in the panel's "cheats also exist for ..." note. */
 static void cheat_versions_json(const char *tid, char *out, size_t outsz) {
     static const char *DIRS[3] = { CHEAT_JSON_DIR, CHEAT_SHN_DIR, CHEAT_MC4_DIR };
+    static const char *EXTS[3] = { ".json", ".shn", ".mc4" };
     size_t l = 0;
     int first = 1;
     l += snprintf(out + l, outsz - l, "[");
@@ -3325,20 +3400,19 @@ static void cheat_versions_json(const char *tid, char *out, size_t outsz) {
     for (int k = 0; k < 3 && l < outsz - 40; k++) {
         DIR *d = opendir(DIRS[k]);
         if (!d) continue;
+        size_t el = strlen(EXTS[k]);
         struct dirent *e;
         while ((e = readdir(d)) && l < outsz - 40) {
             const char *n = e->d_name;
             if (strncmp(n, tid, tl)) continue;
             if (n[tl] != '_') continue;                 /* <TID>_<version>.<ext> only */
+            if (!path_ext_is(n, EXTS[k])) continue;     /* .mc4.xml and friends are not versions */
+            size_t nl = strlen(n);
+            if (nl <= tl + 1 + el) continue;
             char ver[32] = {0};
-            size_t vi = 0;
-            for (const char *p = n + tl + 1; *p && *p != '.' ; p++) {
-                if (vi < sizeof(ver) - 1) ver[vi++] = *p;
-            }
-            /* the extension dot ends it, but versions contain dots too: cut at the last one */
-            snprintf(ver, sizeof(ver), "%s", n + tl + 1);
-            char *dot = strrchr(ver, '.');
-            if (dot) *dot = 0;
+            size_t vl = nl - el - (tl + 1);             /* between the underscore and the extension */
+            if (vl >= sizeof(ver)) continue;
+            memcpy(ver, n + tl + 1, vl); ver[vl] = 0;
             if (!ver[0]) continue;
             int dup = 0;
             char needle[40];
@@ -3404,10 +3478,77 @@ static int install_pkg_local(const char *path, char *cid_out, size_t cid_sz);
 static void handle(int fd, const char *rawpath);
 static const char *strcasestr_local(const char *hay, const char *needle);
 static int pm_get(const char *path);   /* Payload Manager :8084 - spawns our installer */
-/* Only one spawned install at a time: they share one request file. Not a mutex - the accept loop
-   is single-threaded for these routes and a stuck latch must expire rather than deadlock a queue. */
+/* Only one spawned install at a time: they share one request file.
+
+   The comment that used to sit here said "not a mutex - the accept loop is single-threaded for
+   these routes". That premise was false. spawn_install_wait() runs on localinst_thread, a worker
+   started by /api/install, while /api/engine/install-spawn runs on the accept thread, and both
+   did test-then-set on this flag with nothing between the test and the set. Two overlapping
+   installs then shared one installer-req.txt and the second installer installed whatever the
+   first had asked for - the duplicate-install shape that has already taken this console down.
+   The check-and-set is now one indivisible step under g_spawn_lock. The latch still EXPIRES
+   (SPAWN_STALE_SECS) rather than deadlocking a queue behind a spawned process that died without
+   writing a verdict. */
+static pthread_mutex_t g_spawn_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int  g_spawn_busy = 0;
 static volatile long g_spawn_started = 0;
+/* Which request the verdict on disk belongs to. A late verdict from a PREVIOUS installer - one
+   still pre-allocating a large package when its lane gave up - used to be accepted as this job's
+   the moment it appeared, because the readers matched on presence and "ok":true alone. That is a
+   false success, or a false refusal carrying the wrong content id. The token goes out as line 3 of
+   installer-req.txt and comes back as "token" in installer-res.json; a verdict without it is not
+   ours. Every existing field and file name is unchanged. */
+static volatile long long g_spawn_token = 0;
+#define SPAWN_STALE_SECS 600
+#define SPAWN_REQ_PATH   SHOP_DATA_DIR "/installer-req.txt"
+#define SPAWN_RES_PATH   SHOP_DATA_DIR "/installer-res.json"
+
+/* Claim the lane. 0 with the lane held and this request's token in *token_out, or -1 while another
+   hand-off is genuinely live. BOTH lanes come through here, so they cannot drift apart: a verdict
+   on disk means the previous installer has already exited, and that releases the latch at once
+   instead of making the next install wait out the expiry for a dead process - a rule the async
+   lane applied and the console-local lane did not. */
+static int spawn_lane_claim(long long *token_out) {
+    pthread_mutex_lock(&g_spawn_lock);
+    if (g_spawn_busy && access(SPAWN_RES_PATH, F_OK) == 0) {
+        ilog("install: previous verdict was never collected - releasing the lane");
+        g_spawn_busy = 0;
+    }
+    if (g_spawn_busy && (time(NULL) - g_spawn_started) < SPAWN_STALE_SECS) {
+        pthread_mutex_unlock(&g_spawn_lock);
+        return -1;
+    }
+    g_spawn_busy = 1;
+    g_spawn_started = time(NULL);
+    g_spawn_token = now_ms_local();          /* monotonic ms: unique per request, never reused */
+    if (token_out) *token_out = g_spawn_token;
+    pthread_mutex_unlock(&g_spawn_lock);
+    return 0;
+}
+
+static void spawn_lane_release(void) {
+    pthread_mutex_lock(&g_spawn_lock);
+    g_spawn_busy = 0;
+    pthread_mutex_unlock(&g_spawn_lock);
+}
+
+/* The spawn-status rule, for anything else that needs to know whether a hand-off is live RIGHT
+   NOW: latched, no verdict on disk yet, and younger than the expiry. */
+static int spawn_lane_live(void) {
+    pthread_mutex_lock(&g_spawn_lock);
+    int live = g_spawn_busy && access(SPAWN_RES_PATH, F_OK) != 0 &&
+               (time(NULL) - g_spawn_started) < SPAWN_STALE_SECS;
+    pthread_mutex_unlock(&g_spawn_lock);
+    return live;
+}
+
+/* Does this verdict carry OUR token? A result with no token at all (an installer launched by hand,
+   or one that predates the token) never matches a request that has one. */
+static int spawn_verdict_is_ours(const char *json, long long token) {
+    char needle[48];
+    snprintf(needle, sizeof(needle), "\"token\":\"%lld\"", token);
+    return strstr(json, needle) != NULL;
+}
 
 /* Credential profile applied around ONE install call and restored on every exit path.
    Declared here because the HTTP handler builds one long before the installer is defined. */
@@ -3446,7 +3587,12 @@ static int host_is_private(const char *h, size_t len) {
     b[j] = 0;
     if (!strcmp(b, "localhost") || !strcmp(b, "[::1]") || !strcmp(b, "::1")) return 1;
     unsigned a1, a2, a3, a4;
-    if (sscanf(b, "%u.%u.%u.%u", &a1, &a2, &a3, &a4) != 4) return 0;   /* a NAME, not an IP */
+    int used = 0;
+    /* %n, and the whole token must be the four octets. sscanf alone was satisfied by
+       "10.0.0.1.attacker.example" or "10.0.0.1x" - any NAME that merely begins with a private
+       address read as that address, which is exactly the thing this test exists to tell apart. */
+    if (sscanf(b, "%u.%u.%u.%u%n", &a1, &a2, &a3, &a4, &used) != 4) return 0;   /* a NAME, not an IP */
+    if (b[used] != 0) return 0;                                                  /* trailing junk */
     if (a1 > 255 || a2 > 255 || a3 > 255 || a4 > 255) return 0;
     if (a1 == 127 || a1 == 10) return 1;
     if (a1 == 192 && a2 == 168) return 1;
@@ -3472,6 +3618,69 @@ static int request_origin_ok(const char *req) {
     return 1;
 }
 
+/* The browser's own statement of HOW a request was made.
+ *
+ * request_origin_ok() lets a request with no Origin and no Referer through on purpose - that is
+ * curl, the companion and our own tools. But a browser can be made to send neither: a page with a
+ * no-referrer policy loading a state-changing GET as an <img>, a <script> or a top-level navigation
+ * carries no Referer at all, and that walked straight past the guard. Sec-Fetch-Mode and
+ * Sec-Fetch-Dest cannot be suppressed or forged by a page, so on the routes that CHANGE something
+ * they are consulted as well: a navigation, a subresource load or a no-cors fetch is refused.
+ * ABSENT headers are allowed - older WebKit, curl and urllib send none - and everything the UI
+ * does is fetch(), mode "cors" or "same-origin", so nothing the app itself does changes.
+ * Read-only routes are not consulted at all. */
+static int sec_fetch_ok(const char *req) {
+    static const char *BAD_MODES[] = { "no-cors", "navigate", "nested-navigate", NULL };
+    static const char *BAD_DESTS[] = { "image", "script", "style", "iframe", "frame", "object",
+                                       "embed", "font", "video", "audio", NULL };
+    static const char *HDRS[2] = { "\nsec-fetch-mode:", "\nsec-fetch-dest:" };
+    for (int k = 0; k < 2; k++) {
+        const char *h = strcasestr_local(req, HDRS[k]);
+        if (!h) continue;
+        h += strlen(HDRS[k]);
+        while (*h == ' ' || *h == '\t') h++;
+        const char *end = h;
+        while (*end && *end != '\r' && *end != '\n' && *end != ' ' && *end != '\t') end++;
+        size_t vl = (size_t)(end - h);
+        const char **bad = k ? BAD_DESTS : BAD_MODES;
+        for (int i = 0; bad[i]; i++) {
+            size_t bl = strlen(bad[i]);
+            if (vl != bl) continue;
+            int same = 1;
+            for (size_t j = 0; j < bl; j++) {
+                char a = h[j];
+                if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                if (a != bad[i][j]) { same = 0; break; }
+            }
+            if (same) return 0;
+        }
+    }
+    return 1;
+}
+
+/* The routes that change something on the console - the only ones sec_fetch_ok() is applied to.
+   `rawpath` still carries its ?query: /api/payloads/autostart only WRITES when it has one. */
+static int route_changes_state(const char *rawpath, int is_post) {
+    static const char *EXACT[] = {
+        "/api/quit", "/api/power", "/api/rest/prepare", "/api/fs/delete", "/api/fs/mkdir",
+        "/api/fs/write", "/api/mem/write", "/api/cheat/apply", "/api/patch/apply",
+        "/api/patch/revert", "/api/engine/cancel", "/api/engine/spawn-cleanup",
+        "/api/engine/fetch", "/api/tile/install", "/api/game/delete-backup", "/api/game/delete",
+        "/api/move", "/api/cheat/rescan", "/api/cheats/rescan", "/api/register-pc",
+        "/api/open", "/api/notify", "/api/install", NULL
+    };
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", rawpath);
+    char *qs = strchr(path, '?');
+    if (qs) *qs = 0;
+    for (int i = 0; EXACT[i]; i++) if (!strcmp(path, EXACT[i])) return 1;
+    if (!strncmp(path, "/api/engine/install-", 20)) return 1;
+    if (!strcmp(path, "/api/payloads/autostart") && qs) return 1;
+    /* The POST verbs that write: a cheat toggle, a queue start/cancel/retry. */
+    if (is_post && (!strncmp(path, "/api/mods/", 10) || !strncmp(path, "/api/queue", 10))) return 1;
+    return 0;
+}
+
 /* ---------------- routes that can install, behind an explicit opt-in ---------------------------
  * install-inproc / install-local / install-dir / diag call libSceAppInstUtil directly and are
  * hand-fired diagnostics: nothing in the UI and nothing in the companion calls them (`diag`
@@ -3479,7 +3688,8 @@ static int request_origin_ok(const char *req) {
  * install engine gets debugged, but they are no longer available just for being on the network.
  *
  * Touch /data/pkg-mutant-shop/allow-diagnostics to enable them for this boot; delete it to stop.
- * The product's own lane (/api/engine/install-url) and every read-only route are NOT gated.
+ * install-url (the in-process download+install half of dl_worker, which nothing in the product
+ * calls any more) and lprobe sit behind the same flag. Every read-only route is NOT gated.
  */
 #define DIAG_FLAG SHOP_DATA_DIR "/allow-diagnostics"
 
@@ -3567,7 +3777,14 @@ static void *pkgfile_thread(void *arg) {
         close(j->fd); free(j); return NULL;
     }
     struct stat st;
-    fstat(in, &st);
+    /* fstat's result was discarded. On the rare failure - the fd revoked, a filesystem error after
+       a successful open - `st` was an uninitialised stack struct, so `total` was garbage and the
+       install daemon got a bogus Content-Length over whatever read() produced. Say 500 instead. */
+    if (fstat(in, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(in);
+        send_status(j->fd, "500 Internal Server Error", "text/plain", "cannot read that package");
+        close(j->fd); free(j); return NULL;
+    }
     long long total = (long long)st.st_size;
     long long from = j->from;
     if (from < 0 || from >= total) from = 0;
@@ -3760,28 +3977,36 @@ static void spawn_installer_remove(void) {
     rmdir("/data/pldmgr/payloads/pms-installer");
 }
 
-static int spawn_install_wait(const char *uri, const char *label, char *reply, size_t rsz) {
-    if (g_spawn_busy && (time(NULL) - g_spawn_started) < 600) {
+/* `reply` is always a finished sentence fit for the television - no code in it. The console's
+   own error code, when there is one, comes back through *code_out so the API reply and the log can
+   still quote it; the house style keeps hex off the screen. */
+static int spawn_install_wait(const char *uri, const char *label, char *reply, size_t rsz,
+                              unsigned *code_out) {
+    if (code_out) *code_out = 0;
+    long long token = 0;
+    if (spawn_lane_claim(&token) != 0) {
         snprintf(reply, rsz, "Another install is still being handed over - it will start "
                              "as soon as that one is accepted");
         return -10;
     }
-    g_spawn_busy = 1;
-    g_spawn_started = time(NULL);
-    ilog("install: requested  uri=%s  label=%s", uri, label && label[0] ? label : "-");
+    ilog("install: requested  uri=%s  label=%s  token=%lld",
+         uri, label && label[0] ? label : "-", token);
 
     mkdir(SHOP_DATA_DIR, 0777);
-    unlink(SHOP_DATA_DIR "/installer-res.json");
-    int rq = open(SHOP_DATA_DIR "/installer-req.txt", O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    unlink(SPAWN_RES_PATH);
+    int rq = open(SPAWN_REQ_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
     if (rq < 0) {
-        g_spawn_busy = 0;
+        spawn_lane_release();
         snprintf(reply, rsz, "The console would not let the shop write to its own data folder - "
                              "load the shop again from Payload Manager");
         return -11;
     }
     {
-        char line[1700];
-        int ln = snprintf(line, sizeof(line), "%s\n%s\n", uri, label ? label : "");
+        /* Line 3 is the token the installer echoes back - see g_spawn_token. */
+        char line[1750];
+        int ln = snprintf(line, sizeof(line), "%s\n%s\n%lld\n", uri, label ? label : "", token);
+        if (ln < 0) ln = 0;
+        if ((size_t)ln > sizeof(line)) ln = (int)sizeof(line);
         ssize_t w = write(rq, line, (size_t)ln);
         (void)w;
     }
@@ -3791,14 +4016,20 @@ static int spawn_install_wait(const char *uri, const char *label, char *reply, s
        for the same reason the async one does: pldmgr executes whatever is on disk, and a short
        write there is the one failure with no upper bound on its consequences. */
     if (spawn_installer_write() != 0) {
-        g_spawn_busy = 0;
+        unlink(SPAWN_REQ_PATH);       /* a request nobody is going to run must not outlive this */
+        spawn_lane_release();
         ilog("install: ABORTED - the installer could not be written intact");
         snprintf(reply, rsz, "The console would not accept our installer onto its own storage - "
                              "it may be out of space. Nothing was started.");
         return -15;
     }
     if (pm_get("/loadpayload:/data/pldmgr/payloads/pms-installer/pms-installer.elf") != 0) {
-        g_spawn_busy = 0;
+        /* Nothing was spawned, so nothing of ours belongs in the launcher or the data folder.
+           Leaving the request behind meant a later hand-launched installer re-ran THIS package
+           onto whatever was live by then - the duplicate-install shape. */
+        unlink(SPAWN_REQ_PATH);
+        spawn_installer_remove();
+        spawn_lane_release();
         ilog("install: FAILED - Payload Manager would not spawn the installer");
         snprintf(reply, rsz, "Payload Manager did not answer on :8084 - reload it on the PS5, "
                              "then try this install again");
@@ -3807,16 +4038,27 @@ static int spawn_install_wait(const char *uri, const char *label, char *reply, s
 
     /* The installer makes one call and exits, so this is quick - but a busy console can take a
        few seconds to schedule it. */
+    int said_stale = 0;
     for (int i = 0; i < 120; i++) {
         usleep(500000);
-        int rf = open(SHOP_DATA_DIR "/installer-res.json", O_RDONLY);
+        int rf = open(SPAWN_RES_PATH, O_RDONLY);
         if (rf < 0) continue;
-        char buf[1200] = {0};
+        /* Sized past the installer's own out[1900]: the token is the LAST field of the verdict,
+           and a 1200-byte read cut it off behind a long PC /library/ URL, so this lane judged its
+           own verdict stale and timed out on an install the console had accepted. */
+        char buf[2048] = {0};
         ssize_t got = read(rf, buf, sizeof(buf) - 1);
         close(rf);
         if (got <= 0) continue;
         buf[got] = 0;
-        g_spawn_busy = 0;
+        if (!spawn_verdict_is_ours(buf, token)) {
+            /* A verdict from an EARLIER installer that finished late. Not this job's - keep
+               waiting for the one we spawned, which overwrites the file when it is done. */
+            if (!said_stale) { said_stale = 1; ilog("install: ignoring a stale verdict  %s", buf); }
+            continue;
+        }
+        unlink(SPAWN_REQ_PATH);       /* consumed: the request must never be runnable twice */
+        spawn_lane_release();
         spawn_installer_remove();     /* this lane collects its own verdict - clean up here too */
         ilog("install: installer replied  %s", buf);
         if (strstr(buf, "\"ok\":true")) {
@@ -3830,15 +4072,18 @@ static int spawn_install_wait(const char *uri, const char *label, char *reply, s
         const char *rcp = strstr(buf, "\"rc\":\"0x");
         unsigned code = 0;
         if (rcp) code = (unsigned)strtoul(rcp + 8, NULL, 16);
-        const char *why = install_error_text(code);
+        if (code_out) *code_out = code;
+        /* Words only. The bracketed hex used to ride along here and from here onto the
+           television; the code still reaches install.log (just below) and the API reply. */
         if (code)
-            snprintf(reply, rsz, "%s (0x%08X)", why, code);
+            snprintf(reply, rsz, "%s", install_error_text(code));
         else
             snprintf(reply, rsz, "%s", "The console refused it and did not say why");
         ilog("install: REFUSED  rc=0x%08X  %s", code, buf);
         return -13;
     }
-    g_spawn_busy = 0;
+    unlink(SPAWN_REQ_PATH);           /* no verdict, but the request is spent either way */
+    spawn_lane_release();
     ilog("install: TIMEOUT - the installer never wrote a result");
     snprintf(reply, rsz, "The installer never reported back - the console may be busy. Try "
                          "again, and reload the shop from Payload Manager if it keeps happening");
@@ -3869,20 +4114,26 @@ static void *localinst_thread(void *arg) {
     pthread_mutex_unlock(&g_linst_lock);
 
     char reply[600] = {0};
+    unsigned code = 0;
     /* OUR engine. This used to POST to whatever daemon owned :12800 - that is the last place the
        console-local lane depended on somebody else's software. The verdict is still an ACCEPTANCE,
        not a completion: the console downloads and installs on its own afterwards, and only its own
        records prove that finished. */
-    int rc = spawn_install_wait(url, nm, reply, sizeof(reply));
+    int rc = spawn_install_wait(url, nm, reply, sizeof(reply), &code);
 
     pthread_mutex_lock(&g_linst_lock);
     g_linst.ok = (rc == 0);
     g_linst.accepted_only = (rc == 0);
     g_linst.done = 1;
     g_linst.active = 0;
-    snprintf(g_linst.msg, sizeof(g_linst.msg), "%s",
-             rc != 0 ? (reply[0] ? reply : "the install engine refused the package")
-                     : "Accepted - the console is downloading it now");
+    /* The API keeps the console's code in brackets so a bug report can quote it; the toast below
+       gets the sentence alone, because a hex code on a television says nothing to anyone. */
+    if (rc != 0 && reply[0] && code)
+        snprintf(g_linst.msg, sizeof(g_linst.msg), "%s (0x%08X)", reply, code);
+    else
+        snprintf(g_linst.msg, sizeof(g_linst.msg), "%s",
+                 rc != 0 ? (reply[0] ? reply : "the install engine refused the package")
+                         : "Accepted - the console is downloading it now");
     pthread_mutex_unlock(&g_linst_lock);
 
     /* Say what is happening RIGHT NOW. The console posts its own "Ready to play" when the download
@@ -3921,6 +4172,29 @@ typedef struct {
 static move_job_t g_move;
 static pthread_mutex_t g_move_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* What may be the SOURCE of a move: the two tiers the delete lane trusts (a homebrew folder, or a
+   file directly at a drive root), plus <drive>/pkg, which the console's own removable scan lists
+   as a place a backup can sit before it is moved somewhere ShadowMount will see it. A regular file
+   carrying a package or backup extension, nowhere else - a path outside these folders is not the
+   app's to touch. A PKG is moved as a file, which is exactly what the removable scan promises
+   when it marks every .pkg on a drive `movable` and the more-menu offers "Move to another drive"
+   for it; installing that PKG stays a separate action. Refusing PKGs here turned that menu entry
+   into a dead button for one file type. */
+static int move_source_allowed(const char *src) {
+    if (!src || src[0] != '/' || strstr(src, "..")) return 0;
+    if (!path_ext_is(src, ".pkg") && !is_backup_ext(src)) return 0;
+    if (under_homebrew_root(src)) return 1;
+    for (int r = 0; DRIVE_ROOTS[r]; r++) {
+        size_t l = strlen(DRIVE_ROOTS[r]);
+        if (strncmp(src, DRIVE_ROOTS[r], l) || src[l] != '/') continue;
+        const char *rest = src + l + 1;
+        if (!rest[0]) return 0;
+        if (!strchr(rest, '/')) return 1;                                   /* at the drive root */
+        if (!strncmp(rest, "pkg/", 4) && rest[4] && !strchr(rest + 4, '/')) return 1;
+    }
+    return 0;
+}
+
 /* Map a drive id the UI can send to the folder a moved game should live in. */
 static int move_dest_dir(const char *drive, char *out, size_t outsz) {
     if (!drive || !drive[0]) return -1;
@@ -3935,11 +4209,17 @@ static int move_dest_dir(const char *drive, char *out, size_t outsz) {
 
 static void *move_thread(void *arg) {
     (void)arg;
-    char src[600], dst[600];
+    char src[600], dst[600], part[620];
     pthread_mutex_lock(&g_move_lock);
     snprintf(src, sizeof(src), "%s", g_move.src);
     snprintf(dst, sizeof(dst), "%s", g_move.dst);
     pthread_mutex_unlock(&g_move_lock);
+    /* Copy to "<dst>.part" and rename at the end. The destination IS a ShadowMount watch folder,
+       and ShadowMount mounts a container the instant its name appears - so writing the final name
+       first meant a 90 GB game was mounted while it was still arriving, and the console had a
+       broken title that crashed on launch until the copy finished. The PC lane, the fetch lane and
+       the file API all stage the same way; this was the one writer that did not. */
+    snprintf(part, sizeof(part), "%s.part", dst);
 
     int in = open(src, O_RDONLY);
     if (in < 0) {
@@ -3951,7 +4231,8 @@ static void *move_thread(void *arg) {
                 "been disconnected. Nothing was removed.", g_move.name);
         return NULL;
     }
-    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    unlink(part);                                 /* a leftover from an interrupted move */
+    int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
     if (out < 0) {
         close(in);
         pthread_mutex_lock(&g_move_lock);
@@ -3987,9 +4268,9 @@ static void *move_thread(void *arg) {
     close(out);
 
     struct stat ss, ds;
-    int same = (stat(src, &ss) == 0 && stat(dst, &ds) == 0 && ss.st_size == ds.st_size);
+    int same = (stat(src, &ss) == 0 && stat(part, &ds) == 0 && ss.st_size == ds.st_size);
     if (failed || !same) {
-        unlink(dst);                              /* never leave a half file behind */
+        unlink(part);                             /* never leave a half file behind */
         pthread_mutex_lock(&g_move_lock);
         snprintf(g_move.error, sizeof(g_move.error),
                  failed ? "the copy failed - the destination drive may be full"
@@ -4003,6 +4284,21 @@ static void *move_thread(void *arg) {
         notifyf("Could not move %s\n%s", g_move.name,
                 failed ? "The copy failed - the destination drive may be full. Nothing was removed."
                        : "The copy did not match the original. Nothing was removed.");
+        return NULL;
+    }
+    /* Every byte is across and verified: give it its real name. rename() onto an existing file
+       is not portable here, so an older copy at the destination is removed first - the same
+       replace-in-place the file API and the fetch lane perform. */
+    unlink(dst);
+    if (rename(part, dst) != 0) {
+        unlink(part);
+        pthread_mutex_lock(&g_move_lock);
+        snprintf(g_move.error, sizeof(g_move.error),
+                 "the copy finished but could not be put in place on that drive, nothing was removed");
+        g_move.done = 1; g_move.active = 0; g_move.ok = 0;
+        pthread_mutex_unlock(&g_move_lock);
+        notifyf("Could not move %s\nThe copy finished but could not be put in place on that "
+                "drive. Nothing was removed.", g_move.name);
         return NULL;
     }
     unlink(src);                                  /* only now is it safe */
@@ -4098,7 +4394,7 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
            "apply" used to be a silent alias for "toggle", which would have flipped an unrelated
            CHEAT the moment the patch list stopped being empty. */
         if (!strcmp(action, "apply") || !strcmp(action, "unapply")) {
-            char o[1000];
+            char o[1400];
             patch_action_json(tid, (int)json_num_after(body, "index", 0),
                               (int)json_num_after(body, "force", 0),
                               (int)json_num_after(body, "dry", 0),
@@ -4129,11 +4425,20 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
                inflated the number, and `failed` was computed and then never mentioned - so a run
                where 3 were undone and 2 refused still announced a clean sweep. */
             int reverted = 0, already = 0, failed = 0;
-            for (int m = 0; m < CHEAT_MAX_MODS; m++) {
+            /* The document is loaded (and for .mc4, decrypted) ONCE, here, and each block is
+               handed straight to the engine. cheat_apply_mod(file, ...) re-read and re-decrypted
+               the file for every mod, on the accept loop, so a 96-mod file stalled every other
+               client for the whole sweep. Every "off" write is still gated on the memory holding
+               a documented state - the same gate as a single toggle. */
+            const char *from = mods_array_start(doc);
+            for (int m = 0; from && m < CHEAT_MAX_MODS; m++) {
                 const char *end = NULL;
-                if (!find_mod_block(doc, m, &end)) break;
+                const char *blk = next_mod_block(from, &end);
+                if (!blk) break;
+                from = end;
                 char detail[200] = {0};
-                int rc = cheat_apply_mod(file, m, 0, pid, base, 0, detail, sizeof(detail));
+                int rc = cheat_apply_blk(doc, non_json, blk, end, m, 0, pid, base, 0,
+                                         detail, sizeof(detail));
                 if (rc > 0) reverted++;
                 else if (rc == 0) already++;
                 else failed++;
@@ -4193,13 +4498,38 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         json_str_after(body ? body : "", "drive", drive, sizeof(drive));
         json_str_after(body ? body : "", "name", nm, sizeof(nm));
         if (!src[0] || !drive[0]) { send_json(fd, "{\"ok\":false,\"error\":\"need path and drive\"}"); return; }
+        /* The SAME boundary the delete lane keeps. This accepted any absolute regular file, so a
+           LAN request could copy the console's own database into a USB homebrew folder and then
+           unlink the original - the delete lane had bounded itself carefully and the move undid
+           that. A package or backup container, inside a folder that exists to hold one, and
+           nothing else. */
+        if (!move_source_allowed(src)) {
+            send_json(fd, "{\"ok\":false,\"error\":\"Only a package or game backup in a drive's "
+                          "root, homebrew or pkg folder can be moved between drives\"}");
+            return;
+        }
         struct stat st;
-        if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (lstat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
             send_json(fd, "{\"ok\":false,\"error\":\"source file not found\"}"); return;
         }
         char destdir[200];
         if (move_dest_dir(drive, destdir, sizeof(destdir)) != 0) {
             send_json(fd, "{\"ok\":false,\"error\":\"unknown destination drive\"}"); return;
+        }
+        if (strcmp(drive, "internal") != 0) {
+            /* Is that drive REALLY there? An unmounted /mnt/usbN opens fine - it resolves to the
+               parent filesystem - so mkdir below happily created /mnt/usbN/homebrew on the SYSTEM
+               partition, statvfs reported the system partition's free space, and a game under
+               31 GB was copied there, its source removed, and then hidden the moment a real drive
+               was plugged in. Same st_dev test /api/devices uses to decide `detected`. */
+            char droot[64];
+            snprintf(droot, sizeof(droot), "/mnt/%s", drive);
+            struct stat dstat, mstat;
+            if (stat(droot, &dstat) != 0 ||
+                (stat("/mnt", &mstat) == 0 && dstat.st_dev == mstat.st_dev)) {
+                send_json(fd, "{\"ok\":false,\"error\":\"That drive is not connected\"}");
+                return;
+            }
         }
         mkdir(destdir, 0777);
         const char *base = strrchr(src, '/');
@@ -4284,13 +4614,6 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         /* No :12800 gate any more. This lane used to require a third-party DPI daemon to be
            listening; it now goes through our own engine, which is spawned per install and needs
            nothing to be running beforehand except Payload Manager. */
-        /* Hand the daemon a clean TOKEN url. It cannot fetch a percent-escaped URL, and
-           real package names are full of spaces and brackets - proven on device: the same
-           request with a clean name returns {"res":"0"}, the escaped one "install failed". */
-        int tok = pkgserve_register(file);
-        char url[128];
-        snprintf(url, sizeof(url), "http://127.0.0.1:%d/pkgfile/%d.pkg", PORT, tok);
-
         /* "+ Queue" sends mode:"queued" - hold it instead of starting, so the button
            behaves the same whether or not the PC companion is running. */
         char mode[24] = {0};
@@ -4303,6 +4626,16 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             send_json(fd, "{\"ok\":false,\"error\":\"an install is already running\"}");
             return;
         }
+        /* Hand the daemon a clean TOKEN url. It cannot fetch a percent-escaped URL, and
+           real package names are full of spaces and brackets - proven on device: the same
+           request with a clean name returns {"res":"0"}, the escaped one "install failed".
+           Registered only now, AFTER the already-running refusal: the ring has 8 slots, and
+           registering before the check let eight refused POSTs during a multi-GB install evict
+           the slot the live transfer was being served from, so the daemon's next Range request
+           got a 403 mid-install. A refused request now leaves the ring alone. */
+        int tok = pkgserve_register(file);
+        char url[128];
+        snprintf(url, sizeof(url), "http://127.0.0.1:%d/pkgfile/%d.pkg", PORT, tok);
         memset(&g_linst, 0, sizeof(g_linst));
         g_linst.active = hold ? 0 : 1;
         g_linst.held = hold;
@@ -4814,9 +5147,10 @@ static const char *REST_STOP[] = {
     "shadowmount", "shadow-mount", "shadow_mount",
     "tile-autoinst", "tile_autoinst",
     "klogsrv", "klog-srv",
-    /* etaHEN is now the install host, so rest mode has to stand it down too - it is exactly the
-       class of long-lived homebrew that made suspend panic before. Its util daemon also owns FTP
-       and klog, so stopping it stops those with it, which is what we want for rest. */
+    /* etaHEN is NOT ours and is not the install host (our installer is spawned per install and
+       needs nothing running). It stays on this list only to stand down a copy the USER runs: it
+       is exactly the class of long-lived, kernel-touching homebrew that made suspend panic
+       before, and its util daemon also owns FTP and klog, so stopping it stops those with it. */
     "etahen", "eta-hen", "eta_hen",
     "onion_daemon", "onion_util",
 };
@@ -4959,6 +5293,20 @@ static int fs_param_path(const char *rawpath, char *out, size_t outsz) {
     return out[0] == '/';
 }
 
+/* Where mkdir and delete may act: the roots the package server already trusts (the drives, /data
+   and its /user/data alias, our own data folder), which is every folder the companion ever creates
+   or clears - a homebrew watch folder, the cheat library, a transfer probe. Reads and listings stay
+   unbounded on purpose (the whole point of them is the console's databases under
+   /system_data/priv/mms); creating and deleting have no business there, and an unauthenticated GET
+   that could rmdir any path on a root process was an exposure with no user. */
+static int fs_mutable_path_allowed(const char *p) {
+    if (!p || p[0] != '/' || strstr(p, "..")) return 0;
+    static const char *ROOTS[] = { "/mnt/usb", "/mnt/ext", "/data/", "/user/data/",
+                                   SHOP_DATA_DIR "/", NULL };
+    for (int i = 0; ROOTS[i]; i++) if (!strncmp(p, ROOTS[i], strlen(ROOTS[i]))) return 1;
+    return 0;
+}
+
 static void fs_send_stat(int fd, const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -4975,6 +5323,7 @@ static void fs_send_stat(int fd, const char *path) {
     send_json(fd, o);
 }
 
+#define FS_LIST_MAX_BYTES ((size_t)8u << 20)
 static void fs_send_list(int fd, const char *path) {
     DIR *d = opendir(path);
     if (!d) {
@@ -4982,7 +5331,12 @@ static void fs_send_list(int fd, const char *path) {
                     "{\"ok\":false,\"error\":\"cannot open directory\"}");
         return;
     }
-    size_t cap = 96000, len = 0;
+    /* 1 MiB to start, growing to FS_LIST_MAX_BYTES. The fixed 96 KB this used to be held about
+       1265 entries, and the cheat directories the companion syncs are bigger than that - so every
+       listing of them came back `truncated`, the PC concluded thousands of files were missing, and
+       re-sent them every 15 minutes for ever. `truncated` is still reported honestly at the cap,
+       and `count` is the number of entries actually written, so a reader can tell. */
+    size_t cap = 1u << 20, len = 0;
     char *out = (char *)malloc(cap);
     if (!out) { closedir(d); send_json(fd, "{\"ok\":false,\"error\":\"oom\"}"); return; }
     len += (size_t)snprintf(out + len, cap - len, "{\"ok\":true,\"entries\":[");
@@ -4996,7 +5350,16 @@ static void fs_send_list(int fd, const char *path) {
         if (stat(full, &st) != 0) continue;
         char esc[600];
         json_escape(e->d_name, esc, sizeof(esc));
-        if (len + strlen(esc) + 128 >= cap) { truncated = 1; break; }   /* never truncate mid-value */
+        size_t need = strlen(esc) + 128;
+        if (len + need >= cap) {                                          /* never truncate mid-value */
+            if (cap >= FS_LIST_MAX_BYTES) { truncated = 1; break; }
+            size_t nc = cap * 2;
+            if (nc > FS_LIST_MAX_BYTES) nc = FS_LIST_MAX_BYTES;
+            char *nb = (char *)realloc(out, nc);
+            if (!nb) { truncated = 1; break; }
+            out = nb; cap = nc;
+            if (len + need >= cap) { truncated = 1; break; }
+        }
         len += (size_t)snprintf(out + len, cap - len,
                                 "%s{\"name\":\"%s\",\"dir\":%s,\"size\":%lld,\"mtime\":%lld}",
                                 wrote ? "," : "", esc, S_ISDIR(st.st_mode) ? "true" : "false",
@@ -5056,7 +5419,16 @@ static int fs_recv_write(int cl, const char *rawpath, const char *req, int heade
     }
     long long want = 0;
     const char *cl_h = strcasestr_local(req, "content-length:");
-    if (cl_h) want = atoll(cl_h + 15);
+    /* No Content-Length used to mean want == 0, and a header-less or chunked POST then "succeeded"
+       by replacing whatever was at `path` with an EMPTY file - a cheat file, a config. The
+       companion always sends the header, so this is refused, never guessed. A stated length of 0
+       is a legitimate empty file and still goes through. */
+    if (!cl_h) {
+        send_status(cl, "411 Length Required", "application/json",
+                    "{\"ok\":false,\"error\":\"content-length required\"}");
+        return 0;
+    }
+    want = atoll(cl_h + 15);
     if (want < 0) want = 0;
 
     char part[1100];
@@ -5076,15 +5448,18 @@ static int fs_recv_write(int cl, const char *rawpath, const char *req, int heade
         if (write_all_checked(f, req + header_len, (size_t)have) != have) failed = 1;
         else got = have;
     }
-    char buf[65536];
+    /* Heap, not stack: this now runs on a worker thread, and 64 KB is most of one of those. */
+    char *buf = (char *)malloc(COPY_BUF_BYTES);
+    if (!buf) failed = 1;
     while (!failed && got < want) {
-        size_t chunk = sizeof(buf);
+        size_t chunk = COPY_BUF_BYTES;
         if ((long long)chunk > want - got) chunk = (size_t)(want - got);
         ssize_t r = read(cl, buf, chunk);
         if (r <= 0) { failed = 1; break; }
         if (write_all_checked(f, buf, (size_t)r) != r) { failed = 1; break; }
         got += r;
     }
+    free(buf);
     close(f);
 
     if (failed || got != want) {
@@ -5108,6 +5483,90 @@ static int fs_recv_write(int cl, const char *rawpath, const char *req, int heade
     snprintf(o, sizeof(o), "{\"ok\":true,\"path\":\"%s\",\"size\":%lld}", esc, got);
     send_json(cl, o);
     return 0;
+}
+
+/* /api/fs/write on its own thread, exactly as /pkgfile/ is served.
+ *
+ * It used to run inline on the accept loop, so a PC pushing a 90 GB game - or the cheat sync
+ * sending a few thousand small files - froze the whole console API for the duration: health, the
+ * UI, the install engine, the cheat engine. And the socket kept the accept loop's 8 s receive
+ * timeout, so a PC that paused for longer than that (an AV scan, a disk spin-up, a Wi-Fi roam)
+ * had its multi-GB upload cut off and reported as "the console rejected it". The worker owns the
+ * socket, sets a receive timeout that fits a real transfer, and counts itself so rest mode can
+ * tell an upload is in flight. The response JSON and the .part-then-rename are unchanged. */
+typedef struct { int fd; int n; int hl; char path[1024]; char *req; } fswrite_t;
+static int g_uploads_inflight = 0;
+static pthread_mutex_t g_uploads_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int uploads_in_flight(void) {
+    pthread_mutex_lock(&g_uploads_lock);
+    int n = g_uploads_inflight;
+    pthread_mutex_unlock(&g_uploads_lock);
+    return n;
+}
+
+static void *fswrite_thread(void *arg) {
+    fswrite_t *j = (fswrite_t *)arg;
+    struct timeval rcvto;
+    rcvto.tv_sec = 120;                 /* a stalled PC gets two minutes, not eight seconds */
+    rcvto.tv_usec = 0;
+    setsockopt(j->fd, SOL_SOCKET, SO_RCVTIMEO, &rcvto, sizeof(rcvto));
+    fs_recv_write(j->fd, j->path, j->req, j->hl, j->n - j->hl);
+    close(j->fd);
+    free(j->req);
+    free(j);
+    pthread_mutex_lock(&g_uploads_lock);
+    g_uploads_inflight--;
+    pthread_mutex_unlock(&g_uploads_lock);
+    return NULL;
+}
+
+/* Returns 0 when the worker has taken the socket over; -1 means "serve it inline as before". */
+static int fs_write_serve(int fd, const char *rawpath, const char *buf, int n, int hl) {
+    fswrite_t *j = (fswrite_t *)calloc(1, sizeof(*j));
+    if (!j) return -1;
+    j->req = (char *)malloc((size_t)n + 1);
+    if (!j->req) { free(j); return -1; }
+    memcpy(j->req, buf, (size_t)n + 1);          /* headers plus whatever body arrived with them */
+    j->fd = fd;
+    j->n = n;
+    j->hl = hl;
+    snprintf(j->path, sizeof(j->path), "%s", rawpath);
+    pthread_mutex_lock(&g_uploads_lock);
+    g_uploads_inflight++;
+    pthread_mutex_unlock(&g_uploads_lock);
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    int rc = pthread_create(&t, &attr, fswrite_thread, j);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        pthread_mutex_lock(&g_uploads_lock);
+        g_uploads_inflight--;
+        pthread_mutex_unlock(&g_uploads_lock);
+        free(j->req);
+        free(j);
+        return -1;
+    }
+    pthread_detach(t);
+    return 0;
+}
+
+/* The icon experiment's timing, on its own thread. It used to run inline in /api/notify: the
+   plain toast, a 2 s pause and the probe, on the accept loop - so one probe request froze every
+   API on this console (health, library, installs, cheats) for about three seconds. */
+typedef struct { char txt[300]; int variant; } notify_probe_t;
+static void *notify_probe_thread(void *arg) {
+    notify_probe_t *p = (notify_probe_t *)arg;
+    char lead[360];
+    snprintf(lead, sizeof(lead),
+             "Icon test %d\nIf this is the only line you see, that icon did not draw", p->variant);
+    notify(lead);
+    sleep(2);                       /* let the shell draw it before the second one */
+    notify_icon_probe(p->txt, p->variant);
+    free(p);
+    return NULL;
 }
 
 static void handle(int fd, const char *rawpath) {
@@ -5308,21 +5767,39 @@ static void handle(int fd, const char *rawpath) {
                 keep_self = 1;
         }
         /* Never tear the console's services down underneath a running transfer. This used to
-           _exit(0) mid-write, and a move writes its FINAL filename straight into ShadowMount's
-           watch folder — so an interrupted one leaves a half-written game that gets auto-mounted
-           on the next boot. force=1 is the deliberate override. */
+           _exit(0) mid-write. It checked only the download job, so a live move, a spawn hand-off
+           and a PC upload were all torn down anyway - each of them a file still being written
+           into a ShadowMount watch folder (they stage as .part now, so the leftover is a stray
+           file rather than a mounted half-game, but the transfer is still lost). force=1 is the
+           deliberate override, and the message says what is running rather than how to override
+           it - "add force=1" is not something a person at a television can do. */
         {
             char fv[8] = {0};
             int forced = qparam(rawpath, "force", fv, sizeof(fv)) ? atoi(fv) : 0;
-            int busy = 0;
+            const char *why = NULL;
             pthread_mutex_lock(&g_job_mtx);
-            busy = (g_job.state == JOB_DOWNLOAD || g_job.state == JOB_INSTALL);
+            if (g_job.state == JOB_DOWNLOAD || g_job.state == JOB_INSTALL)
+                why = "A download is still running - let it finish, then try rest mode again";
             pthread_mutex_unlock(&g_job_mtx);
-            if (busy && !forced) {
-                send_json(fd,
-                    "{\"ok\":false,\"error\":\"busy\",\"message\":\"A download or install is still "
-                    "running. Let it finish, or add force=1.\",\"stopped\":[],\"stopped_count\":0,"
-                    "\"failed\":[],\"failed_count\":0}");
+            if (!why && spawn_lane_live())
+                why = "An install is still being handed to the console - let it finish, then try "
+                      "rest mode again";
+            if (!why) {
+                pthread_mutex_lock(&g_move_lock);
+                if (g_move.active)
+                    why = "A game is still being moved between drives - let it finish, then try "
+                          "rest mode again";
+                pthread_mutex_unlock(&g_move_lock);
+            }
+            if (!why && uploads_in_flight() > 0)
+                why = "A file is still being sent to the console - let it finish, then try rest "
+                      "mode again";
+            if (why && !forced) {
+                char o[600];
+                snprintf(o, sizeof(o),
+                    "{\"ok\":false,\"error\":\"busy\",\"message\":\"%s\",\"stopped\":[],"
+                    "\"stopped_count\":0,\"failed\":[],\"failed_count\":0}", why);
+                send_json(fd, o);
                 return;
             }
         }
@@ -5365,6 +5842,12 @@ static void handle(int fd, const char *rawpath) {
         if (!strcmp(op, "read")) { fs_send_read(fd, fp); return; }
         if (!strcmp(op, "list")) { fs_send_list(fd, fp); return; }
         if (!strcmp(op, "stat")) { fs_send_stat(fd, fp); return; }
+        if ((!strcmp(op, "mkdir") || !strcmp(op, "delete")) && !fs_mutable_path_allowed(fp)) {
+            send_status(fd, "403 Forbidden", "application/json",
+                        "{\"ok\":false,\"error\":\"that path is outside the folders the shop "
+                        "may change\"}");
+            return;
+        }
         if (!strcmp(op, "mkdir")) {
             mkparents(fp);
             mkdir(fp, 0777);
@@ -5389,10 +5872,10 @@ static void handle(int fd, const char *rawpath) {
            daemon to clear and no port to unstick - this removes the handover files so the next
            install cannot possibly read the last one's request or verdict, and releases the busy
            latch. Safe to call at any time. */
-        unlink(SHOP_DATA_DIR "/installer-req.txt");
-        unlink(SHOP_DATA_DIR "/installer-res.json");
+        unlink(SPAWN_REQ_PATH);
+        unlink(SPAWN_RES_PATH);
         spawn_installer_remove();     /* our engine leaves nothing behind in pldmgr's launcher */
-        g_spawn_busy = 0;
+        spawn_lane_release();
         ilog("install: cleaned up - ready for the next one");
         send_json(fd, "{\"ok\":true,\"cleaned\":true}");
         return;
@@ -5413,16 +5896,20 @@ static void handle(int fd, const char *rawpath) {
         /* Same rule as install-spawn: a verdict on disk means the job is finished, so report it
            as finished. `stale` says the latch was still set, which is worth seeing in a log even
            though it no longer blocks anything. */
-        int have_res = (access(SHOP_DATA_DIR "/installer-res.json", F_OK) == 0);
-        int really_busy = g_spawn_busy && !have_res && (time(NULL) - g_spawn_started) < 600;
-        long long busy_for = really_busy ? (long long)(time(NULL) - g_spawn_started) : 0;
+        int have_res = (access(SPAWN_RES_PATH, F_OK) == 0);
+        pthread_mutex_lock(&g_spawn_lock);
+        int  latched = g_spawn_busy;
+        long started = g_spawn_started;
+        pthread_mutex_unlock(&g_spawn_lock);
+        int really_busy = latched && !have_res && (time(NULL) - started) < SPAWN_STALE_SECS;
+        long long busy_for = really_busy ? (long long)(time(NULL) - started) : 0;
         char o[300];
         snprintf(o, sizeof(o),
                  "{\"ok\":true,\"busy\":%s,\"stale\":%s,\"since\":%lld,\"busy_for\":%lld,"
                  "\"has_result\":%s,\"log_bytes\":%lld}",
                  really_busy ? "true" : "false",
-                 (g_spawn_busy && !really_busy) ? "true" : "false",
-                 (long long)g_spawn_started, busy_for,
+                 (latched && !really_busy) ? "true" : "false",
+                 (long long)started, busy_for,
                  have_res ? "true" : "false", logsz);
         send_json(fd, o);
         return;
@@ -5448,23 +5935,17 @@ static void handle(int fd, const char *rawpath) {
         }
         /* ONE AT A TIME. Both installs would otherwise share installer-req.txt and the second
            would install whatever the first asked for. The latch expires so a spawned process that
-           died without writing a result cannot block the queue for ever. */
-        /* A verdict on disk means the installer has already exited: the job this latch was
-           guarding is over, whether or not anybody collected the result. Clear it and carry on
-           rather than making the next install wait out a 600-second expiry for a dead process. */
-        if (g_spawn_busy && access(SHOP_DATA_DIR "/installer-res.json", F_OK) == 0) {
-            ilog("install: previous verdict was never collected - releasing the lane");
-            g_spawn_busy = 0;
-        }
-        if (g_spawn_busy && (time(NULL) - g_spawn_started) < 600) {
+           died without writing a result cannot block the queue for ever. A verdict on disk means
+           the previous installer has already exited and releases the lane at once - both rules
+           live in spawn_lane_claim(), under the lock, shared with the console-local lane. */
+        long long token = 0;
+        if (spawn_lane_claim(&token) != 0) {
             send_status(fd, "409 Conflict", "application/json",
                         "{\"ok\":false,\"busy\":true,\"error\":\"an install is already being "
                         "handed to the console - wait for it to finish\"}");
             return;
         }
-        g_spawn_busy = 1;
-        g_spawn_started = time(NULL);
-        ilog("install: requested (async)  uri=%s", enc);
+        ilog("install: requested (async)  uri=%s  token=%lld", enc, token);
         url_decode(enc, uri, sizeof(uri));
         char fixed[1300];
         rewrite_for_install(uri, fixed, sizeof(fixed));
@@ -5472,10 +5953,10 @@ static void handle(int fd, const char *rawpath) {
         /* Hand the request over and clear any previous verdict, so a stale result can never be
            read as this one's - the same rule the queue uses for bgft rows. */
         mkdir(SHOP_DATA_DIR, 0777);
-        unlink(SHOP_DATA_DIR "/installer-res.json");
-        int rq = open(SHOP_DATA_DIR "/installer-req.txt", O_WRONLY | O_CREAT | O_TRUNC, 0777);
+        unlink(SPAWN_RES_PATH);
+        int rq = open(SPAWN_REQ_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
         if (rq < 0) {
-            g_spawn_busy = 0;          /* never leave the lane latched on a failure path */
+            spawn_lane_release();      /* never leave the lane latched on a failure path */
             send_status(fd, "500 Internal Server Error", "application/json",
                         "{\"ok\":false,\"error\":\"The console would not let the shop write to "
                         "its own data folder - load the shop again from Payload Manager\"}");
@@ -5484,12 +5965,12 @@ static void handle(int fd, const char *rawpath) {
         {
             /* Line 2 is the display name. It is what the console files the download under and what
                the installer's toast says, so dropping it made every PC-driven install announce
-               itself as "Your game". */
+               itself as "Your game". Line 3 is the token the installer echoes back. */
             char nenc[300] = {0}, nm[300] = {0};
             if (qparam(rawpath, "name", nenc, sizeof(nenc))) url_decode(nenc, nm, sizeof(nm));
             char line[1750];
-            int ln = snprintf(line, sizeof(line), "%s\n%s\n", fixed, nm);
-            /* snprintf returns what it WOULD have written. Bounded today (1299+1+299+1 = 1600 into
+            int ln = snprintf(line, sizeof(line), "%s\n%s\n%lld\n", fixed, nm, token);
+            /* snprintf returns what it WOULD have written. Bounded today (1299+1+299+1+20+1 into
                1750) but one buffer edit away from making write() read past the stack object and
                put whatever follows it into the file the installer hands to ShellCore. */
             if (ln < 0) ln = 0;
@@ -5511,7 +5992,8 @@ static void handle(int fd, const char *rawpath) {
         if (wrote_installer != 0) {
             /* Refuse rather than spawn something we cannot vouch for. An incomplete ELF handed to
                elfldr is the one failure here with no upper bound on its consequences. */
-            g_spawn_busy = 0;
+            unlink(SPAWN_REQ_PATH);
+            spawn_lane_release();
             ilog("install: ABORTED - the installer could not be written intact (rc=%d)",
                  wrote_installer);
             send_status(fd, "500 Internal Server Error", "application/json",
@@ -5523,8 +6005,12 @@ static void handle(int fd, const char *rawpath) {
         ilog("install: installer spawned  rc=%d", spawned);
         if (spawned != 0) {
             /* Release the lane. spawn_install_wait clears the latch on every failure path; this
-               one did not, so a refusal from Payload Manager locked the queue out for 600s. */
-            g_spawn_busy = 0;
+               one did not, so a refusal from Payload Manager locked the queue out for 600s.
+               Nothing was spawned, so the request and our copy in the launcher go too: a request
+               left behind is what a hand-launched installer would run next. */
+            unlink(SPAWN_REQ_PATH);
+            spawn_installer_remove();
+            spawn_lane_release();
             ilog("install: Payload Manager would not spawn the installer");
         }
         char eu[1400], o[1900];
@@ -5539,19 +6025,30 @@ static void handle(int fd, const char *rawpath) {
     }
     if (!strcmp(path, "/api/engine/spawn-result")) {
         /* The spawned installer's verdict, verbatim. Absent = it has not finished (or never ran). */
-        static char last_logged[1200];
-        int rf = open(SHOP_DATA_DIR "/installer-res.json", O_RDONLY);
+        static char last_logged[2048];
+        long long tok = g_spawn_token;
+        int stale = 0;
+        int rf = open(SPAWN_RES_PATH, O_RDONLY);
         if (rf >= 0) {
-            char rb[1200] = {0};
+            /* Past the installer's out[1900] - the token is its last field, and a shorter read
+               lost it behind a long URL and answered "no result yet" for ever. */
+            char rb[2048] = {0};
             ssize_t rg = read(rf, rb, sizeof(rb) - 1);
             close(rf);
+            /* A verdict that does not carry the token of the request THIS process issued is a
+               late one from an earlier installer, and is reported as "no result yet" rather than
+               handed to the companion as the answer to its job. While this process has issued no
+               request at all (tok == 0: the shop was reloaded mid-install) there is nothing to
+               compare against and the file is served exactly as before, so a companion already
+               waiting on it still gets its answer. */
+            if (rg > 0 && tok && !spawn_verdict_is_ours(rb, tok)) stale = 1;
             /* Log each verdict once - the companion polls this every couple of seconds. */
             if (rg > 0 && strcmp(rb, last_logged) != 0) {
                 snprintf(last_logged, sizeof(last_logged), "%s", rb);
-                ilog("install: verdict  %s", rb);
+                ilog("install: %s  %s", stale ? "stale verdict ignored" : "verdict", rb);
             }
         }
-        if (send_file(fd, SHOP_DATA_DIR "/installer-res.json") != 0)
+        if (stale || send_file(fd, SPAWN_RES_PATH) != 0)
             send_status(fd, "404 Not Found", "application/json",
                         "{\"ok\":false,\"error\":\"no result yet\"}");
         return;
@@ -5677,7 +6174,17 @@ static void handle(int fd, const char *rawpath) {
     }
     if (!strcmp(path, "/api/engine/install-url")) {
         /* /api/engine/install-url?url=<http url>&name=<label>&dest=<dir>
-           Our full pipeline: we download it, we install it. No the third-party daemon. */
+           The in-process download-then-install lane. Nothing in the product calls it any more -
+           the companion's install_pms() has no callers and the UI never did - and its install
+           half is the in-process InstallByPackage that this project proved returns 0x80B2116F for
+           a base game. It downloads any URL onto the system partition with no space check, so it
+           is a diagnostic now, behind the same flag as the other hand-fired install routes. The
+           fetch lane (/api/engine/fetch) is the product's download path and is untouched. */
+        if (!diagnostics_allowed()) {
+            send_status(fd, "403 Forbidden", "application/json",
+                        "{\"ok\":false,\"error\":\"engine diagnostics are off - create /data/pkg-mutant-shop/allow-diagnostics to enable them\"}");
+            return;
+        }
         char url[1200] = {0}, name[160] = {0}, dest[400] = {0};
         if (!qparam(rawpath, "url", url, sizeof(url)) || strncmp(url, "http://", 7)) {
             send_json(fd, "{\"ok\":false,\"error\":\"need an http:// url\"}");
@@ -5771,6 +6278,25 @@ static void handle(int fd, const char *rawpath) {
                           "let it finish first\"}");
             return;
         }
+        if (!strncmp(dest, "/mnt/", 5)) {
+            /* Is that drive REALLY there? The write probe below passes on an unmounted
+               /mnt/usbN just as well - it resolves to the parent filesystem - so a 100 GB
+               backup was pulled onto the SYSTEM partition under a folder that looked like a
+               drive, and vanished the moment a real one was plugged in. Same st_dev test
+               /api/devices and /api/move use. */
+            char droot[64];
+            size_t k = 0;
+            for (const char *p = dest + 5; *p && *p != '/' && k < sizeof(droot) - 6; p++) droot[k++] = *p;
+            droot[k] = 0;
+            char full[80];
+            snprintf(full, sizeof(full), "/mnt/%s", droot);
+            struct stat dstat, mstat;
+            if (!k || stat(full, &dstat) != 0 ||
+                (stat("/mnt", &mstat) == 0 && dstat.st_dev == mstat.st_dev)) {
+                send_json(fd, "{\"ok\":false,\"error\":\"That drive is not connected\"}");
+                return;
+            }
+        }
         mkparents(dest);
         mkdir(dest, 0777);
         {
@@ -5855,14 +6381,25 @@ static void handle(int fd, const char *rawpath) {
     }
     if (!strcmp(path, "/api/engine/lprobe")) {
         /* Diagnostic: send a line to a localhost port and return the reply. Used to talk to
-           loopback-only install daemons that the PC cannot reach directly. */
+           loopback-only install daemons that the PC cannot reach directly.
+
+           This runs on the single accept loop, and it waited up to TEN MINUTES for a reply - so
+           pointing it at any localhost port that accepts a connection and then says nothing
+           (most request/response servers, waiting for input) took every API on this console
+           down for that long. Nothing in the product calls it; it sits behind the diagnostics
+           flag now, and the wait is bounded at 30 s. */
+        if (!diagnostics_allowed()) {
+            send_status(fd, "403 Forbidden", "application/json",
+                        "{\"ok\":false,\"error\":\"engine diagnostics are off - create /data/pkg-mutant-shop/allow-diagnostics to enable them\"}");
+            return;
+        }
         char pbuf[16] = {0}, msg[1200] = {0};
         if (!qparam(rawpath, "port", pbuf, sizeof(pbuf)) ||
             !qparam(rawpath, "msg", msg, sizeof(msg))) {
             send_json(fd, "{\"ok\":false,\"error\":\"need port and msg\"}");
             return;
         }
-        int s2 = connect_local(atoi(pbuf), 600000, 15000);
+        int s2 = connect_local(atoi(pbuf), 30000, 15000);
         if (s2 < 0) { send_json(fd, "{\"ok\":false,\"error\":\"nothing listening\"}"); return; }
         write_all(s2, msg, strlen(msg));
         shutdown(s2, SHUT_WR);
@@ -5989,19 +6526,27 @@ static void handle(int fd, const char *rawpath) {
             tid, iver, fver, eb, ep, fmt, compatible ? "true" : "false", reason,
             live ? "true" : "false", live ? (int)rpid : 0,
             (unsigned long long)(live ? rbase : 0));
-        for (int i = 0; i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
+        /* One walk of the document (next_mod_block) and the block goes to the state reader
+           as-is: find_mod_block + cheat_mod_state per index rescanned the file from the top for
+           every mod, on the accept loop. `dropped` is additive: entries the engine cannot read
+           (see parse_mod_entries_ex) - such a mod's state is never "on". */
+        const char *from = mods_array_start(doc);
+        for (int i = 0; from && i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
             const char *end = NULL;
-            const char *blk = find_mod_block(doc, i, &end);
+            const char *blk = next_mod_block(from, &end);
             if (!blk) break;
+            from = end;
             char nm[240] = {0};
             json_str_after(blk, "name", nm, sizeof(nm));
-            int n = parse_mod_entries(blk, end, ents, CHEAT_MAX_ENTRIES);
+            int dropped = 0;
+            int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
             char en[500]; json_escape(nm, en, sizeof(en));
-            const char *stt = live ? cheat_mod_state(doc, i, rpid, rbase, non_json) : "unknown";
+            const char *stt = live ? cheat_mod_state_blk(doc, blk, end, rpid, rbase, non_json)
+                                   : "unknown";
             len += snprintf(out + len, OUTSZ - len,
-                "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"state\":\"%s\",\"on\":%s,"
-                "\"conflict\":%s,\"can_toggle\":%s,\"conflicts_with\":[]}",
-                i ? "," : "", i, en, n, stt,
+                "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"dropped\":%d,\"state\":\"%s\","
+                "\"on\":%s,\"conflict\":%s,\"can_toggle\":%s,\"conflicts_with\":[]}",
+                i ? "," : "", i, en, n, dropped, stt,
                 !strcmp(stt, "on") ? "true" : "false",
                 !strcmp(stt, "partial") ? "true" : "false",
                 live ? "true" : "false");
@@ -6338,19 +6883,25 @@ static void handle(int fd, const char *rawpath) {
         len += snprintf(out+len, OUTSZ-len,
                         "{\"ok\":true,\"title\":\"%s\",\"id\":\"%s\",\"version\":\"%s\","
                         "\"process\":\"%s\",\"format\":\"%s\",\"mods\":[", et, ei, ev, ep, fmt);
-        for (int i = 0; i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
+        const char *from = mods_array_start(json);      /* one walk - see GET /api/mods/ */
+        for (int i = 0; from && i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
             const char *end = NULL;
-            const char *blk = find_mod_block(json, i, &end);
+            const char *blk = next_mod_block(from, &end);
             if (!blk) break;
+            from = end;
             char nm[240] = {0};
             json_str_after(blk, "name", nm, sizeof(nm));
-            int n = parse_mod_entries(blk, end, ents, CHEAT_MAX_ENTRIES);
+            int dropped = 0;
+            int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
             char esc2[500]; json_escape(nm, esc2, sizeof(esc2));
-            const char *stt = (lpid > 0) ? cheat_mod_state(json, i, (pid_t)lpid, lbase, non_json)
+            const char *stt = (lpid > 0) ? cheat_mod_state_blk(json, blk, end, (pid_t)lpid, lbase,
+                                                               non_json)
                                          : "unknown";
             len += snprintf(out+len, OUTSZ-len,
-                            "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"state\":\"%s\",\"on\":%s}",
-                            i ? "," : "", i, esc2, n, stt, strcmp(stt,"on")==0 ? "true" : "false");
+                            "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"dropped\":%d,"
+                            "\"state\":\"%s\",\"on\":%s}",
+                            i ? "," : "", i, esc2, n, dropped, stt,
+                            strcmp(stt,"on")==0 ? "true" : "false");
         }
         char idbuf[24] = {0};
         snprintf(idbuf, sizeof(idbuf), "%s", id);
@@ -6402,7 +6953,7 @@ static void handle(int fd, const char *rawpath) {
         qparam(rawpath, "index", ib, sizeof(ib));
         qparam(rawpath, "force", fb, sizeof(fb));
         qparam(rawpath, "dry", db, sizeof(db));
-        char o[1000];
+        char o[1400];
         patch_action_json(tid, ib[0] ? atoi(ib) : 0, fb[0] ? atoi(fb) : 0, db[0] ? atoi(db) : 0,
                           !strcmp(path, "/api/patch/revert"), o, sizeof(o));
         send_json(fd, o);
@@ -6506,27 +7057,38 @@ static void handle(int fd, const char *rawpath) {
             qparam(rawpath, "icon", icb, sizeof(icb));
             int variant = icb[0] ? atoi(icb) : 0;
             g_notify_rc = -12345; g_notify_rc_icon = -12345;
+            int pending = 0;
             if (variant > 0) {
                 /* PLAIN FIRST, ALWAYS. If the icon variant does not draw, the user still sees a
                    line telling them so - which is the whole point. Branding has been switched on
-                   and reverted twice on the strength of a return code; the television decides. */
-                char lead[360];
-                snprintf(lead, sizeof(lead),
-                         "Icon test %d\nIf this is the only line you see, that icon did not draw",
-                         variant);
-                notify(lead);
-                sleep(2);                       /* let the shell draw it before the second one */
-                notify_icon_probe(txt, variant);
+                   and reverted twice on the strength of a return code; the television decides.
+                   The sequence runs on notify_probe_thread, not here (see it for why); the reply
+                   says the codes are pending and the next call can read what landed. */
+                notify_probe_t *p = (notify_probe_t *)calloc(1, sizeof(*p));
+                if (p) {
+                    snprintf(p->txt, sizeof(p->txt), "%s", txt);
+                    p->variant = variant;
+                    pthread_t t;
+                    pthread_attr_t a;
+                    pthread_attr_init(&a);
+                    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+                    pthread_attr_setstacksize(&a, 128 * 1024);
+                    if (pthread_create(&t, &a, notify_probe_thread, p) == 0) pending = 1;
+                    else free(p);
+                    pthread_attr_destroy(&a);
+                }
+                if (!pending) notify(txt);      /* no thread: at least say the words, plainly */
             } else {
                 notify(txt);
             }
             /* Give the detached sender a moment so the caller can SEE the result. */
-            for (int w = 0; w < 20 && g_notify_rc == -12345; w++) usleep(50000);
-            char o[300];
+            if (!pending) for (int w = 0; w < 20 && g_notify_rc == -12345; w++) usleep(50000);
+            char o[360];
             snprintf(o, sizeof(o),
-                     "{\"ok\":%s,\"rc_plain\":%d,\"rc_icon\":%d,\"variant\":%d,\"uri\":\"%s\","
-                     "\"note\":\"the television decides, not these numbers\"}",
-                     g_notify_rc == 0 ? "true" : "false", g_notify_rc, g_notify_rc_icon, variant,
+                     "{\"ok\":%s,\"rc_plain\":%d,\"rc_icon\":%d,\"variant\":%d,\"pending\":%s,"
+                     "\"uri\":\"%s\",\"note\":\"the television decides, not these numbers\"}",
+                     (pending || g_notify_rc == 0) ? "true" : "false", g_notify_rc,
+                     g_notify_rc_icon, variant, pending ? "true" : "false",
                      variant == 2 ? NOTIFY_ICON_SYSTEM :
                      variant == 3 ? NOTIFY_ICON_SHELL :
                      variant == 4 ? NOTIFY_ICON_FILEURI :
@@ -6577,6 +7139,28 @@ static void handle(int fd, const char *rawpath) {
                           "nothing to delete.\"}");
             return;
         }
+        /* Look once more, with lstat, right before anything is removed. find_backup_for_tid()
+           already refused a symlink; this is the same check at the moment it matters, so a link
+           swapped in between the lookup and the delete is unlinked as a link, never followed. */
+        {
+            struct stat lst;
+            if (lstat(bpath, &lst) != 0 || S_ISLNK(lst.st_mode)) {
+                send_json(fd, "{\"ok\":false,\"error\":\"That backup changed while it was being "
+                              "checked. Try again.\"}");
+                return;
+            }
+        }
+        /* Is the container mounted right now? ShadowMount leaves /user/app/<TID>/mount.lnk for a
+           mounted backup. It is NOT a reason to refuse - deleting a registered-but-idle backup is
+           the normal case this route exists for, and unlinking the file underneath a mount is safe
+           (the space stays allocated until the mount is released). It IS a reason not to claim the
+           bytes are freed and the game gone this instant, which the reply used to assert. */
+        int mounted = 0;
+        {
+            char mlnk[128];
+            snprintf(mlnk, sizeof(mlnk), "/user/app/%s/mount.lnk", tid);
+            mounted = (access(mlnk, F_OK) == 0);
+        }
         int rc;
         if (is_dir) {
             /* A folder-shaped dump. rmdir() alone cannot remove one - it only takes an EMPTY
@@ -6591,13 +7175,22 @@ static void handle(int fd, const char *rawpath) {
         char eb[560], o[900];
         json_escape(bpath, eb, sizeof(eb));
         if (rc == 0) {
-            ilog("delete: removed backup %s (%lld bytes)", bpath, bytes);
-            notifyf("%s removed from this console\nThe backup file is gone, so it will not come "
-                    "back on the next scan", tid);
+            ilog("delete: removed backup %s (%lld bytes, mounted=%d)", bpath, bytes, mounted);
+            if (mounted)
+                notifyf("%s removed from this console\nIt stays playable until the console "
+                        "restarts, and its space is freed then - it will not come back", tid);
+            else
+                notifyf("%s removed from this console\nThe backup file is gone, so it will not come "
+                        "back on the next scan", tid);
             snprintf(o, sizeof(o),
                      "{\"ok\":true,\"deleted\":true,\"path\":\"%s\",\"bytes\":%lld,"
-                     "\"message\":\"Removed from the console. Delete it from the PS5 home screen "
-                     "too if it is still showing there.\"}", eb, bytes);
+                     "\"mounted\":%s,\"message\":\"%s\"}", eb, bytes,
+                     mounted ? "true" : "false",
+                     mounted ? "Removed from the console. It is still mounted, so its space is "
+                               "freed when the console restarts. Delete it from the PS5 home "
+                               "screen too if it is still showing there."
+                             : "Removed from the console. Delete it from the PS5 home screen "
+                               "too if it is still showing there.");
         } else {
             ilog("delete: FAILED to remove %s (errno %d)", bpath, errno);
             snprintf(o, sizeof(o),
@@ -7034,7 +7627,14 @@ static void preload_modules(void) {
     }
 }
 
+/* Under a lock, because "exactly once" was only ever true of a single thread: payload_bootstrap
+   calls tile_install() on its own thread during the boot window while /api/tile/install,
+   /api/engine/sym and the diagnostics routes reach here from the accept thread, and two callers
+   passing the `!g_ai_inited` test together would have called Initialize twice - which the comment
+   above says poisons the installer's IPMI state, silently. */
+static pthread_mutex_t g_ai_lock = PTHREAD_MUTEX_INITIALIZER;
 static int appinst_once(void) {
+    pthread_mutex_lock(&g_ai_lock);
     if (!g_ai_ready) {
         sceUserServiceInitialize(0);
         preload_modules();
@@ -7046,7 +7646,9 @@ static int appinst_once(void) {
         g_ai_ready = 1;
     }
     if (!g_ai_inited && g_ai_init) { g_ai_init_rc = g_ai_init(); g_ai_inited = 1; }
-    return g_ai_init_rc;
+    int rc = g_ai_init_rc;
+    pthread_mutex_unlock(&g_ai_lock);
+    return rc;
 }
 
 static void appinst_init_resolve(void) {
@@ -7453,7 +8055,8 @@ static int install_pkg_local(const char *path, char *cid_out, size_t cid_sz) {
 
 /* Find a process by its authid by walking pids. We need SceShellCore's credentials to
    satisfy the installer's PPR check, and its pid changes every boot, so it has to be
-   discovered rather than hard-coded. ShellCore = 0x3800000000000010. */
+   discovered rather than hard-coded. ShellCore = AUTHID_SHELLCORE (0x48... on 12.70; the
+   PS4-era 0x38... value this comment used to quote does not exist on this firmware). */
 static int find_pid_by_authid(uint64_t want, int maxpid) {
     for (int pid = 1; pid < maxpid; pid++) {
         if (kernel_get_ucred_authid(pid) == want) return pid;
@@ -7525,18 +8128,60 @@ static int install_full(const char *uri, int cred_pid, char *cid_out, size_t cid
 static const char PM_HDR_TAIL[] = { 13,10, 'H','o','s','t',':',' ','1','2','7','.','0','.','0','.','1', 13,10,
   'C','o','n','n','e','c','t','i','o','n',':',' ','c','l','o','s','e', 13,10, 13,10, 0 };
 
-/* one GET to Payload Manager; 0 on success */
+/* one GET to Payload Manager; 0 on success.
+
+   Success means Payload Manager ACCEPTED the load: an HTTP 2xx, or - should it ever answer
+   without a status line - the bare "OK" its /loadpayload is documented to return. Any bytes at
+   all used to count, so an error body from pldmgr logged "installer spawned rc=0" and the lane
+   then waited 60-90 s for a verdict that could never come before blaming a busy console. The
+   receive timeout is 10 s, not 30: this runs on the accept thread for install-spawn, and a hung
+   Payload Manager froze every API on this console for half a minute per request. */
 static int pm_get(const char *path) {
-    int s = connect_local(PLDMGR_PORT, 30000, 8000);
+    int s = connect_local(PLDMGR_PORT, 10000, 8000);
     if (s < 0) return -1;
     char req[700];
     int n = snprintf(req, sizeof(req),
                      "GET %s HTTP/1.0%s", path, PM_HDR_TAIL);
     write_all(s, req, (size_t)n);
-    char b[256];
-    ssize_t r = read(s, b, sizeof(b) - 1);
+    char b[1024];
+    size_t got = 0;
+    for (;;) {
+        ssize_t r = read(s, b + got, sizeof(b) - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got >= sizeof(b) - 1) break;
+        b[got] = 0;
+        /* This loop exists for a reply that arrives in more than one packet, NOT to reach EOF:
+           a Payload Manager that keeps the socket open after its short answer would otherwise
+           hold this call - and, for install-spawn, the accept thread - for the whole 10 s
+           receive timeout. Stop the moment the reply is decidable: the headers are complete and
+           any body they promise has arrived, or there is no status line and it starts "OK". */
+        if (!strncmp(b, "HTTP/1.", 7)) {
+            const char *he = strstr(b, "\r\n\r\n");
+            if (he) {
+                const char *cl = strcasestr(b, "\r\ncontent-length:");
+                long want = (cl && cl < he) ? strtol(cl + 17, NULL, 10) : -1;
+                if (want < 0 || (long)(got - (size_t)(he + 4 - b)) >= want) break;
+            }
+        } else if (got >= 2 && !strncmp(b, "OK", 2)) {
+            break;
+        }
+    }
     close(s);
-    return (r > 0) ? 0 : -1;
+    b[got] = 0;
+    if (!got) return -1;
+    int status = 0;
+    const char *body = b;
+    if (!strncmp(b, "HTTP/1.", 7)) {
+        status = atoi(b + 9);
+        const char *be = strstr(b, "\r\n\r\n");
+        body = be ? be + 4 : b + got;
+    }
+    while (*body == ' ' || *body == '\r' || *body == '\n' || *body == '\t') body++;
+    int ok = (status >= 200 && status < 300) || (!status && !strncmp(body, "OK", 2));
+    if (!ok || strncmp(body, "OK", 2))
+        ilog("pldmgr: %s -> status=%d body=%.80s", path, status, body);
+    return ok ? 0 : -1;
 }
 
 /* is anything already listening on this localhost port? */
@@ -7901,7 +8546,12 @@ static int hex2bytes(const char *hex, unsigned char *out, size_t cap) {
         /* .shn/.mc4 render bytes as "90-90-90-90"; JSON files have none of this, so the
            skip is a no-op there and the working JSON path is unchanged. */
         while (*q == '-' || *q == ' ' || *q == ':' || *q == ',') q++;
-        if (!q[0] || !q[1]) break;
+        if (!q[0]) break;
+        /* A lone trailing digit used to be dropped on the floor: "F4240" (CUSA01140_01.16
+           "Max Fuel Resources", meant as 0F 42 40) parsed as F4 24 and nobody was told. 58 such
+           entries sit in 34 shipped JSON files. It is malformed, so say so - the entry is then
+           counted as unreadable and the mod refuses to apply, instead of writing the wrong bytes. */
+        if (!q[1]) return -1;
         int hi = hexval(q[0]), lo = hexval(q[1]);
         if (hi < 0 || lo < 0) return -1;
         if (n >= cap) return -1;
@@ -8085,44 +8735,108 @@ static const char *find_mod_block(const char *json, int index, const char **end)
     return NULL;
 }
 
+/* Just past the '[' of "mods", or NULL. Feed it to next_mod_block(). */
+static const char *mods_array_start(const char *json) {
+    const char *m = strstr(json, "\"mods\"");
+    if (!m) return NULL;
+    m = strchr(m, '[');
+    return m ? m + 1 : NULL;
+}
+
+/* The mod block that begins after `from` (the '[' of "mods", or the end of the previous block).
+   find_mod_block() walks the document from the top for every index, which made listing a
+   96-mod file - and Disable-all over one - quadratic in the file size, on the accept loop. Same
+   brace rules as find_mod_block, so the two agree on what block N is. */
+static const char *next_mod_block(const char *from, const char **end) {
+    const char *q = from;
+    while (*q && *q != '{' && *q != ']') q++;
+    if (*q != '{') return NULL;
+    const char *start = q;
+    int depth = 0;
+    for (; *q; q++) {
+        if (*q == '{') depth++;
+        else if (*q == '}') { depth--; if (depth == 0) { *end = q + 1; return start; } }
+    }
+    return NULL;
+}
+
+/* "dropped":N inside one mod block - shn_xml_to_json writes it for cheatlines it could not copy
+   out. Bounded to the block: a plain strstr from `blk` would read the NEXT mod's count. */
+static int mod_dropped_count(const char *blk, const char *blk_end) {
+    const char *d = strstr(blk, "\"dropped\"");
+    if (!d || d >= blk_end) return 0;
+    d += 9;
+    while (*d == ' ' || *d == ':') d++;
+    int v = atoi(d);
+    return v > 0 ? v : 0;
+}
+
 /* Parse the memory[] array of one mod block. Returns entry count. */
 static int parse_mod_entries(const char *blk, const char *blk_end, cheat_entry_t *out, int max) {
+    return parse_mod_entries_ex(blk, blk_end, out, max, NULL);
+}
+
+/* The same, and via *dropped_out how many entries the engine COULD NOT read: hex longer than
+   CHEAT_MAX_BYTES, an odd digit count, a value cut short by the text buffer, an entry beyond
+   CHEAT_MAX_ENTRIES, plus the cheatlines the XML converter already gave up on. Those used to
+   vanish - the entry was skipped and the rest of the mod applied - and a hook missing one of its
+   parts is how a game hangs. Now they are counted, the mod refuses to apply, and its state says
+   so. */
+static int parse_mod_entries_ex(const char *blk, const char *blk_end, cheat_entry_t *out, int max,
+                                int *dropped_out) {
+    int dropped = mod_dropped_count(blk, blk_end);
     const char *mem = strstr(blk, "\"memory\"");
-    if (!mem || mem >= blk_end) return 0;
+    if (!mem || mem >= blk_end) { if (dropped_out) *dropped_out = dropped; return 0; }
+    /* Hex text buffers: 2 chars per byte plus slack, so a value that overruns them is provably
+       longer than CHEAT_MAX_BYTES. Heap - at 4 KB per entry they no longer belong on a stack.
+       Not static: the HTTP server is threaded and these would race. */
+    size_t hsz = (size_t)CHEAT_MAX_BYTES * 2 + 16;
+    char *onh = (char *)malloc(hsz), *offh = (char *)malloc(hsz);
+    if (!onh || !offh) { free(onh); free(offh); if (dropped_out) *dropped_out = dropped; return 0; }
     int n = 0, depth = 0;
     const char *s2 = NULL;
-    for (const char *q = mem; q < blk_end && *q && n < max; q++) {
+    for (const char *q = mem; q < blk_end && *q; q++) {
         if (*q == '{') { if (depth == 0) s2 = q; depth++; }
         else if (*q == '}') {
             depth--;
             if (depth == 0 && s2) {
-                /* 1024 bytes max per patch => 2048 hex chars; sized so a long patch is
-                   never silently truncated into a wrong-length write. */
-                /* Not static: the HTTP server is threaded and these would race. */
                 char off[40] = {0};
-                char onh[CHEAT_MAX_BYTES * 2 + 16], offh[CHEAT_MAX_BYTES * 2 + 16];
                 onh[0] = 0; offh[0] = 0;
                 json_str_after(s2, "offset", off, sizeof(off));
-                json_str_after(s2, "on",  onh,  sizeof(onh));
-                json_str_after(s2, "off", offh, sizeof(offh));
+                /* NULL with text already copied means the value did not fit the buffer. The old
+                   code went on to parse that truncated hex as a shorter, wrong-length write. */
+                const char *ron  = json_str_after(s2, "on",  onh,  hsz);
+                const char *roff = json_str_after(s2, "off", offh, hsz);
                 if (off[0]) {
-                    cheat_entry_t *e = &out[n];
-                    memset(e, 0, sizeof(*e));
-                    e->offset = strtoull(off, NULL, 16);      /* offsets are hex, no 0x prefix */
-                    e->on_len  = onh[0]  ? hex2bytes(onh,  e->on,  sizeof(e->on))  : 0;
-                    e->off_len = offh[0] ? hex2bytes(offh, e->off, sizeof(e->off)) : 0;
-                    /* .shn/.mc4 can mark an individual offset as already absolute. */
-                    const char *ab = strstr(s2, "\"absolute\"");
-                    if (ab && ab < q) {
-                        const char *tv = strstr(ab, "true");
-                        if (tv && tv < q) e->absolute = 1;
+                    int bad = (onh[0] && !ron) || (offh[0] && !roff);
+                    if (n >= max) bad = 1;                    /* beyond the table: not silently lost */
+                    cheat_entry_t *e = bad ? NULL : &out[n];
+                    int on_len = 0, off_len = 0;
+                    if (e) {
+                        memset(e, 0, sizeof(*e));
+                        e->offset = strtoull(off, NULL, 16);      /* offsets are hex, no 0x prefix */
+                        on_len  = onh[0]  ? hex2bytes(onh,  e->on,  sizeof(e->on))  : 0;
+                        off_len = offh[0] ? hex2bytes(offh, e->off, sizeof(e->off)) : 0;
+                        if (on_len < 0 || off_len < 0) bad = 1;   /* too long, or malformed hex */
                     }
-                    if (e->on_len > 0 || e->off_len > 0) n++;
+                    if (bad) dropped++;
+                    else {
+                        e->on_len = on_len; e->off_len = off_len;
+                        /* .shn/.mc4 can mark an individual offset as already absolute. */
+                        const char *ab = strstr(s2, "\"absolute\"");
+                        if (ab && ab < q) {
+                            const char *tv = strstr(ab, "true");
+                            if (tv && tv < q) e->absolute = 1;
+                        }
+                        if (e->on_len > 0 || e->off_len > 0) n++;
+                    }
                 }
                 s2 = NULL;
             }
         } else if (*q == ']' && depth == 0) break;
     }
+    free(onh); free(offh);
+    if (dropped_out) *dropped_out = dropped;
     return n;
 }
 
@@ -8138,10 +8852,12 @@ static int offset_known_state(const char *json, unsigned long long offset,
     if (out_owner) *out_owner = -1;
     cheat_entry_t *es = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
     if (!es) return 0;
-    for (int mi = 0; mi < CHEAT_MAX_MODS; mi++) {
+    const char *from = mods_array_start(json);
+    for (int mi = 0; from && mi < CHEAT_MAX_MODS; mi++) {
         const char *end = NULL;
-        const char *blk = find_mod_block(json, mi, &end);
+        const char *blk = next_mod_block(from, &end);
         if (!blk) break;
+        from = end;
         int n = parse_mod_entries(blk, end, es, CHEAT_MAX_ENTRIES);
         for (int i = 0; i < n; i++) {
             if (es[i].offset != offset) continue;
@@ -8159,15 +8875,17 @@ static int offset_known_state(const char *json, unsigned long long offset,
 /* Report a mod's live state by reading memory: "on" (every entry matches its on-bytes),
  * "off" (every entry matches off), "partial" (a mix — usually a displaced shared hook),
  * or "unknown" (memory matches neither, e.g. wrong game build).
- * Without this the UI has to guess, which made toggles appear to flip back by themselves. */
-static const char *cheat_mod_state(const char *json, int index, pid_t pid, intptr_t base,
-                                   int non_json) {
-    const char *end = NULL;
-    const char *blk = find_mod_block(json, index, &end);
-    if (!blk) return "unknown";
+ * Without this the UI has to guess, which made toggles appear to flip back by themselves.
+ * Takes the mod's block: the listing routes walk the document once with next_mod_block() and
+ * hand each block here, where the by-index form (find_mod_block from the top, per mod) used to
+ * rescan the whole file for every row. */
+static const char *cheat_mod_state_blk(const char *json, const char *blk, const char *end,
+                                       pid_t pid, intptr_t base, int non_json) {
+    (void)json;
     cheat_entry_t *es = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
     if (!es) return "unknown";
-    int n = parse_mod_entries(blk, end, es, CHEAT_MAX_ENTRIES);
+    int dropped = 0;
+    int n = parse_mod_entries_ex(blk, end, es, CHEAT_MAX_ENTRIES, &dropped);
     if (n <= 0) { free(es); return "unknown"; }
     int abs_mode = non_json ? cheat_addr_mode(es, n, pid, base) : 0;
     int on = 0, off = 0, other = 0;
@@ -8182,6 +8900,11 @@ static const char *cheat_mod_state(const char *json, int index, pid_t pid, intpt
         else other++;
     }
     free(es);
+    /* A mod with entries the engine could not read is never whole. Its readable part being ON
+       means only that part was ever written (by force, or by an older build), so it is "partial";
+       otherwise it is "unknown", which greys the tile out up front - the same refusal the apply
+       would give (cheat_apply_blk). It used to report "on" for the part it could see. */
+    if (dropped > 0) return on ? "partial" : "unknown";
     if (on && !off && !other) return "on";
     if (off && !on && !other) return "off";
     if (on || off) return "partial";
@@ -8189,20 +8912,45 @@ static const char *cheat_mod_state(const char *json, int index, pid_t pid, intpt
 }
 
 /* Apply (want_on=1) or revert (0) one mod. Writes each entry only when memory currently
-   holds the opposite state — unless force. Returns entries written; negatives are errors. */
+   holds the opposite state — unless force. Returns entries written; negatives are errors.
+   Three layers: by file (this), by loaded document, by block - so a route that already holds
+   the document (Disable-all, the listings) never re-reads and re-decrypts it per mod. */
 static int cheat_apply_mod(const char *file, int index, int want_on, pid_t pid, intptr_t base,
                            int force, char *detail, size_t dsz) {
     int non_json = 0;
     char *json = cheat_load_doc(file, &non_json);      /* .json / .shn / .mc4 all land here */
     if (!json) { snprintf(detail, dsz, "cannot read %s", file); return -1; }
+    int rc = cheat_apply_mod_doc(json, non_json, index, want_on, pid, base, force, detail, dsz);
+    free(json);
+    return rc;
+}
+
+static int cheat_apply_mod_doc(const char *json, int non_json, int index, int want_on, pid_t pid,
+                               intptr_t base, int force, char *detail, size_t dsz) {
     const char *end = NULL;
     const char *blk = find_mod_block(json, index, &end);
-    if (!blk) { free(json); snprintf(detail, dsz, "mod %d not found", index); return -2; }
+    if (!blk) { snprintf(detail, dsz, "mod %d not found", index); return -2; }
+    return cheat_apply_blk(json, non_json, blk, end, index, want_on, pid, base, force, detail, dsz);
+}
 
+static int cheat_apply_blk(const char *json, int non_json, const char *blk, const char *end,
+                           int index, int want_on, pid_t pid, intptr_t base, int force,
+                           char *detail, size_t dsz) {
     cheat_entry_t *ents = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
-    if (!ents) { free(json); snprintf(detail, dsz, "out of memory"); return -1; }
-    int n = parse_mod_entries(blk, end, ents, CHEAT_MAX_ENTRIES);
-    if (n <= 0) { free(ents); free(json); snprintf(detail, dsz, "mod %d has no memory entries", index); return -3; }
+    if (!ents) { snprintf(detail, dsz, "out of memory"); return -1; }
+    int dropped = 0;
+    int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
+    if (n <= 0) { free(ents); snprintf(detail, dsz, "mod %d has no memory entries", index); return -3; }
+    if (dropped > 0 && want_on && !force) {
+        /* Part of this mod could not be read out of its file. Writing the rest installs half a
+           hook - the classic way to hang a game - so the whole mod is refused (rc -4, its own
+           toast). Turning OFF still runs: it only ever puts documented bytes back, each one gated
+           below, so it can undo what a forced apply or an older build wrote and nothing more. */
+        free(ents);
+        snprintf(detail, dsz, "mod %d has %d entr%s the engine cannot read (too large or malformed) "
+                 "- refusing to apply part of it", index, dropped, dropped == 1 ? "y" : "ies");
+        return -4;
+    }
     int abs_mode = non_json ? cheat_addr_mode(ents, n, pid, base) : 0;
 
     int written = 0, skipped = 0, failed = 0, displaced = -1;
@@ -8215,11 +8963,27 @@ static int cheat_apply_mod(const char *file, int index, int want_on, pid_t pid, 
         if (wl <= 0) { skipped++; continue; }
         intptr_t addr = cheat_entry_addr(e, base, abs_mode);
         if (!ADDR_OK(addr)) { failed++; continue; }
-        if (!force && xl == wl) {
+        if (!force) {
+            /* EVERY write goes through the gate now. It used to run only when the on and off
+               runs were the same length; 549 real entries (a 5-byte call replaced by a 2-byte
+               jump, a longer patch over a short one) skipped it and were written blind into
+               whatever build was running - and Disable-all put their "off" bytes back just as
+               blind. Read the longer of the two runs so both comparisons are possible. */
+            int rl = xl > wl ? xl : wl;
             unsigned char cur[CHEAT_MAX_BYTES];
-            if (mem_read(pid, addr, cur, (size_t)wl) != 0) { failed++; continue; }
+            if (mem_read(pid, addr, cur, (size_t)rl) != 0) {
+                /* the longer run may cross into a page the shorter one does not */
+                if (rl == wl || mem_read(pid, addr, cur, (size_t)wl) != 0) { failed++; continue; }
+                rl = wl;
+            }
             if (memcmp(cur, w, (size_t)wl) == 0) { skipped++; continue; }   /* already in state */
-            if (memcmp(cur, x, (size_t)xl) != 0) {
+            if (xl > 0 && xl <= rl && memcmp(cur, x, (size_t)xl) == 0) {
+                /* holds exactly the documented opposite state - the normal case */
+            } else if (xl <= 0) {
+                /* The file documents nothing to expect here (an "on"-only value write, one in the
+                   whole JSON library). There is no state to gate on, so the write stands as it
+                   always has; only the already-in-state test above applies. */
+            } else {
                 /* Not our expected state — but a sibling mod may legitimately own this hook.
                    Allow the hand-over when the bytes are a documented state; refuse otherwise. */
                 int owner = -1;
@@ -8230,12 +8994,15 @@ static int cheat_apply_mod(const char *file, int index, int want_on, pid_t pid, 
         if (mem_write(pid, addr, w, (size_t)wl) == 0) written++; else failed++;
     }
     free(ents);
-    free(json);
+    size_t dl = 0;
     if (displaced >= 0)
-        snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d displaced_mod=%d",
-                 n, written, skipped, failed, displaced);
+        dl = (size_t)snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d displaced_mod=%d",
+                              n, written, skipped, failed, displaced);
     else
-        snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d", n, written, skipped, failed);
+        dl = (size_t)snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d",
+                              n, written, skipped, failed);
+    if (dropped > 0 && dl < dsz)                      /* only reachable forced, or turning off */
+        snprintf(detail + dl, dsz - dl, " dropped=%d", dropped);
     return failed ? -(100 + failed) : written;
 }
 
@@ -8447,8 +9214,34 @@ static int patch_parse_lines(const char *blk, const char *end, patch_line_t *out
 /* Where the pre-patch bytes are kept so a patch can be undone. */
 #define PATCH_UNDO_DIR CHEAT_PATCH_DIR "/.applied"
 
-static void patch_undo_path(const char *tid, int index, char *out, size_t outsz) {
-    snprintf(out, outsz, "%s/%s_%d.bin", PATCH_UNDO_DIR, tid, index);
+/* Keyed by the INSTALLED VERSION as well as title and index. A patch is an in-memory write that
+   is gone the moment the game closes, so nobody presses Remove before taking a game update - and
+   an update puts different code at the same offsets. Without the version in the name the next
+   Apply on the new binary found the old binary's originals already saved, and Remove wrote them
+   into code they never came from. An unknown version keys as "" (one file, as before). */
+static void patch_undo_path(const char *tid, int index, const char *iver, char *out, size_t outsz) {
+    char v[32] = {0};
+    size_t k = 0;
+    for (const char *p = iver ? iver : ""; *p && k < sizeof(v) - 1; p++) {
+        char c = *p;
+        int plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    c == '.' || c == '-';
+        v[k++] = plain ? c : '_';       /* a version reads "01.03"; anything odd still names a file */
+    }
+    snprintf(out, outsz, "%s/%s_%d_%s.bin", PATCH_UNDO_DIR, tid, index, v);
+}
+
+/* The undo file, APPENDED to and never truncated. fopen(up, "wb") on every apply wiped it, so
+   pressing Apply a second time (the button is enabled again after a refusal, and a fresh game
+   launch makes every line writable again) destroyed the saved originals, and Remove then said
+   "nothing to undo" over a patch that was very much in. Appending keeps every original ever
+   recorded for this title+index+version: a relaunch appends the same bytes again and a revert
+   writes them twice, which is harmless - for one installed version the original bytes at an
+   offset never change. (A "first apply wins" O_EXCL file sat here briefly; it made the first
+   apply's bytes permanent and never recorded a line that only a later apply reached.)
+   patch_revert deletes the file after a complete revert. */
+static FILE *patch_undo_open(const char *up) {
+    return fopen(up, "ab");
 }
 
 /* Apply (or with dry=1 merely inspect) patch `index` of `tid` into the live process.
@@ -8456,11 +9249,14 @@ static void patch_undo_path(const char *tid, int index, char *out, size_t outsz)
    Patches carry no "off" bytes, so the expect-gating the cheat engine relies on does not exist
    here — the real guard is AppVer, checked by the caller, plus three things done here:
      1. every address is range-checked before it is touched,
-     2. the ORIGINAL bytes are saved first, so the patch can be undone,
+     2. the ORIGINAL bytes of every line actually written are saved first (patch_undo_open,
+        appended to) - so the patch can be undone,
      3. every write is read back and compared, so a silent failure is reported as one.
-   Returns the number of lines written, or a negative value on refusal. */
-static int patch_apply(const char *tid, int index, pid_t pid, intptr_t base, int force,
-                       int dry, char *detail, size_t dsz) {
+   Returns the number of lines written, or a negative value on refusal - and a refusal it is
+   whenever ANY line was refused, even if others landed: the count of what landed travels in
+   `detail` so the toast can say "only partly applied" instead of "applied". */
+static int patch_apply(const char *tid, int index, const char *iver, pid_t pid, intptr_t base,
+                       int force, int dry, char *detail, size_t dsz) {
     (void)force;
     char file[600];
     if (patch_file_for(tid, file, sizeof(file)) != 0) return -1;
@@ -8478,12 +9274,8 @@ static int patch_apply(const char *tid, int index, pid_t pid, intptr_t base, int
 
     int written = 0, verified = 0, failed = 0, skipped = 0, already = 0;
     FILE *undo = NULL;
-    if (!dry && n > 0) {
-        mkdir(PATCH_UNDO_DIR, 0777);
-        char up[700];
-        patch_undo_path(tid, index, up, sizeof(up));
-        undo = fopen(up, "wb");
-    }
+    int undo_tried = 0;      /* opened lazily, before the first write, so a run that writes
+                                nothing leaves no empty undo file behind */
     for (int i = 0; i < n; i++) {
         patch_line_t *L = &lines[i];
         if (L->unsupported) { skipped++; continue; }
@@ -8493,6 +9285,13 @@ static int patch_apply(const char *tid, int index, pid_t pid, intptr_t base, int
         if (mem_read(pid, at, cur, (size_t)L->len) != 0) { failed++; continue; }
         if (!memcmp(cur, L->val, (size_t)L->len)) { already++; continue; }   /* already patched */
         if (dry) { written++; continue; }
+        if (!undo_tried) {
+            undo_tried = 1;
+            mkdir(PATCH_UNDO_DIR, 0777);
+            char up[700];
+            patch_undo_path(tid, index, iver, up, sizeof(up));
+            undo = patch_undo_open(up);
+        }
         if (undo) {
             unsigned long long o = L->off; int l = L->len;
             fwrite(&o, sizeof(o), 1, undo);
@@ -8510,15 +9309,17 @@ static int patch_apply(const char *tid, int index, pid_t pid, intptr_t base, int
              n - unsup, written, verified, already, failed, unsup);
     free(lines);
     free(doc);
-    if (failed && !written) return -100 - failed;
+    /* `failed && !written` here rounded a half-applied patch up to "applied" (rc > 0), and the
+       "only partly applied" toast could never run because rc < 0 implied written == 0. */
+    if (failed) return -100 - failed;
     return written;
 }
 
 /* Put back the bytes saved by patch_apply. */
-static int patch_revert(const char *tid, int index, pid_t pid, intptr_t base,
+static int patch_revert(const char *tid, int index, const char *iver, pid_t pid, intptr_t base,
                         char *detail, size_t dsz) {
     char up[700];
-    patch_undo_path(tid, index, up, sizeof(up));
+    patch_undo_path(tid, index, iver, up, sizeof(up));
     FILE *f = fopen(up, "rb");
     if (!f) { snprintf(detail, dsz, "no saved original bytes"); return -1; }
     int restored = 0, failed = 0;
@@ -8588,7 +9389,7 @@ static void patch_action_json(const char *tid, int index, int force, int dry, in
     char detail[240] = {0};
     int rc;
     if (is_revert) {
-        rc = patch_revert(tid, index, pid, base, detail, sizeof(detail));
+        rc = patch_revert(tid, index, iver, pid, base, detail, sizeof(detail));
     } else {
         /* THE version gate. Dark Souls Remastered is exactly why it exists: the library holds a
            "Restore Debug Camera" patch built for 01.03 while 01.00 is installed, and those
@@ -8602,7 +9403,7 @@ static void patch_action_json(const char *tid, int index, int force, int dry, in
                 pver, iver, pver, iver);
             return;
         }
-        rc = patch_apply(tid, index, pid, base, force, dry, detail, sizeof(detail));
+        rc = patch_apply(tid, index, iver, pid, base, force, dry, detail, sizeof(detail));
     }
 
     char nm[200] = {0};
@@ -8611,20 +9412,34 @@ static void patch_action_json(const char *tid, int index, int force, int dry, in
     if (!dry) {
         patch_result_toast(what, is_revert, rc, detail, rtid);
     }
+    /* The panel shows `message` over `detail` (errText in web/index.html). A refused apply used
+       to hand it only the engineer-facing "lines=4 written=2 ..." string; say what it means.
+       `partial` is the honest word for a patch that is half in. */
+    int pwritten = 0;
+    { const char *w = strstr(detail, "written="); if (w) pwritten = atoi(w + 8); }
+    int partial = (!is_revert && rc <= -100 && pwritten > 0);
+    const char *msg = "";
+    if (!is_revert && rc <= -100)
+        msg = partial ? "Only part of this patch was written before the rest was refused - it looks "
+                        "built for another version. Remove it to undo the part that landed."
+                      : "Its addresses do not match the game that is running - it is probably built "
+                        "for another version. Nothing was written.";
     char ed[400], en[420];
     json_escape(detail, ed, sizeof(ed));
     json_escape(nm, en, sizeof(en));
     snprintf(out, outsz,
              "{\"ok\":%s,\"rc\":%d,\"title_id\":\"%s\",\"index\":%d,\"name\":\"%s\",\"pid\":%d,"
              "\"base\":\"0x%llx\",\"dry\":%s,\"app_ver\":\"%s\",\"installed_version\":\"%s\","
-             "\"detail\":\"%s\"}",
+             "\"detail\":\"%s\",\"partial\":%s,\"message\":\"%s\"}",
              rc >= 0 ? "true" : "false", rc, tid, index, en, (int)pid,
-             (unsigned long long)base, dry ? "true" : "false", pver, iver, ed);
+             (unsigned long long)base, dry ? "true" : "false", pver, iver, ed,
+             partial ? "true" : "false", msg);
 }
 
 /* JSON array of every patch in a title's file. `iver` (may be "") drives the compatible flag. */
 static size_t patches_json(const char *tid, const char *iver, char *out, size_t outsz) {
     size_t len = 0;
+    if (outsz < 3) { if (outsz) out[0] = 0; return 0; }   /* not even room for "[]" */
     out[0] = 0;
     char file[600];
     if (patch_file_for(tid, file, sizeof(file)) != 0) { snprintf(out, outsz, "[]"); return 2; }
@@ -8632,10 +9447,11 @@ static size_t patches_json(const char *tid, const char *iver, char *out, size_t 
     char *doc = slurp(file, &flen);
     if (!doc) { snprintf(out, outsz, "[]"); return 2; }
     patch_line_t *lines = (patch_line_t *)malloc(PATCH_LINES_BYTES);
-    len += (size_t)snprintf(out + len, outsz - len, "[");
+    out[len++] = '[';
+    out[len] = 0;
     int total = patch_count(doc);
     int emitted = 0;
-    for (int i = 0; i < total && i < PATCH_MAX_ITEMS && len < outsz - 700; i++) {
+    for (int i = 0; i < total && i < PATCH_MAX_ITEMS; i++) {
         const char *end = NULL;
         const char *blk = patch_block(doc, i, &end);
         if (!blk) break;
@@ -8661,16 +9477,28 @@ static size_t patches_json(const char *tid, const char *iver, char *out, size_t 
            patch of four unapplicable lines read as "lines=4, unsupported=4" — as though half
            of it would land. They are reported separately and the numbers now add up. */
         int applicable = nl - unsup;
-        len += (size_t)snprintf(out + len, outsz - len,
+        /* One entry is built on its own and copied in only if it fits WITH the closing bracket.
+           The loop bound used to be `len < outsz - 700`, which wraps to SIZE_MAX for a buffer
+           under 700 bytes (the /api/mods handler sizes this one from what its mods list left
+           over), and a truncating snprintf still added its would-be length to len - so
+           `outsz - len` wrapped too and the next entry wrote past the heap block. */
+        char item[2400];
+        int n = snprintf(item, sizeof(item),
             "%s{\"index\":%d,\"name\":\"%s\",\"description\":\"%s\",\"author\":\"%s\","
             "\"app_ver\":\"%s\",\"lines\":%d,\"unsupported\":%d,\"supported\":%s,"
             "\"compatible\":%s}",
             emitted ? "," : "", i, en, eo, ea, ev, applicable, unsup,
             (applicable > 0 && unsup == 0) ? "true" : "false",
             compat ? "true" : "false");
+        if (n < 0 || (size_t)n >= sizeof(item)) break;
+        if (len + (size_t)n + 2 > outsz) break;             /* entry + ']' + NUL must fit */
+        memcpy(out + len, item, (size_t)n);
+        len += (size_t)n;
+        out[len] = 0;
         emitted++;
     }
-    len += (size_t)snprintf(out + len, outsz - len, "]");
+    out[len++] = ']';
+    out[len] = 0;
     free(lines);
     free(doc);
     return len;
@@ -8808,8 +9636,10 @@ int main(void) {
         pthread_t pbt;
         pthread_attr_t pba;
         pthread_attr_init(&pba);
-        /* This one runs on every WAKE, while the console is still assembling itself — the
-           worst possible moment to overflow a default-sized stack. */
+        /* Created ONCE, here, at boot - rest_watchdog never re-runs it. It still runs while the
+           console is assembling itself after a cold boot or after rest mode (rest/prepare exits
+           this process and Payload Manager reloads it, which is how "every wake" happens in
+           practice) — the worst possible moment to overflow a default-sized stack. */
         pthread_attr_setstacksize(&pba, 256 * 1024);
         if (pthread_create(&pbt, &pba, payload_bootstrap, NULL) == 0) pthread_detach(pbt);
         pthread_attr_destroy(&pba);
@@ -8848,10 +9678,15 @@ int main(void) {
                 const char *e = strchr(s, ' ');
                 if (e && (size_t)(e - s) < sizeof(path)) { memcpy(path, s, e - s); path[e - s] = 0; }
             }
-            if (is_post && !strncmp(path, "/api/fs/write", 13) && request_origin_ok(buf)) {
-                /* Before the generic POST path, which caps a body at 8 KB. */
+            if (is_post && !strncmp(path, "/api/fs/write", 13) && request_origin_ok(buf) &&
+                sec_fetch_ok(buf)) {
+                /* Before the generic POST path, which caps a body at 8 KB. Handed to its own
+                   thread with the socket, like /pkgfile/: a multi-GB upload used to run right
+                   here and freeze every other request until it finished. If the worker cannot be
+                   started it is served inline, exactly as before. */
                 char *he = strstr(buf, "\r\n\r\n");
                 int hl = he ? (int)(he - buf) + 4 : n;
+                if (fs_write_serve(cl, path, buf, n, hl) == 0) continue;   /* worker owns cl now */
                 fs_recv_write(cl, path, buf, hl, he ? n - hl : 0);
                 close(cl);
                 continue;
@@ -8860,6 +9695,15 @@ int main(void) {
                 /* A page with a public hostname is driving us. Nothing here is for it. */
                 send_status(cl, "403 Forbidden", "text/plain",
                             "this server only answers pages served from a private address");
+                close(cl);
+                continue;
+            }
+            if (route_changes_state(path, is_post) && !sec_fetch_ok(buf)) {
+                /* A browser loaded a state-changing route as an image, a script or a navigation -
+                   with no Origin and no Referer, which is how a hostile page slips past the guard
+                   above. The UI never does this; it calls everything with fetch(). */
+                send_status(cl, "403 Forbidden", "text/plain",
+                            "this route is not a page or an image");
                 close(cl);
                 continue;
             }

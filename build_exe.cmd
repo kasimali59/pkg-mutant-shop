@@ -4,8 +4,12 @@ REM The resulting exe needs NOTHING on the target PC (no Python, no DLLs, no dri
 setlocal
 cd /d "%~dp0companion"
 where python >nul 2>nul || (echo Python required to BUILD the exe ^(the exe itself needs nothing^). & pause & exit /b 1)
-echo Installing PyInstaller (one-time)...
-python -m pip install --upgrade pyinstaller || (echo pip failed & pause & exit /b 1)
+echo Installing PyInstaller 6.21.0 (pinned - one-time)...
+REM PINNED, not --upgrade. An unpinned upgrade meant the next build could silently pick up a
+REM newer major with a different bootloader and different antivirus behaviour, so two exes
+REM labelled the same version could differ in ways unrelated to the source. 6.21.0 is the
+REM release the shipping exe was built with.
+python -m pip install pyinstaller==6.21.0 || (echo pip failed & pause & exit /b 1)
 echo Building...
 REM BUILD FROM THE SPEC, not from flags. The spec carries the UI gate and the version stamp
 REM (see its header); this command line did not, so building the exe this way could package a

@@ -18,13 +18,33 @@ The install stages are deliberately ordered to separate the open hypotheses:
              the least important feature in the app
 
 Usage
-    python tools/verify_console.py                 # everything up to stage 7, skips 8
+    python tools/verify_console.py                 # stages 0-4: one install, the proven lane
     python tools/verify_console.py --stage 0-3     # read-only stages, no installs at all
-    python tools/verify_console.py --all           # includes stage 8 (opens the TV browser)
+    python tools/verify_console.py --all           # stages 0-8: the name-passthrough installs
+                                                   # (5, 6), the PC-driven lane (7) and /api/open
+    python tools/verify_console.py --all --force   # let stage 7 re-install over a registered title
     python tools/verify_console.py --ip 10.0.0.99 --title CUSA02365 --key Riptide-GP2-CUSA02365.pkg
 
+ONE INSTALL BY DEFAULT. Stages 4-7 used to run back to back, and each hands the SAME package to
+the console again as soon as the spawned installer's verdict says "accepted" - which is before
+BGFT has finished downloading and registering it. Submitting a package on top of its own live
+BGFT job is the shape of the 2026-08-25 panic. So 5-7 are opt-in (--all), and with --all the
+tool reads bgft.db between install stages and waits for the title's newest row to settle before
+spawning again.
+
+WHERE THE CONSOLE ADDRESS COMES FROM (first hit wins):
+    1. --ip
+    2. ~\\Desktop\\PKG MUTANT SHOP\\config.json   - beside the exe the user actually runs
+    3. companion/dist/config.json              - beside a freshly built exe
+    4. companion/config.json                   - running from source
+The exe reads the config.json beside itself, not the repo's; the two have held different console
+addresses before, which is how the wrong machine gets measured (memory: a peer PC was adopted as
+the console). Nothing here ever defaults to loopback or to a guessed address.
+
 Nothing here writes to the console except the install stages, and every install is of a package
-already in the library.
+already in the library. Stage 3 is read-only unless the lane is STALE (latch set past the console's
+own 600 s rule): a merely busy lane is left alone, because clearing it is what let a duplicate
+install through.
 """
 import argparse
 import json
@@ -108,12 +128,14 @@ def alive(c, stage, why):
         rec(stage, "console still alive %s" % why, True, "v%s" % j.get("version"))
         return True
     # Distinguish "our payload died" from "the whole console died" - that difference is the whole
-    # reason the last crash was diagnosable at all.
-    others = {p: port_open(c.ip, p, 2.0) for p in (8084, 9021)}
+    # reason the last crash was diagnosable at all. Only LAN-visible ports can say it: elfldr's
+    # 9021 binds loopback on the console (so did ShadowMount's 10101), and probing it from here
+    # was always False - which made a dead payload read as a dead console.
+    others = {p: port_open(c.ip, p, 2.0) for p in (8084, 2121, 1337)}
     if any(others.values()):
         rec(stage, "console still alive %s" % why, False,
-            "OUR payload is gone but the console is up (pldmgr=%s elfldr=%s)"
-            % (others[8084], others[9021]))
+            "OUR payload is gone but the console is up (pldmgr=%s ftp2121=%s ftp1337=%s)"
+            % (others[8084], others[2121], others[1337]))
     else:
         rec(stage, "console still alive %s" % why, False,
             "THE WHOLE CONSOLE IS GONE - every port closed. %s" % (err or ""))
@@ -221,11 +243,21 @@ def stage3(c):
         return rec(3, "spawn-status", False, err or "")
     rec(3, "no install is marked in flight", not j.get("busy"),
         "busy_for=%ss stale=%s" % (j.get("busy_for"), j.get("stale")))
-    if j.get("busy") or j.get("has_result"):
+    # ONLY A STALE LATCH IS CLEARED. `busy` means the console is refusing duplicates because an
+    # install may still be running - and spawn-cleanup zeroes exactly that refusal. Clearing it on
+    # "busy" is the reload-the-ELF mistake of 2026-08-25 done from a script. `stale` is the
+    # console's own verdict that the latch outlived its 600 s rule with no verdict behind it; a
+    # leftover verdict file (has_result, not busy) is finished work and safe to sweep.
+    if j.get("busy"):
+        rec(3, "left the busy lane alone", "warn",
+            "an install may still be running - re-run when busy_for stops growing")
+        return
+    if j.get("stale") or j.get("has_result"):
         c.con("/api/engine/spawn-cleanup", 20)
         ok2, j2, _ = c.con("/api/engine/spawn-status")
         rec(3, "cleanup released the lane",
-            ok2 and isinstance(j2, dict) and not j2.get("busy"), "after spawn-cleanup")
+            ok2 and isinstance(j2, dict) and not j2.get("busy") and not j2.get("stale"),
+            "after spawn-cleanup (stale=%s has_result=%s)" % (j.get("stale"), j.get("has_result")))
 
 
 def _route_ip(console_ip):
@@ -238,6 +270,105 @@ def _route_ip(console_ip):
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def config_candidates():
+    """Where the console's address is looked for, in the order the header documents."""
+    return [
+        os.path.expanduser(r"~\Desktop\PKG MUTANT SHOP\config.json"),
+        os.path.join(ROOT, "companion", "dist", "config.json"),
+        os.path.join(ROOT, "companion", "config.json"),
+    ]
+
+
+def console_ip_from_config():
+    """(ip, path) from the first config that names a console, or (None, None). consoles[0].ip
+    wins over ps5_ip, the way the companion resolves it. The defaults' placeholder address is
+    not a hit: measuring 192.168.1.50 because nobody set anything is the wrong-machine trap."""
+    for p in config_candidates():
+        if not os.path.exists(p):
+            continue
+        try:
+            cfg = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            continue
+        cons = cfg.get("consoles") or []
+        ip = (cons[0].get("ip") if cons and isinstance(cons[0], dict) else None) or cfg.get("ps5_ip")
+        if ip and ip != "192.168.1.50":
+            return ip, p
+    return None, None
+
+
+# bgft.db statuses. 1036 = full title done, 1026 = update/add-on done, 1021 = failed;
+# 1007 and 1009 are a download still in flight (a fresh spawn shows as 1007 with 0 bytes).
+BGFT_DONE = (1036, 1026, 1021)
+
+
+def _bgft_rows(c, limit=5, title=None):
+    """Newest rows of tbl_downloads through our own file API. [] means the ledger was read and
+    holds no matching row; None means it could NOT be read (network, a refused /api/fs/read, a
+    sqlite error). The two used to be the same [], and the settle gate below read both as "no
+    row = settled" - so a console it could not see was exactly the console it re-submitted to.
+    Absence of evidence is never a verdict, in either direction: the callers decide."""
+    import sqlite3
+    import tempfile
+    url = "http://%s:%d/api/fs/read?path=%s" % (
+        c.ip, c.shop, urllib.parse.quote("/system_data/priv/mms/bgft.db", safe=""))
+    tmp = os.path.join(tempfile.gettempdir(), "pms_verify_bgft.db")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
+            f.write(r.read())
+        con = sqlite3.connect(tmp)
+        q = ("SELECT title_id,status,transferred_total,length_total,title FROM tbl_downloads "
+             + ("WHERE title_id=? " if title else "")
+             + "ORDER BY last_updated DESC, rowid DESC LIMIT %d" % limit)
+        rows = con.execute(q, (title,) if title else ()).fetchall()
+        con.close()
+        return rows
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _wait_bgft_settled(c, stage, timeout=300):
+    """Before handing the SAME package to the console again, wait until BGFT is done with the
+    last one. The spawned installer's rc=0 means "accepted", not "installed": the download and
+    the registration run in the system's own queue afterwards, and a second submission on top of
+    a live job is the duplicate-install shape that killed the console on 2026-08-25."""
+    t0 = time.time()
+    last = None
+    unreadable = 0
+    while time.time() - t0 < timeout:
+        rows = _bgft_rows(c, 1, c.title)
+        if rows is None:
+            # A guard whose whole job is to withhold a dangerous action must fail CLOSED: "could
+            # not read the ledger" is not "no job", it is "cannot tell". Say so once, keep
+            # looking, and if it never becomes readable, do not submit again blind.
+            unreadable += 1
+            if unreadable == 1:
+                rec(stage, "BGFT settled before the next install", "warn",
+                    "could not read bgft.db - cannot tell whether the last install finished; waiting")
+            time.sleep(5)
+            continue
+        st = rows[0][1] if rows else None
+        if st != last:
+            last = st
+        if not rows or st in BGFT_DONE:
+            rec(stage, "BGFT settled before the next install", True,
+                "newest %s row: status %s" % (c.title, st if st is not None else "(no row)"))
+            return True
+        time.sleep(5)
+    if last is None and unreadable:
+        rec(stage, "BGFT settled before the next install", False,
+            "could not read bgft.db for %ds - not submitting again blind" % timeout)
+    else:
+        rec(stage, "BGFT settled before the next install", False,
+            "still status %s after %ds - not submitting again on top of it" % (last, timeout))
+    return False
 
 
 def _spawn_install(c, stage, label, name):
@@ -298,10 +429,28 @@ def stage7(c):
         return rec(7, "the PC companion is running", False,
                    "%s - start PKG-MUTANT-SHOP.exe" % (err or ""))
     rec(7, "the PC companion is running", True, "v%s" % (j or {}).get("version"))
-    ok, j, err = c.pcapi("/api/install", 90,
-                         {"title_id": c.title, "kind": "base", "force": True, "install_key": c.key})
+    # force ONLY when asked. force:true skips already_installed(), the space refusal and the
+    # in-flight debounce - the three guards the companion has between a click and the console.
+    # Running past them by default meant this stage never tested them, and could re-submit a
+    # package the console was still installing. Without it, a title stage 4 just installed is
+    # refused as already installed - which is the guard working, and is reported as such.
+    body = {"title_id": c.title, "kind": "base", "install_key": c.key}
+    if c.force:
+        body["force"] = True
+    ok, j, err = c.pcapi("/api/install", 90, body)
     if not (ok and isinstance(j, dict) and j.get("ok")):
+        text = (err or "") + json.dumps(j or {})
+        if "already" in text.lower() or "409" in text:
+            return rec(7, "queued through the companion", "warn",
+                       "refused: %s - the already-installed guard held; pass --force to test the "
+                       "lane over a registered title" % (json.dumps(j or {})[:80] or err))
         return rec(7, "queued through the companion", False, err or json.dumps(j)[:120])
+    if j.get("skipped"):
+        # ok:true with nothing queued - the companion's already-installed guard. Without this the
+        # stage waited seven minutes for a job that was never created and then called it a failure.
+        return rec(7, "queued through the companion", "warn",
+                   "not queued: %s - pass --force to test the lane over a registered title"
+                   % (j.get("message") or j.get("reason") or "skipped")[:70])
     rec(7, "queued through the companion", True, "job %s" % ",".join(j.get("ids") or []))
     t0, last = time.time(), None
     while time.time() - t0 < 420:
@@ -346,32 +495,13 @@ def stage9(c):
     # bgft.db IS THE PROOF. app.db presence is not: a title already registered stays registered
     # whether or not the install we just ran did anything. What proves it is a fresh row whose
     # status is 1036 (full title) or 1026 (update/add-on), and whose `title` column names US.
-    import sqlite3
-    import tempfile
-    url = "http://%s:%d/api/fs/read?path=%s" % (
-        c.ip, c.shop, urllib.parse.quote("/system_data/priv/mms/bgft.db", safe=""))
-    tmp = os.path.join(tempfile.gettempdir(), "pms_verify_bgft.db")
-    try:
-        with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
-            f.write(r.read())
-    except Exception as e:
-        return rec(9, "bgft.db pulled through our own file API", False, repr(e)[:110])
-    rec(9, "bgft.db pulled through our own file API", True, "%d bytes" % os.path.getsize(tmp))
-    try:
-        con = sqlite3.connect(tmp)
-        rows = con.execute(
-            "SELECT title_id,status,transferred_total,length_total,title FROM tbl_downloads "
-            "ORDER BY last_updated DESC, rowid DESC LIMIT 5").fetchall()
-        con.close()
-    except sqlite3.Error as e:
-        return rec(9, "bgft.db is readable", False, str(e)[:110])
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    rows = _bgft_rows(c, 5)
+    rec(9, "bgft.db pulled through our own file API", bool(rows),
+        "%d rows" % len(rows) if rows else
+        ("read fine, but tbl_downloads is empty" if rows == [] else
+         "could not read it - not a verdict either way"))
     if not rows:
-        return rec(9, "a recent install is recorded", False, "no rows in tbl_downloads")
+        return rec(9, "a recent install is recorded", False, "no rows read from tbl_downloads")
     print("       %-11s %-6s %-14s %s" % ("title_id", "status", "bytes", "recorded by"))
     for t, st, tr, ln, who in rows:
         print("       %-11s %-6s %-14s %s" % (t, st, "%s/%s" % (tr, ln), who))
@@ -446,25 +576,25 @@ def main():
                          "(default: this PC's LAN address)")
     ap.add_argument("--title", default="CUSA02365")
     ap.add_argument("--key", default="Riptide-GP2-CUSA02365.pkg")
-    ap.add_argument("--stage", default=None, help='e.g. "0-3" or "4" - default is 0-7')
-    ap.add_argument("--all", action="store_true", help="include stage 8 (opens the TV browser)")
+    ap.add_argument("--stage", default=None, help='e.g. "0-3" or "4" - default is 0-4')
+    ap.add_argument("--all", action="store_true",
+                    help="stages 0-8: adds the name-passthrough installs (5, 6), the PC-driven "
+                         "lane (7) and /api/open (8)")
+    ap.add_argument("--force", action="store_true",
+                    help="stage 7 passes force:true (re-installs over a registered title, "
+                         "skipping the companion's guards)")
     ap.add_argument("--forensics", action="store_true",
                     help="read the console's install log and stop. Run this FIRST after a crash.")
     a = ap.parse_args()
 
     if not a.ip:
-        for p in (os.path.join(ROOT, "companion", "config.json"),
-                  os.path.expanduser(r"~\Desktop\PKG MUTANT SHOP\config.json")):
-            if os.path.exists(p):
-                try:
-                    a.ip = json.load(open(p, encoding="utf-8")).get("ps5_ip")
-                    break
-                except Exception:
-                    pass
+        a.ip, src = console_ip_from_config()
+        if a.ip:
+            print("console address %s from %s" % (a.ip, src))
     if not a.ip:
-        sys.exit("no --ip and none in config.json")
+        sys.exit("no --ip, and no console address in any of:\n  " + "\n  ".join(config_candidates()))
 
-    lo, hi = 0, (8 if a.all else 7)
+    lo, hi = 0, (8 if a.all else 4)
     if a.stage:
         parts = a.stage.split("-")
         lo = int(parts[0])
@@ -481,6 +611,7 @@ def main():
             "console. Pass this PC's LAN address, e.g. --companion http://%s:8710"
             % (a.companion, _route_ip(a.ip)))
     c = Ctx(a)
+    c.force = bool(a.force)
     c.url_for_pkg = "%s/library/%s" % (a.companion.rstrip("/"), a.key)
     print("%sPKG MUTANT SHOP - console verification%s" % (B, X))
     print("console %s:%d   companion %s   stages %d-%d\n" % (a.ip, a.shop_port, a.companion, lo, hi))
@@ -496,12 +627,20 @@ def main():
         print("\n%sThe shop is not answering on %s:%d. Load PKG-MUTANT-SHOP.elf from Payload "
               "Manager, then run this again.%s" % (Y, a.ip, a.shop_port, X))
         return 1
+    installed_once = False
     for n in range(lo, min(hi, 8) + 1):
         if STOP:
             print("\n%sSTOPPED: the console stopped responding. The last stage that ran is the "
                   "one to investigate.%s" % (R, X))
             break
+        # Never hand the same package to the console while BGFT may still hold the last one.
+        if n in (5, 6, 7) and installed_once and not _wait_bgft_settled(c, n):
+            print("\n%sSTOPPED before stage %d: BGFT has not finished the previous install of %s."
+                  " Submitting it again now is the duplicate-install shape.%s" % (R, n, c.title, X))
+            break
         stages[n](c)
+        if n in (4, 5, 6, 7):
+            installed_once = True
         # Only the install stages onward can plausibly take the console down, and the gate costs a
         # round trip - so it starts where the risk starts.
         if n >= 3 and not STOP:

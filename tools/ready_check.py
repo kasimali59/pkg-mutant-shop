@@ -6,13 +6,22 @@ checks was a real bug at some point; each check names the thing it is guarding a
     python tools/ready_check.py                 # wait for the console, then check everything
     python tools/ready_check.py --offline       # only what can be checked with no PS5
     python tools/ready_check.py --wait 600      # how long to wait for the console (default 180s)
-    python tools/ready_check.py --no-route      # skip the transfer test (it moves a real backup)
+    python tools/ready_check.py --route         # ALSO run the transfer test (copies a real
+                                                # package to the drive you pick; off by default)
+    python tools/ready_check.py --test-delete   # ALSO prove our file API writes and deletes for
+                                                # real, in the shop's own folder - never in a
+                                                # ShadowMount watch folder
 
-It never installs a PKG and never deletes one of your games. The one thing it writes to the console
-is a small file it removes again.
+It never installs a PKG and never deletes one of your games: the delete lane is exercised with
+a title id no console can carry (PMSX99999) and must answer "nothing to delete". Nothing it
+writes goes into a ShadowMount watch folder (/data/homebrew, /mnt/*/homebrew) under a final name.
+
+The console address comes from --ip, else from the config the exe actually uses (Desktop, then
+companion/dist, then companion/config.json - see tools/verify_console.py). It never defaults to
+a guessed address, and the console is never handed 127.0.0.1 as a source.
 """
 import argparse
-import ftplib
+import hashlib
 import io
 import json
 import os
@@ -27,7 +36,20 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+# One resolver for "which console, and what address is this PC on from there" - the same one
+# verify_console.py uses, so the two tools can never measure different machines again.
+from verify_console import _route_ip, config_candidates, console_ip_from_config  # noqa: E402
+
 G, Y, R, B, X = "\033[92m", "\033[93m", "\033[91m", "\033[94m", "\033[0m"
+
+# A title id no console can carry: the prefix is not one Sony issues. The old probe used
+# CUSA00099 - a plausible retail id - and the delete lane REALLY removes containers, so a
+# matching backup would have been deleted by a readiness check. The assertion is that the
+# console answers "nothing to delete".
+IMPOSSIBLE_TID = "PMSX99999"
+# Outside every ShadowMount watch folder and every drive root: the shop's own data folder.
+PROBE_DIR = "/data/pkg-mutant-shop/probe"
 
 FAILED, CHECKS, NOTES = [], [0], []
 
@@ -105,19 +127,116 @@ def offline():
         "companion=%(companion)s elf=%(elf)s ui=%(ui)s" % ver)
 
     # The ELF embeds the UI. A UI fix that is not re-bundled is invisible on the console.
+    # A HASH, not a length: comparing byte counts let a same-size edit ship an ELF whose console
+    # UI differed from web/index.html while this stayed green - and it is the one guard for the
+    # "console ran the old UI" failure. gen_web_bundle.py now writes a sha256 comment per file;
+    # a bundle from before that has none, so its bytes are decoded out of the octal literal.
     bundle = io.open(os.path.join(ROOT, "ps5-app", "onconsole", "web_bundle.h"),
                      encoding="utf-8", errors="replace").read()
-    m = re.search(r'\{"index\.html", \w+, (\d+)\}', bundle)
-    disk = os.path.getsize(os.path.join(ROOT, "web", "index.html"))
+    disk_sha = hashlib.sha256(open(os.path.join(ROOT, "web", "index.html"), "rb").read()).hexdigest()
+    emb_sha, how = _embedded_sha(bundle, "index.html")
     rec("build", "the embedded web bundle matches web/index.html",
-        bool(m) and int(m.group(1)) == disk,
-        "bundle=%s disk=%d" % (m.group(1) if m else "?", disk))
+        bool(emb_sha) and emb_sha == disk_sha,
+        "%s bundle=%s disk=%s" % (how, (emb_sha or "?")[:12], disk_sha[:12]))
 
-    for tool, args in (("check_web.py", []), ("message_report.py", ["--check"])):
+    for tool, args in (("check_web.py", []), ("message_report.py", ["--check"]),
+                       ("i18n_report.py", ["--check"]), ("test_storage_tiles.py", [])):
         p = subprocess.run([sys.executable, os.path.join(HERE, tool)] + args,
                            capture_output=True, text=True)
         rec("build", tool, p.returncode == 0, (p.stdout or p.stderr).strip().splitlines()[-1][:70]
             if (p.stdout or p.stderr).strip() else "")
+
+    head("guards for regressions that have come back before")
+    # Each of these was fixed by hand once and is a one-line edit away from returning.
+    # The dock rebuilt every 1.2 s with innerHTML destroyed buttons mid-press. renderQueue() must
+    # update rows in place: compare-before-write on the cells, never the list from the tasks.
+    rq = _js_function(h, "renderQueue")
+    # the empty-state placeholder may be assigned wholesale; a list built from the tasks may not
+    rebuilds = [l for l in rq.split("\n")
+                if re.search(r'\bbody\.innerHTML\s*\+?=', l) and re.search(r'\.map\(|\.join\(|forEach\(', l)]
+    rec("guard", "renderQueue() updates rows in place",
+        bool(rq) and ".innerHTML!==" in rq and not rebuilds,
+        "compare-before-write present" if ".innerHTML!==" in rq else "no in-place update found")
+    # The icon form of the notification call returns 0 and draws NOTHING on 12.70 - it has
+    # silenced every console message twice. notify() and notifyf() must pass a NULL icon.
+    icon_calls = [a for a in re.findall(r'\bnotify_icon\(([^()]*)\)', c)
+                  if a.strip() and not a.startswith("const char")]   # skip the definition and comments
+    rec("guard", "console toasts use the plain (NULL icon) form",
+        "static void notify(const char *msg) { notify_icon(msg, NULL); }" in c
+        and icon_calls and all(re.search(r',\s*NULL\s*$', a) for a in icon_calls),
+        "%d notify_icon call(s)" % len(icon_calls))
+    # A blanket long max-age once cached index.html, so a new ELF left the console on the old UI
+    # for a week. The app shell must revalidate every time.
+    rec("guard", "send_file() serves the app shell no-cache",
+        '"no-cache, must-revalidate"' in _c_function(c, "send_file"))
+    # An add-on is a PKG, never a container - inheriting the game's ffpfsc format once routed a
+    # 1 MB DLC down the mount lane and reported a finished install as a bad dump.
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "companion"))
+        import server as _srv
+        rec("guard", "is_backup_item(): a DLC under a ffpfsc game is not a backup",
+            _srv.is_backup_item({"kind": "dlc"}, {"format": "ffpfsc"}) is False
+            and _srv.is_backup_item({"kind": "backup"}) is True
+            and _srv.is_backup_item({"file": "x.ffpfsc"}) is True)
+    except Exception as e:
+        rec("guard", "is_backup_item(): a DLC under a ffpfsc game is not a backup", False, repr(e)[:60])
+
+
+def _js_function(h, name):
+    """The body of `function name(` in the page, comments stripped. "" when absent."""
+    code = re.sub(r"/\*.*?\*/", "", h, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    m = re.search(r"\nfunction %s\(" % re.escape(name), code)
+    if not m:
+        return ""
+    i = code.index("{", m.end())
+    depth, j = 0, i
+    while j < len(code):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return code[i:j + 1]
+
+
+def _c_function(c, name):
+    """The body of a C function defined at column 0. "" when absent."""
+    m = re.search(r"^static\s+[\w \*]+?\b%s\s*\(" % re.escape(name), c, re.M)
+    if not m:
+        return ""
+    i = c.index("{", m.end())
+    depth, j = 0, i
+    while j < len(c):
+        if c[j] == "{":
+            depth += 1
+        elif c[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return c[i:j + 1]
+
+
+def _embedded_sha(bundle, rel):
+    """(sha256, how) of one embedded file in web_bundle.h, or (None, why)."""
+    m = re.search(r'/\* %s\s+\d+ bytes\s+sha256 ([0-9a-f]{64}) \*/' % re.escape(rel), bundle)
+    if m:
+        return m.group(1), "stamped"
+    m = re.search(r'\{"%s", (\w+), (\d+)\}' % re.escape(rel), bundle)
+    if not m:
+        return None, "not in bundle"
+    name = m.group(1)
+    i = bundle.find("static const unsigned char %s[] =" % name)
+    j = bundle.find("\n;", i) if i >= 0 else -1
+    if i < 0 or j < 0:
+        return None, "literal not found"
+    data = bytes(int(o, 8) for o in re.findall(r'\\([0-7]{3})', bundle[i:j]))
+    if len(data) != int(m.group(2)):
+        return None, "decoded %d of %s bytes" % (len(data), m.group(2))
+    return hashlib.sha256(data).hexdigest(), "decoded"
 
     head("the UI's own logic, run against the shipped file")
     # These functions decide whether a game can be sent to a drive of your choosing. Gating them on
@@ -257,8 +376,6 @@ def online(a):
     rec("net", "no third-party install host is listening",
         not any(port_open(a.ip, p, 1.5) for p in (12800, 9090, 9081, 1337, 9040)),
         "12800/9090/9081/1337/9040 closed")
-    for k in ("dpi_online", "dpi_reachable", "dpi_state", "dpi_port", "capabilities"):
-        pass
     dead = [k for k in (ch or {}) if k.startswith("dpi")] + \
            [k for k in (ch or {}) if k == "capabilities"]
     rec("net", "health carries no purged etaHEN/DPI fields", not dead, ", ".join(dead) or "clean")
@@ -293,9 +410,11 @@ def online(a):
 
     head("controls that must work from BOTH servers")
     for name, base in (("console", con), ("PC", pc)):
-        ok, r, _ = get(base + "/api/game/delete", 30, {"title_id": "CUSA00099"})
-        rec("both", "%s: delete answers for an unknown title" % name,
-            ok and isinstance(r, dict) and r.get("already_gone") is True)
+        # IMPOSSIBLE_TID, never a real-looking id: this route deletes for real.
+        ok, r, _ = get(base + "/api/game/delete", 30, {"title_id": IMPOSSIBLE_TID})
+        rec("both", "%s: delete answers 'nothing to delete' for %s" % (name, IMPOSSIBLE_TID),
+            ok and isinstance(r, dict) and r.get("already_gone") is True
+            and r.get("deleted") is not True)
         ok, r, _ = get(base + "/api/game/delete", 30, {})
         rec("both", "%s: delete refuses with a reason when no id is sent" % name,
             ok and isinstance(r, dict) and r.get("ok") is False and "title id" in str(r.get("error", "")))
@@ -309,45 +428,46 @@ def online(a):
     rec("both", "console: the queue Retry is implemented",
         ok and isinstance(r, dict) and "not supported on console" not in json.dumps(r))
 
-    head("the delete boundary (a drive root is not a watch folder)")
-    # SHADOWMOUNT MOUNTS WHATEVER APPEARS IN A WATCH FOLDER, THE INSTANT IT APPEARS - and this probe
-    # writes into one. A 4 KB file of zeroes named like a compressed PFS container is precisely the
-    # half-written container that has crashed this console before. The test is the only proof that
-    # delete really removes a file from the PS5, so it stays; it is no longer something that just
-    # happens to you. Two guards now: it must be asked for by name, and it is written as ".part"
-    # first so ShadowMount ignores it until the moment it is complete.
+    head("the file API writes and deletes for real (never in a watch folder)")
+    # THIS USED TO WRITE A 4 KB .ffpfsc INTO /mnt/ext1/homebrew. ShadowMount mounts whatever
+    # appears in a watch folder the instant it appears, and a zero-filled file named like a
+    # compressed PFS container is precisely the half-written container that has crashed this
+    # console before; the .part-then-rename only narrowed the window, because once renamed it was
+    # a complete-but-garbage container until the delete landed. So the probe now lives in the
+    # shop's own folder, which no scanner reads, and goes through OUR file API - the same
+    # /api/fs/write and /api/fs/delete every deploy and cleanup in this project relies on. What
+    # this proves: a write lands with the right byte count, stat sees it, delete removes it. The
+    # delete-by-title lane is covered above with an id no console can carry.
     if not a.test_delete:
-        rec("delete", "delete round trip (skipped - pass --test-delete)", True,
-            "the probe writes a container ShadowMount would try to mount")
+        rec("delete", "file API round trip (skipped - pass --test-delete)", True,
+            "writes 4 KB under %s and removes it" % PROBE_DIR)
         return _after_delete(a, con, pc, ph)
-    probe = "/mnt/ext1/homebrew/[PS5] CUSA00007 - READY CHECK.ffpfsc"
+    probe = PROBE_DIR + "/ready-check.bin"
     try:
-        f = ftplib.FTP()
-        f.connect(a.ip, a.ftp_port, 20)
-        f.login("anonymous", "")
-        # .part first, rename after: ShadowMount skips partials, so it never sees an incomplete file.
-        f.storbinary("STOR " + probe + ".part", io.BytesIO(b"\0" * 4096))
-        f.rename(probe + ".part", probe)
-        f.quit()
-        ok, r, _ = get(pc + "/api/game/delete", 60, {"title_id": "CUSA00007"})
-        rec("delete", "the PC proxy really deletes on the console",
-            ok and isinstance(r, dict) and r.get("deleted") is True and r.get("bytes") == 4096,
-            (r or {}).get("path", "")[:52])
-        f = ftplib.FTP()
-        f.connect(a.ip, a.ftp_port, 20)
-        f.login("anonymous", "")
-        gone = True
-        try:
-            f.voidcmd("TYPE I")
-            f.size(probe)
-            gone = False
-            f.delete(probe)
-        except Exception:
-            pass
-        f.quit()
-        rec("delete", "the file is really gone from the drive", gone)
+        url = con + "/api/fs/write?path=" + urllib.parse.quote(probe, safe="")
+        req = urllib.request.Request(url, data=b"\0" * 4096, method="POST",
+                                     headers={"Content-Type": "application/octet-stream",
+                                              "Content-Length": "4096"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            wr = json.loads(r.read().decode("utf-8", "replace"))
+        rec("delete", "our file API accepted a 4 KB write in %s" % PROBE_DIR,
+            isinstance(wr, dict) and wr.get("ok") is True, json.dumps(wr)[:60])
+        ok, st, _ = get(con + "/api/fs/stat?path=" + urllib.parse.quote(probe, safe=""), 20)
+        rec("delete", "stat sees exactly what was written",
+            ok and isinstance(st, dict) and st.get("size") == 4096, "size=%s" % (st or {}).get("size"))
+        ok, d, _ = get(con + "/api/fs/delete?path=" + urllib.parse.quote(probe, safe=""), 30)
+        rec("delete", "delete answers ok", ok and isinstance(d, dict) and d.get("ok") is True)
+        ok2, gone, _ = get(con + "/api/fs/stat?path=" + urllib.parse.quote(probe, safe=""), 20)
+        still = isinstance(gone, dict) and gone.get("ok")
+        if still:
+            # once more before calling it a failure - the first stat can race the unlink
+            time.sleep(1)
+            get(con + "/api/fs/delete?path=" + urllib.parse.quote(probe, safe=""), 30)
+            ok2, gone, _ = get(con + "/api/fs/stat?path=" + urllib.parse.quote(probe, safe=""), 20)
+            still = isinstance(gone, dict) and gone.get("ok")
+        rec("delete", "the probe is really gone", not still)
     except Exception as e:
-        rec("delete", "delete round trip", False, repr(e)[:60])
+        rec("delete", "file API round trip", False, repr(e)[:60])
 
     return _after_delete(a, con, pc, ph)
 
@@ -372,22 +492,33 @@ def _after_delete(a, con, pc, ph):
     rec("install", "our installer is on the console", bool(inst and inst.get("size")),
         "%s bytes" % (inst or {}).get("size"))
 
-    if not a.no_route:
+    if a.route:
         head("does a chosen drive really receive the file?")
-        # The fetch lane, which is what puts a PS5 backup on the drive you picked. Uses a small
-        # PKG as the payload and a throwaway name, so no game is touched.
+        # The fetch lane, which is what puts a PS5 backup on the drive you picked. OPT-IN: it
+        # copies a real package over the LAN into a homebrew folder on every run, and a 227 MB
+        # probe was once left behind there. The SMALLEST .pkg in the library is used, under a
+        # throwaway .bin name ShadowMount ignores, so no game is touched.
         ok, lib, _ = get(pc + "/api/library", 60)
-        key = None
+        key, best = None, None
         for g in (lib or {}).get("games", []):
             b = (g.get("base") or [None])[0] or {}
-            if b.get("install_key", "").lower().endswith(".pkg") and (b.get("size") or 0) < 300e6:
-                key = b["install_key"]
-                break
+            sz = b.get("size") or 0
+            if b.get("install_key", "").lower().endswith(".pkg") and 0 < sz < 300e6 \
+                    and (best is None or sz < best):
+                key, best = b["install_key"], sz
         if not key:
             rec("route", "a small package to test with", False, "none found in the library")
         else:
-            lan = (ph or {}).get("lan_ip") or "127.0.0.1"
-            src = "http://%s:8710/library/%s" % (lan, key)
+            # The URL is fetched BY THE CONSOLE. Loopback is the console itself, and 0x80B22404
+            # from there reads as a broken fetch lane when it is only a wrong address. Refuse it,
+            # the way verify_console does, rather than "fall back" to it.
+            lan = (ph or {}).get("lan_ip") or _route_ip(a.ip)
+            if lan in ("127.0.0.1", "localhost", "::1", "0.0.0.0", ""):
+                rec("route", "a source address the console can reach", False,
+                    "only loopback is known for this PC - the console cannot fetch from that")
+                return
+            cport = urllib.parse.urlsplit(pc).port or 8710
+            src = "http://%s:%d/library/%s" % (lan, cport, key)
             dest = "/mnt/%s/homebrew" % a.route_drive if a.route_drive != "internal" else "/data/homebrew"
             q = ("/api/engine/fetch?url=" + urllib.parse.quote(src, safe="") +
                  "&dest=" + urllib.parse.quote(dest, safe="") +
@@ -418,8 +549,15 @@ def _after_delete(a, con, pc, ph):
                     bool(sz), "%s bytes in %s" % (sz, dest))
                 get(con + "/api/fs/delete?path=" + urllib.parse.quote(probe, safe=""), 30)
                 ok2, gone, _ = get(con + "/api/fs/stat?path=" + urllib.parse.quote(probe, safe=""), 20)
+                if isinstance(gone, dict) and gone.get("ok"):
+                    # once more: hundreds of MB left in a homebrew folder is worth a second try
+                    time.sleep(2)
+                    get(con + "/api/fs/delete?path=" + urllib.parse.quote(probe, safe=""), 30)
+                    ok2, gone, _ = get(con + "/api/fs/stat?path=" + urllib.parse.quote(probe, safe=""), 20)
                 rec("route", "the probe cleaned itself up",
-                    not (isinstance(gone, dict) and gone.get("ok")))
+                    not (isinstance(gone, dict) and gone.get("ok")),
+                    "" if not (isinstance(gone, dict) and gone.get("ok"))
+                    else "STILL THERE: remove %s by hand" % probe)
 
 
 def main():
@@ -430,22 +568,28 @@ def main():
     ap.add_argument("--companion", default="http://127.0.0.1:8710")
     ap.add_argument("--wait", type=int, default=180, help="seconds to wait for the console")
     ap.add_argument("--offline", action="store_true")
-    ap.add_argument("--no-route", action="store_true", help="skip the transfer test")
+    ap.add_argument("--route", action="store_true",
+                    help="run the transfer test (copies the smallest library .pkg to "
+                         "--route-drive under a throwaway name, then removes it). OFF by default.")
+    ap.add_argument("--no-route", action="store_true", help=argparse.SUPPRESS)  # the old default; kept so old notes still parse
     ap.add_argument("--route-drive", default="usb0")
     ap.add_argument("--test-delete", action="store_true",
-                    help="write a probe container into ShadowMount's scan folder to test the "
-                         "delete lane. OFF by default: ShadowMount will try to mount whatever "
-                         "appears there.")
+                    help="prove our file API writes and deletes for real: a 4 KB probe under "
+                         "%s (the shop's own folder - never a ShadowMount watch folder)." % PROBE_DIR)
     a = ap.parse_args()
 
-    if not a.ip:
-        try:
-            cfg = json.load(io.open(os.path.join(ROOT, "companion", "config.json"), encoding="utf-8"))
-            a.ip = cfg.get("ps5_ip", "10.0.0.99")
-        except Exception:
-            a.ip = "10.0.0.99"
+    if not a.ip and not a.offline:
+        a.ip, src = console_ip_from_config()
+        if a.ip:
+            print("console address %s from %s" % (a.ip, src))
+        else:
+            # Never a guessed address. 10.0.0.99 used to be the silent default, so a PC with no
+            # config would measure whatever answered there.
+            raise SystemExit("no --ip, and no console address in any of:\n  "
+                             + "\n  ".join(config_candidates()) + "\n(pass --offline for the PC-only checks)")
 
-    print("%sPKG MUTANT SHOP - ready check%s   console %s   companion %s" % (B, X, a.ip, a.companion))
+    print("%sPKG MUTANT SHOP - ready check%s   console %s   companion %s"
+          % (B, X, a.ip or "(offline)", a.companion))
     offline()
 
     if a.offline:

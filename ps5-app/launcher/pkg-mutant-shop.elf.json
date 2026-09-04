@@ -1,4 +1,5 @@
 {
+  "_note": "LEGACY (marked 2026-09-04) - nothing reads this file. It was a launcher-list entry for the v0.17 notify payload (ps5-app/payload/pkg-mutant-shop.elf), which is not built or shipped. The shop is PKG-MUTANT-SHOP.elf, loaded by Payload Manager from /data/pldmgr/payloads/PKG-MUTANT-SHOP/. Kept for the record; see SETUP.md.",
   "name": "PKG MUTANT SHOP",
   "filename": "pkg-mutant-shop.elf",
   "url": "",

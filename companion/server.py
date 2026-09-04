@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-PKG MUTANT SHOP - companion server  (v1.1.0 - full in-app install via DPI v2 + live download/install progress)
+PKG MUTANT SHOP - companion server
 ============================================
-Stdlib only (Python 3.8+). No pip installs, no CDNs, no external services.
+Stdlib only (Python 3.8+; Pillow for card thumbnails). No pip installs, no CDNs, no external services.
+The PC half of the app: serves the library over HTTP Range, the on-console ELF installs from it.
 
 v0.4 adds: multi-console fleet + "send to all", parallel queue with per-console serialization,
 unified REAL progress (local byte-count OR polling a remote companion's /api/served), SHA-256
@@ -26,17 +27,19 @@ import platform
 import gzip
 import threading
 import time
+import traceback
 import ftplib
 import shutil
 import urllib.request
 import urllib.error
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote, quote, parse_qs
 
 import pkg_meta
 import sources as source_engine
 
-VERSION = "3.60.0"
+VERSION = "3.61.0"
 
 if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
     HERE = os.path.dirname(sys.executable)
@@ -44,15 +47,33 @@ if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     WEB_DIR = os.path.normpath(os.path.join(HERE, "..", "web"))
-# The cheat + patch library we ship. Frozen: unpacked beside web/ inside the one-file exe.
-# From source: assets/cheats in the repo. It is pushed to the console on demand, never embedded
-# in the ELF - see PKG-MUTANT-SHOP.spec for why.
+# The cheat + patch library. WHERE IT ACTUALLY LIVES, because three comments in this file used to
+# disagree: the ELF embeds all of it (cheat_bundle.h + cheats.pack, 7022 files) and writes it to
+# the console itself at boot; the exe bundles ONLY web/ (PKG-MUTANT-SHOP.spec, datas=web), so in
+# the frozen build CHEATS_DIR does not exist and the sync below has nothing to push - by design.
+# From source, assets/cheats is the repo copy and the FTP/HTTP sync is a repair path for a console
+# whose /data was wiped.
 if getattr(sys, "frozen", False):
     CHEATS_DIR = os.path.join(sys._MEIPASS, "cheats")
 else:
     CHEATS_DIR = os.path.normpath(os.path.join(HERE, "..", "assets", "cheats"))
-CHEAT_SUBDIRS = ("json", "mc4", "shn", "patches", "xml", "xml_orbis", "xml_prospero")
+# Only what the on-console engine reads (server.c: CHEAT_JSON_DIR / SHN / MC4 / PATCH_DIR). The
+# xml/xml_orbis/xml_prospero folders are the pre-migration layout the console never opens, so
+# pushing them cost transfer for files nothing looks at.
+CHEAT_SUBDIRS = ("json", "mc4", "shn", "patches")
 CONSOLE_CHEAT_ROOT = "/data/pkg-mutant-shop/cheats"
+
+
+def _cheat_local_files(sub):
+    """Names of the shipped cheat files in one library subfolder, as a set.
+
+    A `<name>.mc4.xml` is the decrypted twin of a .mc4 the console decrypts itself (706 of them
+    sit beside the .mc4 files); the engine never opens one, so sending them was pure waste."""
+    ldir = os.path.join(CHEATS_DIR, sub)
+    if not os.path.isdir(ldir):
+        return set()
+    return {n for n in os.listdir(ldir)
+            if not n.lower().endswith(".mc4.xml") and not n.startswith(".")}
 
 # ---------------------------------------------------------------------------------------------
 # [audit 17] A LOG, because the shipped exe had none.
@@ -93,10 +114,40 @@ def _log_open():
 
 
 _real_print = print
+_log_lines = 0                                     # lines since the size was last checked
+
+
+def _log_rotate_locked():
+    """Roll pms.log over to pms.log.1 and reopen. Caller holds _log_lock. Never raises.
+
+    _log_open() rotated once, at startup, so a PC that runs for weeks with a chatty payload on
+    the :9097 relay grew the file past LOG_MAX_BYTES with nothing to stop it. Same one-generation
+    scheme as startup, applied while running."""
+    global _log_fh
+    try:
+        _log_fh.close()
+    except Exception:
+        pass
+    _log_fh = None
+    try:
+        old = LOG_PATH + ".1"
+        if os.path.exists(old):
+            os.remove(old)
+        os.replace(LOG_PATH, old)
+    except OSError:
+        pass
+    try:
+        _log_fh = open(LOG_PATH, "a", encoding="utf-8", errors="replace")
+        _log_fh.write("==== PKG MUTANT SHOP %s log rotated %s ====\n"
+                      % (VERSION, time.strftime("%Y-%m-%d %H:%M:%S")))
+        _log_fh.flush()
+    except Exception:
+        _log_fh = None
 
 
 def print(*args, **kwargs):                       # noqa: A001 - deliberate shadow
     """print() that also lands in pms.log, with a timestamp."""
+    global _log_lines
     try:
         _real_print(*args, **kwargs)
     except Exception:
@@ -108,6 +159,16 @@ def print(*args, **kwargs):                       # noqa: A001 - deliberate shad
         with _log_lock:
             _log_fh.write("%s  %s\n" % (time.strftime("%H:%M:%S"), line))
             _log_fh.flush()                        # a crash must not swallow the last lines
+            # Size check every ~200 lines, not every line: a stat per print is not free and the
+            # cap only needs to hold roughly, not to the byte.
+            _log_lines += 1
+            if _log_lines >= 200:
+                _log_lines = 0
+                try:
+                    if os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+                        _log_rotate_locked()
+                except OSError:
+                    pass
     except Exception:
         pass
 
@@ -142,6 +203,8 @@ DEFAULT_CONFIG = {
     # in an existing config.json is simply ignored.
     "dpi": {"pldmgr_port": 8084},
     "ftp": {"port": 2121},
+    # notify_port is NOT read any more (nothing has ever listened on 9099 - toasts go through the
+    # ELF's /api/notify). It stays in the defaults only so an existing config.json keeps its shape.
     "console": {"app_db_path": "/system_data/priv/mms/app.db", "notify_port": 9099},
     # PS5 backups land in /mnt/<drive>/homebrew; ShadowMount scans and mounts them itself.
     # port 10101, NOT 9021: ShadowMountPlus announces its own listener in its log
@@ -166,8 +229,11 @@ DEFAULT_CONFIG = {
 
 
 def install_error_text(rc):
-    """Turn an SCE install error code into a sentence. IDENTICAL by design to install_error_text()
-    in ps5-app/onconsole/server.c and installer_probe.c - change one, change all three.
+    """Turn an SCE install error code into a sentence. The SAME TABLE OF CODES as install_error_text()
+    in ps5-app/onconsole/server.c and installer_probe.c - add a code to one, add it to all three.
+    The wording is kept in step by hand and already differs slightly between the copies (the
+    console says "the PC sharing it", this side says "this PC"), so the old "identical" claim
+    here was not true; what must agree is which codes are recognised, not the exact sentence.
 
     `rc` may be an int or a "0x80B2116F" string; anything unparseable still produces a true
     sentence, which is what stops this table from needing to be exhaustive.
@@ -216,19 +282,9 @@ class ShopHTTPError(Exception):
         return self.payload.get("message") or self.payload.get("error") or fallback
 
 
-def engine_words(cfg):
-    """(what to call the install engine, what to do when it is not answering).
-
-    There used to be two answers here because there were two lanes. Kept as a function so the
-    wording lives in one place, but it can no longer disagree with itself.
-    """
-    return ("our own install engine",
-            "Load PKG MUTANT SHOP on the PS5 from Payload Manager, then press Start queue.")
-
-
-def drive_label(d):
-    return {"internal": "Internal M.2", "usb0": "USB0", "usb1": "USB1", "ext0": "EXT0",
-            "ext1": "EXT1"}.get(d, d.upper())
+# engine_words() and drive_label() lived here. Neither had a caller anywhere (server.py, index.html,
+# the tools), and drive_label's "Internal M.2"/"EXT1" disagreed with what the app actually shows
+# (the console's own /api/devices labels). Dead words that disagree are worse than none.
 
 
 def _first_bridge(srv):
@@ -441,6 +497,19 @@ class PeerRegistry:
         with self.lock:
             return list(self.peers.values())
 
+    def _drop_same_address_locked(self, pid, url, lan_ip_):
+        """Forget any OTHER id that answers at this url/address. Caller holds self.lock.
+
+        A peer's device id changes whenever its config.json is deleted or unreadable (save is
+        refused, so device_identity() invents a fresh id every start). The old entry then stayed
+        behind - online, same URL, same games - so the peer was merged twice: two hosts per title,
+        two tiles with one label. One machine, one entry."""
+        for old_id in [k for k, v in self.peers.items()
+                       if k != pid and ((url and v.get("url") == url)
+                                        or (lan_ip_ and v.get("lan_ip") == lan_ip_))]:
+            print("[peers] %s re-identified as %s - dropping the old entry" % (old_id, pid))
+            self.peers.pop(old_id, None)
+
     def _merge(self, infos):
         with self.lock:
             for info in infos:
@@ -451,6 +520,7 @@ class PeerRegistry:
                 info["first_seen"] = prev.get("first_seen") or now_ms()
                 info["last_seen"] = now_ms()
                 info["online"] = True
+                self._drop_same_address_locked(pid, info.get("url"), info.get("lan_ip"))
                 self.peers[pid] = info
             self.last_scan = now_ms()
 
@@ -462,22 +532,27 @@ class PeerRegistry:
             self._adopt(info, me)
         return self.known()
 
+    def _scan_guarded(self):
+        """scan(), but never two at once. keepalive() used to call scan() straight, outside the
+        in-flight flag scan_async() keeps, so a library load landing during the 5-minute sweep
+        started a second 254-thread sweep on top of the first."""
+        with self.lock:
+            if self.scanning:
+                return
+            self.scanning = True
+        try:
+            self.scan()
+        except Exception:
+            pass
+        finally:
+            with self.lock:
+                self.scanning = False
+
     def scan_async(self, min_interval_ms=60000):
         with self.lock:
             if self.scanning or (now_ms() - self.last_scan) < min_interval_ms:
                 return
-            self.scanning = True
-
-        def run():
-            try:
-                self.scan()
-            except Exception:
-                pass
-            finally:
-                with self.lock:
-                    self.scanning = False
-
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=self._scan_guarded, daemon=True).start()
 
     def refresh_online(self):
         """Re-check the peers we already know, without a full /24 sweep."""
@@ -495,8 +570,14 @@ class PeerRegistry:
                     fresh["first_seen"] = info.get("first_seen")
                     fresh["last_seen"] = now_ms()
                     fresh["online"] = True
+                    if fresh["id"] != pid:
+                        # Same machine, new id: the loop iterated the OLD id and stored under the
+                        # NEW one, and the old entry was never marked offline - it stayed online
+                        # with the same URL until this PC restarted.
+                        self.peers.pop(pid, None)
+                    self._drop_same_address_locked(fresh["id"], url, fresh.get("lan_ip"))
                     self.peers[fresh["id"]] = fresh
-                else:
+                elif pid in self.peers:
                     self.peers[pid]["online"] = False
             self._adopt(fresh, me)
         return self.known()
@@ -534,7 +615,7 @@ class PeerRegistry:
             while True:
                 try:
                     if first or (now_ms() - self.last_scan) > 300000:   # full sweep at most every 5 min
-                        self.scan()
+                        self._scan_guarded()
                         first = False
                     else:
                         self.refresh_online()
@@ -592,6 +673,10 @@ def federation_self(srv):
     dev = device_identity(srv.cfg)
     name = srv.cfg.get("federation", {}).get("name") or dev.get("name") or socket.gethostname()
     port = srv.cfg["companion"]["port"]
+    # Once per call. lan_ip() opens, connects and closes a UDP socket; it was called twice per
+    # game inside the loop below - 226 sockets per /api/federation, which every peer polls every
+    # 20 s - for a value that cannot change between two lines of the same reply.
+    ip = lan_ip()
     games = []
     for g in srv.library.games:
         # Every installable file this PC holds for the title, tagged with what it is. Sending
@@ -624,16 +709,16 @@ def federation_self(srv):
                       # Cover art lives on whichever PC holds the game. Tell peers it exists and
                       # where to get it, or every other device falls back to drawing initials.
                       "has_icon": bool(g.get("has_icon")),
-                      "thumb_url": ("http://%s:%d/thumb/%s.webp" % (lan_ip(), port, g.get("title_id")))
+                      "thumb_url": ("http://%s:%d/thumb/%s.webp" % (ip, port, g.get("title_id")))
                                    if g.get("title_id") else "",
-                      "icon_url": ("http://%s:%d/icon/%s.png" % (lan_ip(), port, g.get("title_id")))
+                      "icon_url": ("http://%s:%d/icon/%s.png" % (ip, port, g.get("title_id")))
                                   if (g.get("has_icon") and g.get("title_id")) else None})
     con = _first_bridge(srv)
     return {"id": dev.get("id"), "name": name, "hostname": socket.gethostname(),
             "os": platform.system(), "app": "PKG MUTANT SHOP", "version": VERSION,
-            "lan_ip": lan_ip(), "companion_port": port,
-            "url": "http://%s:%d" % (lan_ip(), port),
-            "lan_url": "http://%s:%d/library/" % (lan_ip(), port),
+            "lan_ip": ip, "companion_port": port,
+            "url": "http://%s:%d" % (ip, port),
+            "lan_url": "http://%s:%d/library/" % (ip, port),
             "console": {"ip": con.ip if con else None,
                         # read-only: this reply is how other PCs identify us, so it must
                         # never wait on the console. Health refreshes the value.
@@ -691,93 +776,17 @@ def build_federated_library(srv):
     peers_status = []
     for info in peers:
         purl = info.get("url") or ""
-        peers_status.append({"url": purl, "id": info.get("id"), "name": info.get("name") or purl,
-                             "online": bool(info.get("online")), "count": info.get("count", 0),
-                             "counts": info.get("counts"), "lan_ip": info.get("lan_ip"),
-                             "os": info.get("os"), "version": info.get("version"),
-                             "last_seen": info.get("last_seen")})
+        peers_status.append(peer_summary(info))
         if not info.get("online"):
             continue
         base_url = info.get("lan_url") or (purl.rstrip("/") + "/library/")
-        for pg in info.get("games", []):
-            tid = pg.get("title_id")
-            host = {"pc": info.get("name"), "id": info.get("id"), "local": False,
-                    "url": base_url + (pg.get("install_key") or "")}
-            # Older peers send one key; newer ones send every file with its kind.
-            pitems = pg.get("items") or [{"install_key": pg.get("install_key"), "kind": "base",
-                                          "version": pg.get("version"), "size": pg.get("size", 0),
-                                          "file": pg.get("name")}]
-
-            def _mk(it):
-                return {"install_key": it.get("install_key"), "file": it.get("file") or pg.get("name"),
-                        "size": it.get("size", 0), "kind": it.get("kind") or "base",
-                        "version": it.get("version"), "content_id": it.get("content_id", ""),
-                        "format": it.get("format") or pg.get("format"),
-                        "parts": it.get("parts"), "multi_part": it.get("multi_part", False),
-                        "peer_url": base_url + (it.get("install_key") or "")}
-
-            g = by_tid.get(tid) if tid else None
-            if g:
-                # Same title on another PC. Record the extra source and fold in any file this
-                # machine does not have — that is how a peer's DLC reaches the game's panel.
-                if not any(h.get("id") == host["id"] for h in g.get("hosts", [])):
-                    g.setdefault("hosts", []).append(host)
-                for it in pitems:
-                    if not it.get("install_key"):
-                        continue
-                    bucket = {"base": "base", "update": "updates", "dlc": "dlc"}.get(it.get("kind") or "base", "base")
-                    have = {x.get("install_key") for x in (g.get(bucket) or [])}
-                    if it["install_key"] not in have:
-                        g.setdefault(bucket, []).append(_mk(it))
-                if g.get("base"):
-                    g["update_only"] = False
-                # A TITLE ID IS NOT A NAME. This title can already be here as a console-only
-                # entry whose name fell back to the id (build_library, via server.py "name": tid)
-                # because the PS5's app.db carries no row for an installed PS4 game. The peer that
-                # holds the package knows what it is actually called - pg["name"] is the game name,
-                # the filename lives in items[].file - and we are about to borrow its cover anyway.
-                # One direction only: a placeholder is upgraded, a real name is never overwritten.
-                if is_placeholder_name(g.get("name"), tid) and not is_placeholder_name(pg.get("name"), tid):
-                    g["name"] = pg["name"]
-                if not g.get("has_icon") and pg.get("icon_url"):
-                    g["has_icon"] = True                 # borrow the peer's artwork
-                    g["icon_url"] = pg["icon_url"]
-                    if pg.get("thumb_url"):
-                        g["thumb_url"] = pg["thumb_url"]   # and its card-sized copy
-                continue
-
-            buckets = {"base": [], "updates": [], "dlc": []}
-            for it in pitems:
-                if not it.get("install_key"):
-                    continue
-                buckets[{"base": "base", "update": "updates", "dlc": "dlc"}.get(it.get("kind") or "base", "base")].append(_mk(it))
-            # Carry the container type and version the owner reported. Falling back to the file
-            # extension matters: a peer on an older build advertises no format at all, and the
-            # filename is proof enough — so backups from a PC that has not been updated still
-            # identify themselves correctly.
-            pfmt = (pg.get("format") or (pitems[0].get("format") if pitems else None)
-                    or fmt_from_filename(pg.get("name"))
-                    or (fmt_from_filename(pitems[0].get("file")) if pitems else None))
-            # A backup is a backup wherever it happens to sit: it mounts, so it gets the mount lane
-            # and with it the drive picker, exactly as a local one does. The peer-mount lane fetches
-            # it here first; every container in MOUNT_EXTS behaves the same way.
-            pbackup = any(is_backup_item(i, pg) for i in pitems) if pitems else is_backup_item({}, pg)
-            ng = {"title_id": tid, "name": pg.get("name"), "platform": pg.get("platform", "PS4"),
-                  "region": pg.get("region") or "—", "size": pg.get("size", 0),
-                  "lane": "mount" if pbackup else "install",
-                  "format": pfmt, "version": pg.get("version"),
-                  "size_known": bool(pg.get("size")),
-                  "cover_seed": tid or pg.get("name"),
-                  "has_icon": bool(pg.get("icon_url")), "icon_url": pg.get("icon_url"),
-                  # The owner serves its own art: never rewrite this to point at us.
-                  "thumb_url": pg.get("thumb_url") or "",
-                  "source_pc": info.get("name"), "source_id": info.get("id"), "remote": True,
-                  "update_only": (not buckets["base"]) or bool(pg.get("update_only")),
-                  "base": buckets["base"], "updates": buckets["updates"], "dlc": buckets["dlc"],
-                  "cheats": [], "hosts": [host]}
-            games.append(ng)
-            if tid:
-                by_tid[tid] = ng
+        try:
+            _merge_peer_games(info, base_url, games, by_tid)
+        except Exception as e:
+            # One peer's odd document must not take the LOCAL library down for every device
+            # (the PS5's page included). A peer answering games:null, a non-dict game or a
+            # numeric install_key used to raise here and /api/library failed until it went away.
+            print("[peers] skipping %s's library: %r" % (info.get("name") or purl, e))
 
     # CARD ART: point every local title at its card-sized thumbnail.
     #
@@ -809,6 +818,114 @@ def build_federated_library(srv):
     result["peers"] = peers_status
     result["device"] = {"id": me.get("id"), "name": me.get("name")}
     return result
+
+
+def peer_summary(info):
+    """The compact, UI-facing description of one peer. One shape, used by /api/library's
+    `peers` and by /api/federation/peers, so the two cannot drift apart."""
+    purl = info.get("url") or ""
+    return {"url": purl, "id": info.get("id"), "name": info.get("name") or purl,
+            "online": bool(info.get("online")), "count": info.get("count", 0),
+            "counts": info.get("counts"), "lan_ip": info.get("lan_ip"),
+            "os": info.get("os"), "version": info.get("version"),
+            "last_seen": info.get("last_seen")}
+
+
+def _merge_peer_games(info, base_url, games, by_tid):
+    """Fold one ONLINE peer's advertised games into `games`/`by_tid` (mutated in place).
+
+    Split out of build_federated_library() so a malformed document from one peer can be caught
+    per peer. Shapes are coerced on the way in rather than trusted: `games` must be a list, each
+    game a dict, each install_key a string."""
+    pgames = info.get("games")
+    if not isinstance(pgames, list):
+        return
+    for pg in pgames:
+        if not isinstance(pg, dict):
+            continue
+        tid = pg.get("title_id")
+        if tid is not None and not isinstance(tid, str):
+            tid = str(tid)
+        host = {"pc": info.get("name"), "id": info.get("id"), "local": False,
+                "url": base_url + str(pg.get("install_key") or "")}
+        # Older peers send one key; newer ones send every file with its kind.
+        pitems = pg.get("items") if isinstance(pg.get("items"), list) else None
+        pitems = [i for i in (pitems or []) if isinstance(i, dict)] or \
+            [{"install_key": pg.get("install_key"), "kind": "base",
+              "version": pg.get("version"), "size": pg.get("size", 0),
+              "file": pg.get("name")}]
+
+        def _mk(it):
+            return {"install_key": str(it.get("install_key") or ""), "file": it.get("file") or pg.get("name"),
+                    "size": it.get("size", 0), "kind": it.get("kind") or "base",
+                    "version": it.get("version"), "content_id": it.get("content_id", ""),
+                    "format": it.get("format") or pg.get("format"),
+                    "parts": it.get("parts"), "multi_part": it.get("multi_part", False),
+                    "peer_url": base_url + str(it.get("install_key") or "")}
+
+        g = by_tid.get(tid) if tid else None
+        if g:
+            # Same title on another PC. Record the extra source and fold in any file this
+            # machine does not have — that is how a peer's DLC reaches the game's panel.
+            if not any(h.get("id") == host["id"] for h in g.get("hosts", [])):
+                g.setdefault("hosts", []).append(host)
+            for it in pitems:
+                if not it.get("install_key"):
+                    continue
+                bucket = {"base": "base", "update": "updates", "dlc": "dlc"}.get(it.get("kind") or "base", "base")
+                have = {x.get("install_key") for x in (g.get(bucket) or [])}
+                if it["install_key"] not in have:
+                    g.setdefault(bucket, []).append(_mk(it))
+            if g.get("base"):
+                g["update_only"] = False
+            # A TITLE ID IS NOT A NAME. This title can already be here as a console-only
+            # entry whose name fell back to the id (build_library, via server.py "name": tid)
+            # because the PS5's app.db carries no row for an installed PS4 game. The peer that
+            # holds the package knows what it is actually called - pg["name"] is the game name,
+            # the filename lives in items[].file - and we are about to borrow its cover anyway.
+            # One direction only: a placeholder is upgraded, a real name is never overwritten.
+            if is_placeholder_name(g.get("name"), tid) and not is_placeholder_name(pg.get("name"), tid):
+                g["name"] = pg["name"]
+            if not g.get("has_icon") and pg.get("icon_url"):
+                g["has_icon"] = True                 # borrow the peer's artwork
+                g["icon_url"] = pg["icon_url"]
+                if pg.get("thumb_url"):
+                    g["thumb_url"] = pg["thumb_url"]   # and its card-sized copy
+            continue
+
+        buckets = {"base": [], "updates": [], "dlc": []}
+        for it in pitems:
+            if not it.get("install_key"):
+                continue
+            buckets[{"base": "base", "update": "updates", "dlc": "dlc"}.get(it.get("kind") or "base", "base")].append(_mk(it))
+        # Carry the container type and version the owner reported. Falling back to the file
+        # extension matters: a peer on an older build advertises no format at all, and the
+        # filename is proof enough — so backups from a PC that has not been updated still
+        # identify themselves correctly.
+        pfmt = (pg.get("format") or (pitems[0].get("format") if pitems else None)
+                or fmt_from_filename(pg.get("name"))
+                or (fmt_from_filename(pitems[0].get("file")) if pitems else None))
+        # A backup is a backup wherever it happens to sit: it mounts, so it gets the mount lane
+        # and with it the drive picker, exactly as a local one does. The peer-mount lane fetches
+        # it here first; every container in MOUNT_EXTS behaves the same way.
+        pbackup = any(is_backup_item(i, pg) for i in pitems) if pitems else is_backup_item({}, pg)
+        ng = {"title_id": tid, "name": pg.get("name"), "platform": pg.get("platform", "PS4"),
+              "region": pg.get("region") or "—", "size": pg.get("size", 0),
+              "lane": "mount" if pbackup else "install",
+              "format": pfmt, "version": pg.get("version"),
+              "size_known": bool(pg.get("size")),
+              "cover_seed": tid or pg.get("name"),
+              "has_icon": bool(pg.get("icon_url")), "icon_url": pg.get("icon_url"),
+              # The owner serves its own art: never rewrite this to point at us.
+              "thumb_url": pg.get("thumb_url") or "",
+              "source_pc": info.get("name"), "source_id": info.get("id"), "remote": True,
+              "update_only": (not buckets["base"]) or bool(pg.get("update_only")),
+              "base": buckets["base"], "updates": buckets["updates"], "dlc": buckets["dlc"],
+              "cheats": [], "hosts": [host]}
+        games.append(ng)
+        if tid:
+            by_tid[tid] = ng
+
 
 
 def _drive_of_backup(path):
@@ -942,6 +1059,13 @@ def build_storage(srv, apps, devices=None, console_online=True):
                        "free": _st.get("free"), "total": _st.get("total"),
                        "count": n, "kind": "pc", "local": False, "lan_ip": p.get("lan_ip")})
 
+    # PC tiles in one order everywhere. They were painted in answer order - this PC first, then
+    # peers as discovered - so the same network read "ASUS-LAP, Casita" on one device and
+    # "Casita, ASUS-LAP" on the next. "This PC" is a label the browser adds, not a position.
+    pcs = sorted((d for d in drives if d.get("kind") == "pc"),
+                 key=lambda d: (str(d.get("label") or "").lower(), str(d.get("id"))))
+    drives = [d for d in drives if d.get("kind") != "pc"] + pcs
+
     return {"reachable": apps is not None and console_online, "drives": drives}
 
 
@@ -998,7 +1122,9 @@ def discover_ps5(cfg):
         with lock:
             found.append({"ip": host, "ports": openp, "confirmed": bool(says)})
 
-    threads = [threading.Thread(target=probe, args=(i,)) for i in range(1, 255)]
+    # daemon=True, as discover_peers' are: a probe stuck in a connect must never be the thread
+    # that keeps the process alive after the tray's Quit, and 254 of them were not.
+    threads = [threading.Thread(target=probe, args=(i,), daemon=True) for i in range(1, 255)]
     for t in threads:
         t.start()
     for t in threads:
@@ -1052,6 +1178,23 @@ MOUNT_EXTS = (".ffpfsc", ".ffpkg", ".ffpfs", ".exfat", ".ffpfsx", ".fpkg", ".iso
 
 class _Cancelled(Exception):
     pass
+
+
+class _FsListing(list):
+    """What fs_list() returns: a plain list of entries that also knows whether it is COMPLETE.
+
+    The console caps a listing at 96000 bytes (~1265 entries) and says so with "truncated":true.
+    fs_list() used to drop that flag on the floor, so a 2142-file cheat folder came back as 1265
+    names and everything after them was "missing" - re-sent every 15 minutes, forever. A reader
+    that computes a difference against a directory must check `truncated` first."""
+    truncated = False
+
+
+# One sync at a time, process-wide. The 15-minute thread and POST /api/cheats/sync both call
+# sync_cheat_library(); overlapping them only doubles the uploads, but doubling 2000 uploads on
+# the link an install is using is not nothing. Module-level rather than per bridge because
+# Fleet.reload() (POST /api/config) builds fresh bridges while an old sync may still be running.
+_CHEAT_SYNC_LOCK = threading.Lock()
 
 
 def _mkdirs_list(path):
@@ -1115,6 +1258,12 @@ def _adopt_library_root(cfg):
     place."""
     lib = cfg.setdefault("library", {})
     paths = [p for p in (lib.get("local_paths") or []) if p]
+    if sys.platform != "win32":
+        # "C:\Mutant Games" is a Windows path. On Linux/macOS (start.sh, a home box) makedirs()
+        # created a literal folder called "C:\Mutant Games" inside companion/ and then scanned
+        # it. The canonical root is a Windows convenience; elsewhere the configured paths rule.
+        lib["local_paths"] = paths
+        return cfg
     norm = os.path.normcase(os.path.normpath(LIBRARY_ROOT))
     if not any(os.path.normcase(os.path.normpath(p)) == norm for p in paths):
         paths.insert(0, LIBRARY_ROOT)
@@ -1137,7 +1286,13 @@ def load_config():
     global _CONFIG_UNREADABLE
     _CONFIG_UNREADABLE = None
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
-    for path in (EXAMPLE_PATH, CONFIG_PATH):
+    # DEFAULT_CONFIG, then the user's config.json - and nothing in between. config.example.json
+    # used to be layered underneath as a live third source, so a SOURCE run inherited whatever the
+    # example happened to say (ShadowMount on 9021, a dead library root, dpi.mode "v2") even with
+    # a minimal config.json, and "deleting a key inherits the example, not the default" had to be
+    # documented as if it were intended. The example is a template for people to copy; the app
+    # reads only its own defaults and the one file the user owns.
+    for path in (CONFIG_PATH,):
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -1167,7 +1322,19 @@ def load_config():
                         print("[cfg] could not preserve the unreadable config: %r" % (ce,))
                     print("[cfg] RUNNING ON DEFAULTS and refusing to save - fix or delete %s"
                           % CONFIG_PATH)
-    return coerce_config(cfg)
+    cfg = coerce_config(cfg)
+    # One value that outlived the code that wrote it. save_config() persists the whole merged
+    # dict, so a config.json written when the ShadowMount default was 9021 (elfldr's port - see
+    # DEFAULT_CONFIG) carries 9021 for ever, and helper_status() reads it whenever the console
+    # is not there to correct it. In memory only - the file is the user's and is not rewritten
+    # for this; the next deliberate save carries the corrected value.
+    try:
+        if int((cfg.get("shadowmount") or {}).get("port") or 0) == 9021:
+            cfg["shadowmount"]["port"] = 10101
+            print("[cfg] shadowmount.port 9021 is elfldr, not ShadowMount - using 10101")
+    except (TypeError, ValueError):
+        pass
+    return cfg
 
 
 def _atomic_write_json(path, obj, indent=None):
@@ -1576,8 +1743,16 @@ def filename_fallback(fn):
     stem = os.path.splitext(fn)[0]
     m = re.search(r"(CUSA\d{5}|PPSA\d{5})", stem, re.IGNORECASE)
     tid = m.group(1).upper() if m else None
-    low = fn.lower()
-    kind = "update" if any(w in low for w in ("update", "patch")) else ("dlc" if "dlc" in low else "base")
+    # Whole words only. A bare substring test read "Dispatch" as a patch and "Addlc..." as DLC;
+    # release names separate their tags with - _ . or spaces, which \b treats as boundaries.
+    kind = ("update" if re.search(r"\b(update|patch)\b", stem, re.I)
+            else ("dlc" if re.search(r"\bdlc\b", stem, re.I) else "base"))
+    # The content id, when the name is the canonical one (UP1001-PPSA01494_00-FIREHAWKSFINERY0).
+    # It was hard-coded to "" for every file that lands here - every PS5 package - so
+    # already_installed(kind="dlc") could never match addcont.db and an installed PS5 add-on was
+    # never skipped.
+    cm = re.search(r"\b([A-Z]{2}\d{4}-(?:CUSA|PPSA)\d{5}_00-[A-Z0-9_]{16})\b", stem, re.I)
+    content_id = cm.group(1).upper() if cm else ""
     ver = None
     if tid and tid.startswith("PPSA"):
         # A PS5 game arrives as a ShadowMount backup (.ffpfsc), never as a .pkg, so a PS5 .pkg is
@@ -1591,7 +1766,8 @@ def filename_fallback(fn):
     name = re.sub(r"[\[\]\(\)_]+", " ",
                   re.sub(r"(CUSA\d{5}|PPSA\d{5}|\[BASE\]|\[UPDATE\]|\[DLC\])", "", stem, flags=re.I))
     return {"title_id": tid, "name": " ".join(name.split()).strip(" -.") or fn, "kind": kind,
-            "version": ver, "region": "—", "content_id": "", "icon": False}
+            "version": ver, "region": (pkg_meta.region_from_content_id(content_id) if content_id else "—"),
+            "content_id": content_id, "icon": False}
 
 
 # --------------------------------------------------------------------------- #
@@ -1810,6 +1986,13 @@ class Library:
                     claimed.append(d)
                 if claimed:
                     _dirs[:] = [d for d in _dirs if d not in claimed]
+                # BASE PACKAGES FIRST. The first PKG parsed for a title id owns the cached cover
+                # for ever (see want_icon below), and os.walk hands files over alphabetically -
+                # so "Atomfall-Basic-Supply-Bundle-CUSA42503-DLC-..." was parsed before
+                # "Atomfall-CUSA42503.pkg" and its pack art became the game's cover on 52 of 56
+                # titles here. Names carrying an add-on tag go last within each folder.
+                files = sorted(files, key=lambda f: (bool(re.search(r"\b(dlc|update|patch)\b", f, re.I)),
+                                                     f.lower()))
                 for fn in files:
                     low = fn.lower()
                     is_pkg = low.endswith(".pkg")
@@ -1819,9 +2002,11 @@ class Library:
                     ap = os.path.join(dirpath, fn)
                     try:
                         size = os.path.getsize(ap)
+                        key = self._register(ap, reg, sizes)
                     except OSError:
+                        # _register() stats the file a second time; a file that vanished between
+                        # the two calls (a copy cancelled mid-scan) used to abort the whole scan.
                         continue
-                    key = self._register(ap, reg, sizes)
                     if is_mount:      # ShadowMount backup - mount lane, no param.sfo
                         mt = re.search(r"(CUSA\d{5}|PPSA\d{5})", fn, re.I)
                         mtid = mt.group(1).upper() if mt else None
@@ -1835,7 +2020,20 @@ class Library:
                                        "format": os.path.splitext(fn)[1].lower().lstrip(".")})
                         continue
                     tg = re.search(r"(CUSA\d{5}|PPSA\d{5})", fn, re.I)
-                    icon_path = os.path.join(ICON_DIR, (tg.group(1).upper() if tg else key) + ".png")
+                    if tg:
+                        icon_tid = tg.group(1).upper()
+                    else:
+                        # No id in the name: ask the package itself before choosing where the
+                        # cover goes. It used to be written to <quoted basename>.png, which
+                        # has_icon (<TITLE_ID>.png) and /thumb/<tid> never look for - the art was
+                        # extracted and the card still showed initials, and because such a name
+                        # is "safe" the renamer never fixed it either.
+                        try:
+                            pre = pkg_meta.parse_pkg(ap)
+                        except Exception:
+                            pre = None
+                        icon_tid = (pre or {}).get("title_id") or key
+                    icon_path = os.path.join(ICON_DIR, icon_tid + ".png")
                     want_icon = None if os.path.exists(icon_path) else icon_path   # don't re-extract if cached
                     meta = pkg_meta.parse_pkg(ap, extract_icon_to=want_icon)       # REAL
                     if meta and meta.get("title_id"):
@@ -1913,7 +2111,9 @@ class Library:
         games += load_sources(self.cfg)
         # atomic swap: registry / sizes / games all become visible together [B4]
         self.file_registry, self.file_sizes = reg, sizes
-        self.games = sorted(games, key=lambda g: g["name"].lower())
+        # str(... or ""): a sources.json entry with no name (or name: null) raised inside this
+        # sort, at boot, before the log banner - the frozen exe simply closed.
+        self.games = sorted(games, key=lambda g: str(g.get("name") or "").lower())
         self.is_empty = len(self.games) == 0      # honest empty state — never fabricated games
         self.gen += 1
         self.last_scan_ms = now_ms()
@@ -1934,10 +2134,27 @@ def load_sources(cfg):
         return []
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f).get("games", [])
+            raw = json.load(f).get("games", [])
     except Exception as e:
         print("[sources] %s" % e)
         return []
+    # Normalise before anything downstream subscripts these. Entries are appended to the library
+    # verbatim, and every reader assumes the shape scan() builds: a dict with a string name and
+    # the three item lists. One entry without a name used to stop the app from starting at all.
+    out = []
+    for g in (raw if isinstance(raw, list) else []):
+        if not isinstance(g, dict):
+            continue
+        g = dict(g)
+        if not isinstance(g.get("name"), str) or not g["name"].strip():
+            g["name"] = str(g.get("title_id") or "Untitled")
+            print("[sources] an entry has no name - listing it as %r" % g["name"])
+        for k in ("base", "updates", "dlc", "cheats"):
+            if not isinstance(g.get(k), list):
+                g[k] = []
+        g.setdefault("lane", "install")
+        out.append(g)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1979,14 +2196,16 @@ def cached_sha(path, cache):
 
 
 # --------------------------------------------------------------------------- #
-# DPI daemon self-healing (Payload Manager)                                     #
+# console-side clients: the legacy CheatRunner service and Payload Manager    #
 # --------------------------------------------------------------------------- #
 class CheatRunner:
-    """Client for the CheatRunner service on the PS5 (:9999).
+    """OPTIONAL legacy client for the third-party CheatRunner service on the PS5 (:9999).
 
-    It owns the actual cheat engine — matching a cheat file to the running game, patching memory,
-    and keeping per-title profiles. We drive it rather than reimplement it, and add the one thing
-    it cannot know: whether the file matches the version WE know is installed.
+    Not shipped and not required: OUR on-console ELF implements the whole cheat engine itself
+    (Ps5Bridge.mutant_* and mods_action), and every mods route asks it first. This class is kept
+    only as a last-resort fallback for someone who still runs CheatRunner beside the shop, and it
+    is only ever consulted after our engine has said it has no cheat file for the title.
+    alive() caches its answer both ways so a missing service costs nothing on the hot paths.
 
     Endpoints (verified live against v0.16):
       GET /api/cheats/find?titleId=            -> best local file + scored candidates
@@ -2113,20 +2332,22 @@ def cheat_file_version(filename):
 
 
 class PayloadManager:
-    """Drives Payload Manager (pldmgr) on the console over LAN — the piece that makes the
-    DPI daemon reload itself with ZERO user interaction.
+    """Client for Payload Manager (pldmgr, :8084) on the console, over LAN.
 
-    Why this exists: the DPI v2 daemon WEDGES after a heavy install (POST /api/install stops
-    answering and never self-recovers) and its API has exactly ONE endpoint — POST /api/install —
-    so there is no in-band reset to call. Reloading the payload is the only real fix.
+    Two jobs today, both ours:
+      * It is how each install is STARTED. The on-console ELF writes installer-req.txt and asks
+        pldmgr to spawn pms-installer.elf, because sceAppInstUtilInstallByPackage only succeeds
+        from a freshly spawned process (see Ps5Bridge.install_spawn). From this side, alive()
+        is therefore the "can an install start" question that /api/health and /api/engine/state
+        report as engine_ready.
+      * restart_shadowmount() uses kill()/load() to reload ShadowMount after its register-path
+        config is fixed, when no game is running.
+    It used to reload a third-party install daemon that wedged after heavy installs; there is no
+    such daemon in the path any more and nothing here reloads anything on its own.
 
-    Measured on-device (FW 12.70, pldmgr v0.5.0 on :8084):
-      * The install daemon is `dpiv2.elf`, a process of its OWN — relaunching elf-arsenal alone
-        does NOT replace it (verified: elf-arsenal's relaunch cycled dpi.elf/ftpsrv/nanodns but
-        dpiv2 kept its pid and :12800 never dropped). The old instance still owns the port, so a
-        fresh one cannot bind. Killing it FIRST is what makes the reload real.
-      * kill dpiv2 -> :12800 gone in ~2.5s; loadpayload elf-arsenal -> serving again in ~3.5s
-        with a brand-new dpiv2 pid. Full recovery ~6s, unattended.
+    Measured on-device (FW 12.70, pldmgr v0.5.0 on :8084): kill -> process gone in ~2.5 s,
+    loadpayload -> serving again in ~3.5 s. /loadpayload resolves by BASENAME to pldmgr's own copy
+    (see the memory note on that trap), so always check /api/health after a load.
     """
     PORT = 8084
 
@@ -2224,12 +2445,12 @@ class Ps5Bridge:
                                    # the port depends on which FTP payload the user runs.
         self._fs_ok, self._fs_ok_at = None, 0.0   # is OUR on-console file API answering?
 
-    # Every read of console state - app.db, bgft.db, addcont.db, the install proof, the cheat sync -
-    # goes through here, so which FTP is up decides whether the app can see the console at all.
-    # Elf Arsenal's ftpsrv served :2121; etaHEN's own FTP serves :1337. Now that Arsenal is no
-    # longer bundled the port depends on what is running, so try the configured one and fall back
-    # to the other rather than going blind. The working port is remembered so this costs one
-    # connect in the normal case.
+    # FTP is the FALLBACK transport, not the route. Every read of console state - app.db, bgft.db,
+    # addcont.db, the install proof, the cheat sync - goes through fs_read/fs_list, which ask OUR
+    # on-console ELF's /api/fs first and only come here when it is not loaded. Which FTP payload
+    # the user runs decides the port (ftpsrv on :2121, others on :1337), so try the configured one
+    # and fall back to the other rather than going blind. The working port is remembered so this
+    # costs one connect in the normal case.
     FTP_FALLBACKS = (2121, 1337)
 
     def _ftp(self, timeout=6):
@@ -2256,7 +2477,7 @@ class Ps5Bridge:
         self._ftp_port = None          # both gone - re-probe from the configured port next time
         raise last if last else OSError("no FTP port reachable")
 
-    # ---------------- DPI self-healing: probe + automatic reload ----------------
+    # ---------------- our on-console engine: cheats, patches, the console's own scans -------------
     def mutant_running(self, version=""):
         """Running game as OUR on-console engine sees it (title/pid/base/cheat file).
 
@@ -2271,10 +2492,22 @@ class Ps5Bridge:
         except Exception:
             return {}
 
+    USB_PKG_TTL = 20.0
+
     def console_usb_packages(self):
         """Installable packages the CONSOLE can see on its own removable media.
         Our on-console app already scans /mnt/usb0..7, so ask it rather than
-        duplicating the scan here (two scanners would drift apart)."""
+        duplicating the scan here (two scanners would drift apart).
+
+        Cached for USB_PKG_TTL seconds per bridge. This was the one uncached call in
+        build_library(): every /api/library on every device - and the peer-hosted /api/install
+        and /api/transfer, which rebuild the federated library - made the console rebuild its
+        whole library JSON (app.db read, eight USB scans) on its single accept loop. A stick
+        plugged in shows up within 20 s, which nobody notices; the console does."""
+        now = time.time()
+        memo = getattr(self, "_usbpkg_memo", None)
+        if memo and now - memo[0] < self.USB_PKG_TTL:
+            return [dict(g) for g in memo[1]]
         try:
             doc = self._shop("/api/library", timeout=20) or {}
         except Exception:
@@ -2287,7 +2520,8 @@ class Ps5Bridge:
             g["lane"] = "install"
             g["on_console"] = False
             out.append(g)
-        return out
+        self._usbpkg_memo = (now, out)
+        return [dict(g) for g in out]
 
     def cheat_paths(self):
         """Where the console keeps cheats, and which folders it watches for drop-ins."""
@@ -2389,7 +2623,10 @@ class Ps5Bridge:
                 r = {}
             else:
                 try:
-                    r = self.cheats.running()
+                    # alive() first (1.5 s, cached both ways) rather than the 6 s /api/state
+                    # call straight away: the once-per-600 s re-probe landed on a health poll and
+                    # stalled it for the full refused-connect timeout.
+                    r = self.cheats.running() if self.cheats.alive() else {}
                 except Exception:
                     r = {}
                 # Its client swallows every error and returns a dict, so an exception never arrives
@@ -2438,32 +2675,25 @@ class Ps5Bridge:
         return False
 
     def notify(self, text):
-        """Put a message on the television. Our own HTTP endpoint first; the legacy socket after.
+        """Put a message on the television, through our own ELF's /api/notify. True if it took it.
 
         This used to open a socket to console.notify_port (9099) and nothing else. Nothing listens
         on 9099 - it is not bound by this app or by any payload we ship - so every call quietly
-        returned False and no notification was ever sent from the PC.
+        returned False and no notification was ever sent from the PC. The 9099 socket stayed on as
+        a "legacy" fallback after /api/notify arrived and only ever cost a 2 s connect timeout per
+        missed toast; it is gone.
+
+        Capped at 250 bytes of UTF-8, cut at a character boundary: the console keeps the text in
+        a 300-byte buffer and would otherwise cut a longer one mid-character.
         """
         if not self.ip:
             return False
+        s = str(text).replace("\n", " ")
+        s = s.encode("utf-8")[:250].decode("utf-8", "ignore")
         try:
-            j = self._shop("/api/notify?text=%s" % quote(str(text).replace("\n", " "), safe=""),
-                           timeout=6) or {}
-            if j.get("ok"):
-                return True
+            j = self._shop("/api/notify?text=%s" % quote(s, safe=""), timeout=6) or {}
+            return bool(j.get("ok"))
         except Exception:
-            pass
-        # Legacy path, for a console still running an ELF from before /api/notify existed.
-        port = self.cfg.get("console", {}).get("notify_port", 9099)
-        try:
-            with socket.create_connection((self.ip, port), timeout=2) as s:
-                s.sendall(("notify " + str(text).replace("\n", " ") + "\n").encode("utf-8"))
-                try:
-                    s.recv(16)
-                except OSError:
-                    pass
-            return True
-        except OSError:
             return False
 
     def open_shop(self, url=None):
@@ -2483,19 +2713,11 @@ class Ps5Bridge:
                 return j
         except Exception:
             pass
-        port = self.cfg.get("console", {}).get("notify_port", 9099)
-        cmd = ("open " + str(url).replace("\n", " ") if url else "open") + "\n"
-        try:
-            with socket.create_connection((self.ip, port), timeout=2) as s:
-                s.sendall(cmd.encode("utf-8"))
-                try:
-                    s.recv(16)
-                except OSError:
-                    pass
-            return {"ok": True, "launched": True, "notified": False, "legacy": True}
-        except OSError:
-            return {"ok": False, "error": "PKG MUTANT SHOP on the PS5 did not answer - "
-                                          "load it again from Payload Manager"}
+        # No 9099 fallback any more. It could answer {ok:true, launched:true} for ANYTHING that
+        # accepted the TCP connect - nothing of ours ever listened there - which is a fabricated
+        # "the browser opened" for a console that did nothing.
+        return {"ok": False, "error": "PKG MUTANT SHOP on the PS5 did not answer - "
+                                      "load it again from Payload Manager"}
 
     # ---------------- our own install engine (on-console, no Elf Arsenal) -------------
     def _shop(self, path, timeout=30, data=None):
@@ -2535,20 +2757,54 @@ class Ps5Bridge:
     def _shop_text(self, path, timeout=15):
         """GET a PLAIN TEXT endpoint on the console. _shop() json.loads() its answer, which is
         exactly wrong for the install log - the only thing it could ever return is an exception."""
+        # Same cheap gate as _shop(): without it a log read against a switched-off console sat
+        # out the whole HTTP timeout before the 502.
+        if not self.up():
+            raise IOError("the console is not answering on the network")
         url = "http://%s:%d%s" % (self.ip, self.cfg.get("console", {}).get("shop_port", 8710), path)
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.read().decode("utf-8", "replace")
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            raise self._as_shop_error(e, url)
 
-    def _shop_post(self, path, payload, timeout=900):
-        """POST to the on-console shop. Installs from a stick can take minutes, so the
-        timeout is generous -- the console is doing real work, not hanging."""
+    @staticmethod
+    def _as_shop_error(e, url):
+        """An HTTPError from the console, as the ShopHTTPError _shop() raises - so a 4xx/5xx
+        with the console's own sentence in it is never mistaken for "did not answer"."""
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        try:
+            j = json.loads(body)
+        except ValueError:
+            j = {}
+        return ShopHTTPError(e.code, j, body, url)
+
+    def _shop_post(self, path, payload, timeout=120):
+        """POST to the on-console shop. Same reachability gate and same error mapping as _shop().
+
+        The default used to be 900 s "because installs from a stick can take minutes" - but the
+        console answers POST /api/install immediately and installs on its own thread
+        (server.c: pthread_create(localinst_thread) then send_json), and every other caller
+        passes its own timeout. Nine hundred seconds only ever bought a worker sitting in
+        "submitting" against a console that accepted TCP and never answered."""
+        # A console that is off should be found out in milliseconds, exactly as _shop() does,
+        # not after a mod toggle has hung the request for minutes.
+        if not self.up():
+            raise IOError("the console is not answering on the network")
         port = self.cfg.get("console", {}).get("shop_port", 8710)
         url = "http://%s:%d%s" % (self.ip, port, path)
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data,
                                      headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            raise self._as_shop_error(e, url)
 
     def install_local_on_console(self, path, name=""):
         """Install a package that is ALREADY on the console (USB stick, external drive).
@@ -2560,13 +2816,15 @@ class Ps5Bridge:
         """Live state of the two helper services, for the settings panel.
 
         ShadowMount binds loopback-only, so from the PC we can only report it as 'unknown'
-        rather than pretending it is down — the on-console shop answers this accurately."""
-        def up(port, t=0.35):
-            try:
-                with socket.create_connection((self.ip, port), timeout=t):
-                    return True
-            except OSError:
-                return False
+        rather than pretending it is down — the on-console shop answers this accurately.
+
+        MEMOISED for 5 s per bridge. /api/health said "cached helper state, so adding these two
+        keys costs health nothing" and it was not: every 6 s poll from every device spawned an
+        FTP probe thread and a /api/helpers round trip to the console's single accept loop."""
+        now = time.monotonic()
+        memo = getattr(self, "_helpers_memo", None)
+        if memo and now - memo[0] < 5.0:
+            return dict(memo[1])
         smp = self.cfg.get("shadowmount", {}).get("port", 10101)
         # ShadowMount binds LOOPBACK-ONLY on the console, so probing it from the PC can never
         # succeed - it can only burn its full timeout. Measured: this endpoint took 771 ms to
@@ -2575,9 +2833,6 @@ class Ps5Bridge:
         # successful library load, so it sat on the boot path for three quarters of a second.
         # Do not probe what cannot answer; run the two that can, side by side.
         res = {}
-
-        def _probe(key, port):
-            res[key] = up(port)
 
         def _probe_ftp():
             # NOT a single-port probe. Which FTP is up depends on which host is running (Arsenal's
@@ -2615,6 +2870,7 @@ class Ps5Bridge:
                 out["source"] = "console"
         except Exception:
             out["source"] = "lan"
+        self._helpers_memo = (now, dict(out))
         return out
 
     def engine_available(self):
@@ -2623,25 +2879,10 @@ class Ps5Bridge:
         except Exception:
             return False
 
-    def install_pms(self, url, name=""):
-        """Hand the PKG to OUR engine: it downloads it and installs it itself.
-
-        No third-party daemon in the path, so there is nothing to wedge — which is what
-        made multi-install fragile before. The console pulls over plain HTTP from the
-        companion, then registers the package with sceAppInstUtilAppInstallPkg."""
-        q = "/api/engine/install-url?url=%s&name=%s" % (quote(url, safe=""), quote(name or "", safe=""))
-        try:
-            j = self._shop(q, timeout=60)
-            return bool(j.get("ok")), j
-        except ShopHTTPError as e:
-            print("[pms] the console refused with HTTP %d: %s" % (e.status, e.body[:160]))
-            return False, {"error": e.sentence("The console refused this request"),
-                           "http_status": e.status, "do_not_reload": True}
-        except Exception as e:
-            return False, {"error": "PKG MUTANT SHOP on the PS5 did not answer - load it again "
-                                    "from Payload Manager",
-                           "detail": repr(e)[:200],
-                           "hint": "is the PKG MUTANT SHOP ELF loaded on the PS5?"}
+    # install_pms() lived here: the in-process /api/engine/install-url lane, which registers with
+    # sceAppInstUtilAppInstallPkg (metadata only - a tile that crashes). Nothing called it from
+    # this side any more, and on the console that route is a diagnostic behind allow-diagnostics.
+    # The one lane is install_spawn().
 
     def fetch_to(self, url, dest, name, timeout=60, size=0):
         """Ask the console to DOWNLOAD a file into `dest` under exactly `name`, and nothing else.
@@ -2682,8 +2923,12 @@ class Ps5Bridge:
         except Exception:
             return None
 
-    def install_spawn(self, url, name="", force=False):
+    def install_spawn(self, url, name="", force=False, cancelled=None):
         """OUR OWN base-game lane. No etaHEN anywhere in the call.
+
+        `cancelled` is an optional callable the queue passes so a cancel pressed while this waits
+        for the lane to free up stops the hand-over BEFORE the console is asked for anything;
+        the answer then carries `canceled: True` and nothing was submitted.
 
         sceAppInstUtilInstallByPackage returns 0x80B2116F when called from a payload injected into
         a hijacked host process - which is what our shop ELF is - and succeeds from a freshly
@@ -2720,6 +2965,11 @@ class Ps5Bridge:
                                     "has not answered yet. Give it a few seconds.",
                            "host": "pms-spawn", "busy": True, "do_not_reload": True}
         inflight[url] = now
+        # The debounce is for the SUCCESS path only: a hand-over the console accepted and has not
+        # reported on yet. Every early return below pops it again, because leaving it set after a
+        # refusal meant the queue's own retry-once (2 s later) and a Start pressed on a held job
+        # inside two minutes were refused by us - as "console_busy", with the console's real
+        # answer replaced by "handed to the console a moment ago". Nothing was in flight.
 
         # One at a time. The console serialises per-console already, but a retry or a stray
         # request could still overlap - and both installs would share one request file.
@@ -2730,6 +2980,10 @@ class Ps5Bridge:
         # holding the queue behind it helps nobody.
         waited = 0.0
         for _ in range(20):
+            if cancelled and cancelled():
+                inflight.pop(url, None)
+                return False, {"error": "Canceled before it was handed to the console",
+                               "host": "pms-spawn", "canceled": True, "do_not_reload": True}
             st = self.spawn_status()
             if not st.get("busy"):
                 break
@@ -2749,9 +3003,14 @@ class Ps5Bridge:
             else:
                 print("[spawn] the lane is genuinely busy (%ss) - NOT clearing it"
                       % st.get("busy_for"))
+                inflight.pop(url, None)
                 return False, {"error": "An install is still being handed to the console. Let it "
                                         "finish, then start this one.",
                                "host": "pms-spawn", "busy": True, "do_not_reload": True}
+        if cancelled and cancelled():
+            inflight.pop(url, None)
+            return False, {"error": "Canceled before it was handed to the console",
+                           "host": "pms-spawn", "canceled": True, "do_not_reload": True}
         try:
             j = self._shop("/api/engine/install-spawn?uri=%s&name=%s"
                            % (quote(url, safe=""), quote(name or "", safe="")), timeout=90)
@@ -2760,11 +3019,13 @@ class Ps5Bridge:
             # still being handed over - that refusal is protective and must be relayed, never
             # dressed up as an absence. No `queued` key: see the re-drive gate in Queue._run.
             print("[spawn] the console refused with HTTP %d: %s" % (e.status, e.body[:160]))
+            inflight.pop(url, None)
             return False, {"error": e.sentence("An install is already running on the console - "
                                                "let it finish, then try this one again"),
                            "host": "pms-spawn", "busy": True, "http_status": e.status,
                            "do_not_reload": True}
         except Exception as e:
+            inflight.pop(url, None)
             return False, {"error": "PKG MUTANT SHOP on the PS5 did not answer - load it again "
                                     "from Payload Manager",
                            "detail": repr(e)[:200], "host": "pms-spawn",
@@ -2772,6 +3033,7 @@ class Ps5Bridge:
         if not j.get("ok"):
             # This one really is pre-queue: the console answered 200 and said it did not start an
             # installer, so nothing exists to duplicate.
+            inflight.pop(url, None)
             return False, {"error": j.get("error") or "The console could not start the installer",
                            "host": "pms-spawn", "queued": False,
                            "busy": bool(j.get("busy"))}
@@ -2805,6 +3067,7 @@ class Ps5Bridge:
                 if misses >= 3:
                     print("[spawn] giving up after %d transport failures - the console is gone"
                           % misses)
+                    inflight.pop(url, None)
                     return False, {"error": "The console stopped answering while it was installing "
                                             "this package. Check the PS5 before trying again.",
                                    "host": "pms-spawn", "console_gone": True,
@@ -2822,13 +3085,20 @@ class Ps5Bridge:
                 return True, {"res": "0", "host": "pms-spawn", "via": "spawned-process",
                               "content_id": r.get("content_id") or "", "rc": r.get("rc")}
             # A refusal here is pre-BGFT: no task was registered, so nothing is half-queued.
-            return False, {"error": "%s (%s)" % (install_error_text(r.get("rc")), r.get("rc")),
+            # The SCE code travels in `rc` and in pms.log (the verdict line in _run prints this
+            # whole dict); it is not appended to the sentence any more, because that sentence is
+            # the queue row on a television, where a raw hex code is house-style banned.
+            return False, {"error": install_error_text(r.get("rc")),
                            "host": "pms-spawn", "rc": r.get("rc"), "queued": False}
         # NO `queued` KEY. Its absence is load-bearing: `queued is False` is the re-drive gate in
         # Queue._run, and re-driving after a timeout is how one package became several BGFT jobs.
         # We do not know what happened - say so, and stop.
         print("[spawn] no verdict after 90s - NOT re-submitting; the console may still be "
               "installing this package")
+        # Popped here too: the job is HELD (no_verdict) and only a deliberate Start re-drives it,
+        # so this entry could only ever refuse that Start - the live-row guard in _run is what
+        # protects the console from a duplicate, not this two-minute memo.
+        inflight.pop(url, None)
         return False, {"error": "The console took this package but never reported back. It may "
                                 "still be installing it - check the PS5 before trying again.",
                        "host": "pms-spawn", "no_verdict": True, "do_not_reload": True}
@@ -2848,7 +3118,7 @@ class Ps5Bridge:
         except Exception:
             return {}
 
-    def install(self, url, name="", force=False):
+    def install(self, url, name="", force=False, cancelled=None):
         """Install a package on the console with OUR OWN engine. Returns (ok, info).
 
         This used to dispatch between four lanes. It does not any more - see install_spawn().
@@ -2862,7 +3132,7 @@ class Ps5Bridge:
         # disagreed with the default in DEFAULT_CONFIG ("v2"), so what an unconfigured PC did was
         # not predictable from reading either one. Both third-party lanes are gone, along with the
         # probe that decided which foreign daemon owned :12800.
-        return self.install_spawn(url, name, force=force)
+        return self.install_spawn(url, name, force=force, cancelled=cancelled)
 
     SMP_CONFIG = "/data/shadowmount/config.ini"
 
@@ -2970,7 +3240,10 @@ class Ps5Bridge:
         Returns 'restarted' | 'busy' | 'failed'.
         """
         try:
-            if (self.running_title() or {}).get("title_id"):
+            # running_title() returns the CheatRunner-shaped {"titleId": ...}; reading "title_id"
+            # here made this guard permanently dead, so ShadowMount could be restarted - and every
+            # backup remounted - underneath a game running off one.
+            if (self.running_title() or {}).get("titleId"):
                 return "busy"
         except Exception:
             pass
@@ -3197,13 +3470,28 @@ class Ps5Bridge:
                     j = json.loads(r.read().decode("utf-8", "replace"))
                 self._fs_ok, self._fs_ok_at = True, time.time()
                 if j.get("ok"):
-                    return j.get("entries") or []
+                    # Carry the console's own "this is not the whole directory" flag with the
+                    # entries. Callers that only look for one name (app.pkg, mount.lnk) are fine
+                    # with a partial page; a caller computing a difference is not.
+                    out = _FsListing(j.get("entries") or [])
+                    out.truncated = bool(j.get("truncated"))
+                    return out
                 return None
             except urllib.error.HTTPError:
                 self._fs_ok, self._fs_ok_at = True, time.time()
                 return None
             except Exception:
                 self._fs_ok, self._fs_ok_at = False, time.time()
+        return self._fs_list_ftp(path)
+
+    def _fs_list_ftp(self, path):
+        """The FTP LIST half of fs_list(), on its own so a reader that was handed a TRUNCATED
+        HTTP page can ask for the complete listing this way. FTP has no size cap.
+
+        Gated by a 1.2 s connect probe first: with no FTP up, _ftp() alone burns two full
+        8 s connect timeouts, and the cheat status asks for four directories in a row."""
+        if not self.ip or not self.ftp_ok(timeout=1.2):
+            return None
         try:
             ftp = self._ftp(8)
             lines = []
@@ -3225,9 +3513,24 @@ class Ps5Bridge:
                 except ValueError:
                     size = 0
                 out.append({"name": name, "dir": ln[:1] == "d", "size": size, "mtime": 0})
-            return out
+            return _FsListing(out)
         except Exception:
             return None
+
+    def fs_list_complete(self, path, timeout=20):
+        """A listing that is guaranteed whole, or None when one cannot be had.
+
+        HTTP first; if the console says it cut the page short, the FTP LIST is the only complete
+        answer available, and when there is no FTP the honest result is "unknown" - never the
+        partial page."""
+        rows = self.fs_list(path, timeout=timeout)
+        if rows is None or not getattr(rows, "truncated", False):
+            return rows
+        full = self._fs_list_ftp(path)
+        if full is None:
+            print("[fs] %s: the console's listing was cut short and no FTP is up to read the "
+                  "rest - treating it as unknown" % path)
+        return full
 
     def fs_write(self, path, data, timeout=900, size=None):
         """Write to a console file. Our ELF writes to <path>.part and renames, so a broken transfer
@@ -3261,6 +3564,7 @@ class Ps5Bridge:
                 return False
             except Exception:
                 self._fs_ok, self._fs_ok_at = False, time.time()
+        ftp = None
         try:
             ftp = self._ftp(15)
             ftp.timeout = timeout
@@ -3298,6 +3602,15 @@ class Ps5Bridge:
                 pass
             raise
         except Exception:
+            # A dropped link or a refused STOR leaves the same .part behind as a cancel does, and
+            # only the cancel branch used to remove it - a multi-GB orphan in a ShadowMount watch
+            # folder, invisible to the UI (console_backups() filters by extension) and eating the
+            # drive. Best effort over the same connection, if there still is one.
+            if ftp is not None:
+                try:
+                    ftp.delete(path + ".part")
+                except Exception:
+                    pass
             return False
 
     def fs_text(self, path, timeout=20):
@@ -3479,6 +3792,9 @@ class Ps5Bridge:
             base game   app.db registration AND its own app.pkg on disk at full size
             update      app.db's APP_VER already at or past the package's version
             dlc         its content_id present in addcont.db
+            backup      registered AND a mount.lnk on disk (title_is_mounted) - a mounted
+                        ShadowMount title has NO app.pkg, so the base-game proof can never see
+                        it, and a repeat Install re-sent up to 100 GB onto a mounted container
 
         Anything we cannot read comes back "" — never block an install on a failed lookup.
         """
@@ -3487,6 +3803,10 @@ class Ps5Bridge:
         if not tid:
             return ""
         try:
+            if kind == "backup":
+                if self.title_is_mounted(tid):
+                    return "%s is already mounted on %s" % (self._name_of(tid), self.name)
+                return ""
             if kind in ("dlc", "backport"):
                 have = self.installed_addons()
                 cid = (content_id or "").strip()
@@ -3543,24 +3863,44 @@ class Ps5Bridge:
     # so deciding which of the user's processes to kill is no longer its business.
 
     # ---- cheat / patch library -----------------------------------------------------------------
-    # The library ships inside the exe (7022 files, 30.7 MB) and is pushed to the console on
-    # demand. Deliberately not embedded in the ELF: a payload is mapped into console RAM whole, so
-    # carrying 30 MB of idle data every boot costs memory for nothing. Pushing is INCREMENTAL - we
-    # list what the console already has and send only the difference - so a second run is a no-op
-    # and an interrupted first run simply resumes.
+    # The ELF embeds the whole library and writes it to the console at boot (see the CHEATS_DIR
+    # note at the top of this file); this sync is the REPAIR path, from a source checkout, for a
+    # console whose /data was wiped. Pushing is INCREMENTAL - list what the console already has and
+    # send only the difference - so a healthy console costs a few listings and nothing is sent.
+    #
+    # "What the console has" MUST come from a COMPLETE listing. The console's /api/fs/list stops
+    # at 96000 bytes and flags it; three of the four folders are past that size, so the HTTP page
+    # alone counted ~2092 files as missing on every pass and re-sent them every 15 minutes. A
+    # folder whose full listing cannot be had is reported as unknown and nothing is sent to it.
     def cheat_library_status(self):
-        """{sub: {"local": n, "console": n|None, "missing": n}} plus totals. Never raises."""
-        out, tl, tc, tm, reachable = {}, 0, 0, 0, bool(self.ip)
+        """{sub: {"local": n, "console": n|None, "missing": n|None}} plus totals. Never raises.
+
+        `console`/`missing` are None for a folder that could not be listed in full."""
+        out, tl, tc, tm = {}, 0, 0, 0
+        # Reachable means the console is answering on SOME transport we can list with. It used
+        # to be `bool(self.ip)`, which reported reachable:true and every file missing while the
+        # PS5 was switched off.
+        reachable = bool(self.ip) and (self.up() or self.ftp_ok(timeout=0.8))
+        unknown = 0
         try:
+            # The root's own (tiny) listing, read once: it is what separates "that folder does
+            # not exist yet" from "it exists and could not be read in full".
+            parent = self.fs_list(CONSOLE_CHEAT_ROOT, timeout=10) if reachable else None
+            present = {e.get("name") for e in (parent or []) if e.get("dir")}
             for sub in CHEAT_SUBDIRS:
-                ldir = os.path.join(CHEATS_DIR, sub)
-                local = set(os.listdir(ldir)) if os.path.isdir(ldir) else set()
+                local = _cheat_local_files(sub)
                 remote = None
                 if reachable:
-                    rows = self.fs_list("%s/%s" % (CONSOLE_CHEAT_ROOT, sub), timeout=15)
-                    # None = the directory does not exist yet, which is "nothing there", not
-                    # "console unreachable" - fs_list already tried both transports.
-                    remote = {e.get("name") for e in rows} if rows else set()
+                    rows = self.fs_list_complete("%s/%s" % (CONSOLE_CHEAT_ROOT, sub), timeout=15)
+                    # None = the directory does not exist yet ("nothing there") OR its listing was
+                    # cut short with no way to read the rest. Only the first means "everything is
+                    # missing".
+                    if rows is not None:
+                        remote = {e.get("name") for e in rows}
+                    elif sub not in present:
+                        remote = set()
+                    else:
+                        unknown += 1
                 miss = len(local - remote) if remote is not None else None
                 out[sub] = {"local": len(local), "console": (len(remote) if remote is not None else None),
                             "missing": miss}
@@ -3570,7 +3910,8 @@ class Ps5Bridge:
         except Exception:
             reachable = False
         return {"ok": True, "reachable": reachable, "dirs": out, "local_total": tl,
-                "console_total": (tc if reachable else None), "missing_total": (tm if reachable else None)}
+                "console_total": (tc if reachable else None), "missing_total": (tm if reachable else None),
+                "unknown_dirs": unknown}
 
     def sync_cheat_library(self, log=None, budget=None):
         """Push every cheat file the console does not already have. Returns a summary dict."""
@@ -3578,7 +3919,7 @@ class Ps5Bridge:
             if log:
                 log(m)
         if not os.path.isdir(CHEATS_DIR):
-            # The 48 MB cheat library is embedded in the ELF, not in the exe (it would roughly
+            # The cheat library is embedded in the ELF, not in the exe (it would roughly
             # triple the download for a copy the console already carries). Say that, instead of
             # printing an internal _MEI path that reads like a broken install.
             frozen = getattr(sys, "frozen", False)
@@ -3589,7 +3930,17 @@ class Ps5Bridge:
                     ("no bundled cheat library at %s" % CHEATS_DIR)}
         if not self.ip:
             return {"ok": False, "error": "no console configured"}
+        if not _CHEAT_SYNC_LOCK.acquire(blocking=False):
+            return {"ok": False, "busy": True,
+                    "error": "A cheat sync is already running - let it finish first"}
+        try:
+            return self._sync_cheat_library_locked(say, budget)
+        finally:
+            _CHEAT_SYNC_LOCK.release()
+
+    def _sync_cheat_library_locked(self, say, budget):
         sent = failed = skipped = 0
+        unknown = []
         started = time.time()
         try:
             for d in ("/data/pkg-mutant-shop", CONSOLE_CHEAT_ROOT):
@@ -3600,9 +3951,16 @@ class Ps5Bridge:
                     continue
                 rdir = "%s/%s" % (CONSOLE_CHEAT_ROOT, sub)
                 self.fs_mkdir(rdir)
-                rows = self.fs_list(rdir, timeout=20)
-                have = {e.get("name") for e in rows} if rows else set()
-                todo = sorted(set(os.listdir(ldir)) - have)
+                rows = self.fs_list_complete(rdir, timeout=20)
+                if rows is None:
+                    # The folder exists (fs_mkdir just made sure) and could not be listed in full:
+                    # a difference against a partial page would re-send files the console already
+                    # holds, so this folder gets nothing this pass.
+                    say("cheats: %s - could not read the whole folder, sending nothing to it" % sub)
+                    unknown.append(sub)
+                    continue
+                have = {e.get("name") for e in rows}
+                todo = sorted(_cheat_local_files(sub) - have)
                 skipped += len(have)
                 if todo:
                     say("cheats: %s — sending %d file(s)" % (sub, len(todo)))
@@ -3610,7 +3968,8 @@ class Ps5Bridge:
                     if budget and time.time() - started > budget:
                         say("cheats: time budget reached, will continue next run")
                         return {"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
-                                "partial": True, "seconds": round(time.time() - started, 1)}
+                                "partial": True, "unknown_dirs": unknown,
+                                "seconds": round(time.time() - started, 1)}
                     try:
                         lp = os.path.join(ldir, name)
                         with open(lp, "rb") as fh:
@@ -3626,15 +3985,23 @@ class Ps5Bridge:
                         say("cheats: %d sent…" % sent)
         except Exception as e:
             return {"ok": False, "error": "cheat sync failed (%r)" % (e,),
-                    "sent": sent, "failed": failed, "skipped": skipped}
+                    "sent": sent, "failed": failed, "skipped": skipped, "unknown_dirs": unknown}
         return {"ok": True, "sent": sent, "failed": failed, "skipped": skipped, "partial": False,
-                "seconds": round(time.time() - started, 1)}
+                "unknown_dirs": unknown, "seconds": round(time.time() - started, 1)}
 
     def invalidate_apps(self):
         """Drop the installed-titles cache. Call this the moment something finishes installing:
         the cache is 30s, which is why a freshly applied patch kept reading as still pending."""
         self._apps = None
         self._apps_ts = 0.0
+        # The backup-folder scan has its own 30 s memo, and console_apps() folds it in: without
+        # dropping it too, a backup that just mounted (or was just removed) kept its old size,
+        # path and format on the next read for up to half a minute.
+        self._backups = None
+        self._backups_ts = 0.0
+        # The USB-stick listing is cached too now (console_usb_packages); a stick's package that
+        # just installed should stop being offered as installable on the next library read.
+        self._usbpkg_memo = None
 
     def console_apps(self, force=False):
         """
@@ -3727,11 +4094,29 @@ class Ps5Bridge:
                              "platform": "PS4", "install_status": 0,
                              "icon_path": "/user/appmeta/%s/icon0.png" % tid})
         # REAL size/format/path from ShadowMount backup files (app.db size is a bogus metadata value)
+        # `force` is NOT passed on. Doing so forced the 12-folder backup scan (12 /api/fs/list
+        # round trips on the console's single accept loop) on every forced app read - and
+        # installed_titles(force=True) is polled every 5 s while a backup mounts and every heavy
+        # tick while a game installs. The memo is dropped by invalidate_apps() instead, so the
+        # one moment that needs a fresh scan (a delete, a mount) gets it without the rest paying.
         backups = self.console_backups() or {}
         for a in apps:
             b = backups.get(a["title_id"])
             if b:
                 a["size"], a["backup_path"], a["format"], a["source"] = b["size"], b["path"], b["format"], "backup"
+                # The DRIVE too. app.db records where the TITLE is registered ("Extended
+                # Storage" for every backup here), not where the container is: 18 usb0 backups
+                # read "Extended Storage" in the UI. The container's own path is the truth, and
+                # build_storage already buckets by it. `drive_id` is additive.
+                did = _drive_of_backup(b["path"])
+                if did:
+                    a["drive_id"] = did
+                    if did.startswith("usb"):
+                        a["drive"] = did.upper()
+                    elif did == "internal":
+                        a["drive"] = self.LOC_LABEL["0"]
+                    else:
+                        a["drive"] = self.LOC_LABEL["2"]
             else:
                 a["backup_path"], a["format"], a["source"] = None, None, "installed"
         self._apps, self._apps_ts = apps, time.time()
@@ -3855,30 +4240,53 @@ class Ps5Bridge:
         apps = self.console_apps(force=force)
         return None if apps is None else sorted(a["title_id"] for a in apps)
 
-    def console_icon(self, title_id):
-        """Fetch a game's real icon0.png from the console (cached in ICON_DIR). Returns local path or None."""
+    ICON_MISS_TTL = 600.0
+
+    def console_icon(self, title_id, fresh=False):
+        """Fetch a game's real icon0.png from the console (cached in ICON_DIR). Returns local path or None.
+
+        A MISS IS REMEMBERED for ICON_MISS_TTL seconds. build_library() sets has_icon for every
+        installed title, so the UI asks for every cover; a title whose icon0.png is not there (or
+        whose read failed) came back here on EVERY card render, each time paying console_apps()
+        plus a 20 s fs_read against the PS5's single accept loop - while an install was using it.
+        `fresh=True` ignores a remembered miss - for the just-installed case, where the art is
+        expected to appear any second.
+        """
         dest = os.path.join(ICON_DIR, title_id + ".png")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
             return dest
+        misses = getattr(self, "_icon_miss", None)
+        if misses is None:
+            misses = self._icon_miss = {}
+        now = time.time()
+        if not fresh and now - misses.get(title_id, 0.0) < self.ICON_MISS_TTL:
+            return None
         apps = self.console_apps()
         if not apps:
-            return None
+            return None                     # not a miss: the console did not answer at all
         path = next((a.get("icon_path") for a in apps if a["title_id"] == title_id), None)
         if not path:
+            misses[title_id] = now
             return None
         try:
             os.makedirs(ICON_DIR, exist_ok=True)
             data = self.fs_read(path, timeout=20)
             if not data:
+                misses[title_id] = now
                 return None
             with open(dest, "wb") as f:
                 f.write(data)
-            return dest if os.path.getsize(dest) > 0 else None
+            if os.path.getsize(dest) > 0:
+                misses.pop(title_id, None)
+                return dest
+            misses[title_id] = now
+            return None
         except Exception:
             try:
                 os.remove(dest)
             except OSError:
                 pass
+            misses[title_id] = now
             return None
 
     def console_cheats(self, title_id):
@@ -4030,8 +4438,14 @@ class Queue:
             return len(held)
 
     def snapshot(self):
+        """The queue as the outside sees it: a COPY of each task, without the worker's private
+        '_' keys. The live dicts used to be handed straight to json.dumps while a worker was
+        writing them, and every internal key (bgft row tuples, the pre-handoff snapshot) shipped
+        to every client and peer with each 1.2 s poll. Readers inside this file that need the
+        live object (cancel, retry, _pause_pending) go through self.tasks under the lock."""
         with self.lock:
-            return [self.tasks[i] for i in self.order]
+            return [{k: v for k, v in self.tasks[i].items() if not str(k).startswith("_")}
+                    for i in self.order]
 
     # Genuinely finished states. A task in one of these has nothing left to stop.
     TERMINAL = ("playable", "error", "canceled")
@@ -4072,11 +4486,15 @@ class Queue:
                 return True
         return False
 
-    @staticmethod
     def _pause_pending(self, console, msg):
         """After a DPI wedge, HOLD every still-pending install for this console so they don't cascade-fail.
         The daemon can't self-recover — the user reloads the payload then presses ▶ Start to release them
-        all (small-first). [wedge-pause]"""
+        all (small-first). [wedge-pause]
+
+        Was decorated @staticmethod while declaring `self`, so every one of its four callers
+        (self._pause_pending(console, msg)) raised TypeError inside _run: the worker's catch-all
+        turned each protective hold - no verdict, unknown host, wedge, console offline - into
+        "This one stopped unexpectedly — press retry" and nothing behind it was ever paused."""
         with self.lock:
             for i in self.order:
                 t = self.tasks.get(i)
@@ -4139,7 +4557,7 @@ class Queue:
                 if not (tid and b2):
                     return
                 for _ in range(10):                 # ShadowMount needs a moment to register it
-                    if b2.console_icon(tid):
+                    if b2.console_icon(tid, fresh=True):   # a miss a moment ago is expected here
                         lib2 = getattr(self, "library", None)
                         if lib2 is not None:
                             lib2.scan()             # has_icon is read from disk at scan time
@@ -4192,21 +4610,10 @@ class Queue:
                 self._release(job)
 
     def _progress(self, t):
-        if t.get("engine") == "pms":
-            # Our engine reports its own byte progress — the console is doing the pulling,
-            # so the companion's local transfer counter has nothing to say here.
-            b = self.fleet.bridge(t.get("console"))
-            j = b.engine_job() if b else None
-            if not j:
-                return None
-            # Only trust the engine while it is reporting OUR job. It keeps the last job's
-            # result until a new one starts, and reading that as ours marked downloads
-            # "Ready to play" seconds after queueing them.
-            mine = t.get("engine_job_id")
-            if mine is not None and j.get("job_id") != mine:
-                return {"max": 0, "total": 0, "state": "starting"}
-            return {"max": j.get("done") or 0, "total": j.get("total") or 0,
-                    "state": j.get("state"), "msg": j.get("msg")}
+        # The engine=="pms" branch that stood here read the console's own /api/engine/job. No
+        # task has ever been created with an `engine` key (grep: only /api/health and the mods
+        # routes use that word), so it never ran; the spawn lane's progress is the LAN byte
+        # counter below, and the mount lane reads engine_job() itself in _run_mount.
         key = t.get("key")
         if t.get("local_progress") and key is not None:
             # Our own console's bucket first; the shared aggregate only as a fallback for a job
@@ -4272,6 +4679,14 @@ class Queue:
                                   msg="Integrity: %s — fix the file, then retry" % verdict.get("reason"))
                         return
                     self._set(t, msg="⚠ integrity: %s (installing anyway)" % verdict.get("reason"))
+            # CANCEL, checked at every phase boundary and not only at the top. Between the check
+            # above and the hand-off sit the integrity read, an app.db pull, up to three bgft
+            # pulls and a 30 s lane wait - a cancel pressed anywhere in there used to be read
+            # only AFTER the console had the package, and the row said "Canceled" over a game
+            # that installed.
+            if t.get("cancel"):
+                self._set(t, state="canceled", pct=0, msg="Canceled before it started")
+                return
             # [B9] SELF-HEALING HANDOFF. The DPI daemon wedges after a heavy install and never
             # recovers on its own, which is what used to strand every following install. So before
             # handing off we check the install lane itself (~15ms when healthy) and, if it is
@@ -4282,14 +4697,6 @@ class Queue:
             # all existed to nurse a third-party payload through an install. Our installer is
             # spawned per install and has already exited by the time anyone could reload it.
 
-            if t.get("engine") == "pms":
-                # The engine handles one package at a time; wait rather than get refused.
-                for _ in range(600):
-                    j = bridge.engine_job() or {}
-                    if j.get("state") not in ("downloading", "installing"):
-                        break
-                    self._set(t, state="queued", msg="Waiting for the install engine")
-                    time.sleep(2)
             self._set(t, state="submitting", msg="Handing off to %s" % bridge.name)
             if t.get("local_progress") and key is not None:
                 # Reset OUR console's bucket only. Resetting the shared one is what made a second
@@ -4365,10 +4772,25 @@ class Queue:
                     print("[install] our address changed since this was queued: %s -> %s"
                           % (t.get("url"), fresh))
                     t["url"] = fresh
+            if t.get("cancel"):
+                self._set(t, state="canceled", pct=0, msg="Canceled before it started")
+                return
             t["_submitted_at"] = time.time()
-            ok, res = bridge.install(t["url"], t.get("name") or "", force=bool(t.get("force")))
-            if ok and isinstance(res, dict) and res.get("job_id") is not None:
-                t["engine_job_id"] = res.get("job_id")
+            # One line per hand-off, and one per verdict below. Only the failure branches used
+            # to print, so a successful install left no trace in pms.log of which package went
+            # to which console over which address - the first thing anyone needs afterwards.
+            print("[install] handoff %s: %s (%s) -> %s via %s"
+                  % (t.get("id"), t.get("name"), t.get("title_id") or "no-tid", bridge.name,
+                     t.get("url")))
+            ok, res = bridge.install(t["url"], t.get("name") or "", force=bool(t.get("force")),
+                                     cancelled=lambda: bool(t.get("cancel")))
+            print("[install] verdict %s: ok=%s %s" % (t.get("id"), ok,
+                  {k: v for k, v in (res or {}).items() if k != "detail"} if isinstance(res, dict)
+                  else res))
+            if not ok and isinstance(res, dict) and res.get("canceled"):
+                # Stopped inside the lane wait, before the console was asked for anything.
+                self._set(t, state="canceled", pct=0, msg="Canceled before it started")
+                return
             if not ok:
                 # Report the DPI host's *actual* failure mode instead of guessing. `res` carries either a
                 # transport error (unreachable / timed out) or the daemon's own rejection payload. A bare
@@ -4408,11 +4830,17 @@ class Queue:
                     self._pause_pending(t.get("console"), detail)
                     return
 
-                # etaHEN VALIDATES BEFORE QUEUEING, and says so: queued=False means the console
+                # THE CONSOLE VALIDATES BEFORE QUEUEING, and says so: queued=False means it
                 # created no bgft job at all. That is the one case where a clean re-POST is provably
-                # safe — the duplicate-job hazard behind I4 only exists for a daemon that queues
-                # first and rejects afterwards. One retry, then report the console's real error.
-                if isinstance(res, dict) and res.get("queued") is False and not t.get("_requeued"):
+                # safe — the duplicate-job hazard only exists for a host that queues first and
+                # rejects afterwards. One retry, then report the console's real error.
+                #
+                # Not when the refusal carries an SCE code (`rc`). That is the spawned installer's
+                # own deterministic verdict - out of space, not a package, a sick app database -
+                # and re-spawning it only produced a second identical refusal five seconds later
+                # (pms.log: Red Dead Redemption 2, 0x80B21104, "retrying once", same answer).
+                if isinstance(res, dict) and res.get("queued") is False and not t.get("_requeued") \
+                        and res.get("rc") is None:
                     t["_requeued"] = True
                     print("[install] host rejected before queueing (%s) — retrying once" % detail)
                     self._set(t, state="submitting", pct=0,
@@ -4470,15 +4898,19 @@ class Queue:
                 print("[install] fail (rejected) name=%r res=%r" % (t.get("name"), res))
                 self._set(t, state="error", msg=msg, detail=detail or None, fail_reason="pkg_rejected")
                 return
-            # our engine always reports real byte progress from the console
-            measurable = (t.get("engine") == "pms") or bool(t.get("local_progress")) or bool(t.get("progress_url"))
+            # A LAN-served file has a byte counter (ours or a peer's /api/served); an external
+            # mirror has nothing to measure.
+            measurable = bool(t.get("local_progress")) or bool(t.get("progress_url"))
             if measurable:
                 self._set(t, state="transferring", msg="Connecting to %s" % bridge.name)
                 stalled = 0
                 last_mx = -1        # most bytes we have ever seen land, to detect a real stall
                 while True:
                     if t["cancel"]:
-                        self._set(t, state="canceled", msg="Canceled")
+                        # Past the hand-off. The console owns the bgft job now and this app has
+                        # no way to stop it, so the row must not promise otherwise.
+                        self._set(t, state="canceled",
+                                  msg="Canceled - the console may still finish what it already accepted")
                         return
                     pr = self._progress(t) or {}
                     # Our engine reports its own failures — surface them straight away instead
@@ -4509,8 +4941,13 @@ class Queue:
                                           "The console stopped pulling — start it again from the queue."
                                           % pct)
                         else:
+                            # The ELF provably answered - install_spawn only returns ok after the
+                            # spawned installer wrote a verdict - so the old wording ("is the ELF
+                            # loaded?") blamed the one thing known to be fine. What is true is that
+                            # the console accepted the package and has not started pulling it.
                             self._set(t, state="submitted", pct=0,
-                                      msg="Console isn't pulling yet — is the PKG MUTANT SHOP ELF loaded on the PS5?")
+                                      msg="The console accepted this but has not started pulling it yet — "
+                                          "check the PS5's Downloads before trying again")
                         return
                     time.sleep(0.5)
                 # POST-DOWNLOAD: follow the on-console install to playable.
@@ -4519,10 +4956,20 @@ class Queue:
                 # rejected the package (bad/incompatible dump) — report that, don't hang.
                 tid = t.get("title_id")
                 self._set(t, state="promoting", pct=90, msg="Installing on %s" % bridge.name)
-                deadline = time.time() + 600           # 10-minute hard cap
+                # 2100 s, strictly above the 1800 s evidence rule below. At 600 s the "row has
+                # not moved for 30 minutes" test could never run - the clock fired first and
+                # called a still-installing title stale_install, with advice to delete it.
+                deadline = time.time() + 2100
                 bytes_done_at = None
                 last_row, last_row_at = None, None      # [11] evidence of progress, not a stopwatch
                 cur, installed = 90, False
+                # THE EXPENSIVE READS ON THEIR OWN CLOCK. installed_titles(force=True) is a whole
+                # app.db pull plus a scan of four /user/app roots, and installed_app_pkg is up to
+                # four more listings; at the 3 s cadence that was ~40 console requests every 3 s
+                # for the length of an install, on the accept loop that also serves the UI. The
+                # bgft row stays on the 3 s cadence (it is one small file); these run at most
+                # every 15 s. The verdict conditions themselves are unchanged.
+                heavy_at = 0.0
                 # Was it ALREADY registered before we started? If so, "it is in app.db" proves
                 # nothing — that is exactly the state where the console refuses to re-pull the data
                 # and leaves the old, broken files in place. We then demand proof on disk instead.
@@ -4532,8 +4979,12 @@ class Queue:
                 before = t.get("_bgft_before")
                 while time.time() < deadline:
                     if t["cancel"]:
-                        self._set(t, state="canceled", msg="Canceled")
+                        self._set(t, state="canceled",
+                                  msg="Canceled - the console may still finish what it already accepted")
                         return
+                    heavy_due = (time.time() - heavy_at) >= 15.0
+                    if heavy_due:
+                        heavy_at = time.time()
                     if is_addon:
                         # An update/DLC adds to a title that is ALREADY registered and already has a
                         # full-size app.pkg, so neither app.db nor app.pkg can say anything about it.
@@ -4544,7 +4995,7 @@ class Queue:
                                 and row[0] in BGFT_DONE:
                             installed = True
                             break
-                    elif tid and tid in (bridge.installed_titles(force=True) or []):
+                    elif tid and heavy_due and tid in (bridge.installed_titles(force=True) or []):
                         # app.db presence is NOT proof, for a new title either. A metadata-only
                         # registration (sceAppInstUtilAppInstallPkg) puts the title in app.db with
                         # no game data behind it — the tile appears, "Ready to play" is shown, and
@@ -4635,22 +5086,36 @@ class Queue:
                     self._finished_installing(t)
                     if not is_addon:
                         remember_installed(tid)
-                elif is_addon:
-                    # Never tell someone to delete the GAME because its update did not take.
-                    self._set(t, state="error", pct=99, fail_reason="addon_not_confirmed",
-                              msg="The PS5 did not record this %s — the base game was left alone. "
-                                  "Reload the install engine (⟳ in the queue) and try it again."
-                                  % (t.get("kind") or "add-on"))
-                elif was_registered:
-                    # The documented failure: the title was already registered, so the console kept
-                    # the old files and never re-pulled. Saying "Ready to play" here is what put a
-                    # broken game on the dashboard, and launching it took the console down.
-                    self._set(t, state="error", pct=99, fail_reason="stale_install",
-                              msg="Already installed on the PS5, so it was not replaced — the old "
-                                  "copy is still there and may be broken. Delete it on the console "
-                                  "(Options → Delete), then install again.")
                 else:
-                    self._set(t, state="error", pct=99, msg="Install did not confirm on the console")
+                    # THE CAP WAS HIT WITH NO EVIDENCE EITHER WAY. Everything that IS evidence -
+                    # a completed row, a failed row, a row frozen for 30 minutes - returned from
+                    # inside the loop. Reaching here means 35 minutes passed and the console never
+                    # said yes or no, so say exactly that. This used to fail the job as
+                    # stale_install / addon_not_confirmed / "did not confirm" and tell the user to
+                    # delete the game - a verdict produced by a stopwatch, about an install that
+                    # then frequently completed on its own.
+                    print("[install] %s: no verdict from the console after %d minutes - "
+                          "install_unconfirmed (addon=%s registered_before=%s)"
+                          % (t.get("id"), int((time.time() - t.get("_submitted_at", time.time())) // 60),
+                             is_addon, was_registered))
+                    if is_addon:
+                        # Never tell someone to delete the GAME because its update did not take.
+                        self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
+                                  msg="The PS5 has not confirmed this %s yet — it may still be "
+                                      "installing it. Check the PS5's Downloads before trying again; "
+                                      "the base game was left alone." % (t.get("kind") or "add-on"))
+                    elif was_registered:
+                        # The likeliest cause is still the documented one - the title was already
+                        # registered, so the console kept the old files - but that is a guess
+                        # until the PS5 is looked at, so it is offered as the thing to check.
+                        self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
+                                  msg="The PS5 has not confirmed this install yet — it may still be "
+                                      "installing. Check the PS5: if it only shows the old copy, "
+                                      "delete it there (Options → Delete) and install again.")
+                    else:
+                        self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
+                                  msg="The PS5 has not confirmed this install yet — it may still be "
+                                      "installing. Check the PS5's Downloads before trying again.")
             else:
                 self._set(t, state="submitted", pct=0, simulated=True,
                           msg="Sent to %s (progress not measurable for this source)" % bridge.name)
@@ -4776,6 +5241,13 @@ class Queue:
         self._set(t, state="submitting", pct=0, msg="Handing the package to the console…")
         try:
             res = bridge.install_local_on_console(path, t.get("name") or "") or {}
+        except ShopHTTPError as e:
+            # The console ANSWERED, with a status and usually a sentence. Relaying it beats the
+            # "did not answer - load it again" advice below, which is wrong for a console that
+            # is plainly up and has just said no.
+            self._set(t, state="error", detail=e.body[:300],
+                      msg=e.sentence("The console refused the package"))
+            return
         except Exception as e:
             self._set(t, state="error", detail=str(e)[:300],
                       msg="PKG MUTANT SHOP on the PS5 did not answer — load it again from "
@@ -5043,8 +5515,10 @@ class Queue:
                         self._set(t, msg="Register path fixed — takes effect once a game is not running")
             except Exception as e:
                 print("[mount] register-path preflight skipped: %r" % e)
-        # sendpkg → install via AppInstallPkg, which needs a clean path (no spaces/brackets): use <titleid>.pkg
-        upname = ((t.get("title_id") or "game") + ".pkg") if t.get("lane") == "sendpkg" else name
+        # The container keeps its own name: ShadowMount identifies the title from it. (A "sendpkg"
+        # lane that renamed to <titleid>.pkg used to be tested here; no lane has had that name
+        # for a long time.)
+        upname = name
         try:
             # Through OUR on-console file API, with the third-party FTP only as fs_*'s fallback.
             # Until 3.24.4 this lane dialled `ftp_port` straight from config, so on a console
@@ -5083,7 +5557,19 @@ class Queue:
                 stalled, last_done = 0, -1
                 while True:
                     if t["cancel"]:
-                        self._set(t, state="canceled", msg="Canceled")
+                        # Tell the console to stop PULLING. It exposes /api/engine/cancel for
+                        # exactly this (server.c: sets g_job.cancel, and its download loop stops
+                        # at the next chunk); without the call the row read "Canceled" while the
+                        # console finished the download, renamed the .part and ShadowMount mounted
+                        # the game the user had just cancelled - and the next backup was refused
+                        # with "a download is already running". Best effort: the row is cancelled
+                        # either way.
+                        try:
+                            bridge._shop("/api/engine/cancel", timeout=8)
+                        except Exception as e:
+                            print("[mount] could not ask the console to stop the download: %r" % e)
+                        self._set(t, state="canceled",
+                                  msg="Canceled - the console was asked to stop the download")
                         return
                     j = bridge.engine_job() or {}
                     # Pin the job id. dl_job_t carries one precisely so a caller "can never mistake
@@ -5144,15 +5630,23 @@ class Queue:
         self._set(t, state="transferring", msg="Uploading backup → %s…" % dest)
         try:
             sent = [0]
+            # Bytes already delivered by EARLIER files of a folder-shaped game, so the bar reads
+            # against the whole folder instead of climbing a few percent and resetting per file.
+            done_before = [0]
+            last_pct = [-1]
 
             def cb(_chunk_len, _running):
                 # Raising here is how cancel unwinds a transfer that is already in flight: the
                 # exception propagates out of the request, through fs_write, to the handler below.
                 if t["cancel"]:
                     raise _Cancelled()
-                sent[0] = _running
+                sent[0] = done_before[0] + _running
                 pct = min(99, int(sent[0] * 100 / total)) if total else 0
-                self._set(t, pct=pct, msg="Uploading %d%%" % pct)
+                # urllib hands the body over in 8 KB blocks - ~11.8 million callbacks for a 90 GB
+                # push - so only take the queue lock when there is a new percent to show.
+                if pct != last_pct[0]:
+                    last_pct[0] = pct
+                    self._set(t, pct=pct, msg="Uploading %d%%" % pct)
 
             def push(local_path, remote_path):
                 size = os.path.getsize(local_path)
@@ -5161,6 +5655,7 @@ class Queue:
                                          timeout=3600, size=size)
                 if not ok:
                     raise IOError("the console rejected %s" % remote_path)
+                done_before[0] += size
 
             if os.path.isdir(local):
                 # A game stored as a FOLDER: same destination, same progress, but the tree has to be
@@ -5223,20 +5718,21 @@ class Queue:
                               "title — restart the console, then it will pick it up from the same "
                               "file." % dest)
                 return
+        else:
+            # No title id means nothing to look for, so "ready to play" would be a claim with no
+            # evidence behind it. Say what is known: the file is in the folder the backup service
+            # watches.
+            self._set(t, state="playable", pct=100,
+                      msg="Delivered to the console's backup folder — it mounts on its own. "
+                          "Check the PS5 home screen.")
+            self._finished_installing(t)
+            return
         self._set(t, state="playable", pct=100, msg="Mounted — ready to play")
         self._finished_installing(t)
         remember_installed(t.get("title_id"))
 
-    def _confirm(self, bridge, title_id, seconds):
-        if not title_id:
-            return False
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            ids = bridge.installed_titles(force=True)   # fresh read so a just-installed PS4/PS5 title confirms fast
-            if ids and title_id in ids:
-                return True
-            time.sleep(6)
-        return False
+    # Queue._confirm() lived here: an app.db-presence poll with no callers. app.db presence is
+    # never proof of an install (see the confirm loop in _run), so nothing should call it again.
 
 
 # installed.json and hashes.json are read-modify-write from several threads at once: the queue
@@ -5245,6 +5741,12 @@ class Queue:
 # title - the badge reverts and the game looks uninstalled. The re-read happens INSIDE the lock so
 # the window between read and write is closed, not merely narrowed.
 _state_lock = threading.RLock()
+
+# /api/hash/ runs on the request thread. Files past this size are refused rather than read for
+# minutes; a path being hashed is remembered so a second click does not start a second full read.
+_HASH_MAX_BYTES = 8 << 30
+_HASH_LOCK = threading.Lock()
+_HASHING = set()
 
 
 def remember_installed(title_id):
@@ -5270,9 +5772,11 @@ def remember_installed(title_id):
                 except Exception as le:
                     print("[installed] %s is unreadable (%s) - starting a fresh list"
                           % (INSTALLED_PATH, le))
+            # Write only when the list changes. A title that is already remembered used to
+            # rewrite the file (mkstemp + replace beside the exe) for nothing.
             if title_id not in data["installed"]:
                 data["installed"].append(title_id)
-            _atomic_write_json(INSTALLED_PATH, data)
+                _atomic_write_json(INSTALLED_PATH, data)
         except Exception as e:
             print("[installed] %s" % e)
 
@@ -5290,17 +5794,73 @@ def local_installed():
 
 def prune_local_installed(console_ids):
     """Self-heal: drop remembered installs the console no longer has (kills stale 'ghost' badges like a
-    game that was queued once but isn't really on the PS5). Only call when the console list is real."""
-    keep = sorted(set(local_installed()) & set(console_ids))
-    _atomic_write_json(INSTALLED_PATH, {"installed": keep})
+    game that was queued once but isn't really on the PS5). Only call when the console list is real.
+
+    Under _state_lock, like remember_installed(): the two are read-modify-write on the same file
+    from different threads (this one from every /api/installed poll, that one from a finishing
+    worker), and the unlocked write here could drop a title the worker had just recorded. And
+    only written when something actually changed - /api/installed is polled on every library
+    load, and each poll rewrote the file beside the exe even when the list was identical."""
+    with _state_lock:
+        have = local_installed()
+        keep = sorted(set(have) & set(console_ids))
+        if keep != sorted(set(have)):
+            _atomic_write_json(INSTALLED_PATH, {"installed": keep})
     return keep
 
 
 # --------------------------------------------------------------------------- #
 # HTTP handler                                                                  #
 # --------------------------------------------------------------------------- #
+def _exc_line(e):
+    """One line for pms.log: the exception and where it was raised. A full traceback in a log
+    that installs are diagnosed from is noise; the type, the message and the last frame are
+    what anyone needs."""
+    try:
+        fr = traceback.extract_tb(e.__traceback__)[-1]
+        return "%s: %s (at %s:%d in %s)" % (type(e).__name__, str(e)[:160],
+                                             os.path.basename(fr.filename), fr.lineno, fr.name)
+    except Exception:
+        return "%s: %s" % (type(e).__name__, str(e)[:160])
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PkgMutantShop/" + VERSION
+    # Per-connection socket timeout. The stdlib default is None: a client that connected and
+    # never sent a request line (a browser preconnect, a phone's half-open Wi-Fi socket) pinned
+    # a handler thread for ever. 300 s is long enough that a paused PKG read is never cut - the
+    # console pulls in bursts - and short enough to reap the idle ones. HTTP/1.0 stays: one
+    # request per connection, deliberately (see protocol_version's default).
+    timeout = 300
+
+    def end_headers(self):
+        # Remembered so the exception guard below knows whether it may still answer.
+        self._headers_done = True
+        BaseHTTPRequestHandler.end_headers(self)
+
+    def _guarded(self, fn):
+        """Run a request body and turn an escaped exception into a one-line pms.log entry and a
+        500 JSON answer - when nothing has been sent yet.
+
+        Without this the exception reached socketserver.handle_error, which prints to stderr;
+        the frozen exe has no stderr (--noconsole), so it vanished, and the client got a closed
+        socket with zero bytes - which the UI's api() cannot tell apart from "the PC is off".
+        A non-numeric Content-Length, a JSON body that is a list, a file that vanished between
+        isfile() and open(): each was a silent hang-up."""
+        try:
+            return fn()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            raise                                   # the client went away; nothing to answer
+        except Exception as e:
+            print("[http] %s %s could not be answered: %s" % (self.command, self.path, _exc_line(e)))
+            if getattr(self, "_headers_done", False) or getattr(self, "_json_muted", False):
+                return None
+            try:
+                self._json({"ok": False,
+                            "error": "This request could not be completed on the PC - "
+                                     "pms.log beside the app says why"}, 500)
+            except Exception:
+                pass
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -5347,13 +5907,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        if not n:
+        """The JSON body as a dict - and {} for anything else. A non-numeric Content-Length
+        raised ValueError and a body that parsed to a list or a string reached the routes as
+        something without .get(); both were a closed socket with no answer."""
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        if n <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8"))
+            j = json.loads(self.rfile.read(n).decode("utf-8", "replace"))
         except ValueError:
             return {}
+        return j if isinstance(j, dict) else {}
 
     def log_message(self, fmt, *args):
         pass
@@ -5361,10 +5928,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
+        # The console-served page calls this PC cross-origin with a JSON Content-Type, so every
+        # POST paid a preflight round trip; letting the browser keep the answer for ten minutes
+        # halves the cost of each button press from the PS5.
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _empty(self, code):
+        """A header-only answer (HEAD, or a status with no body)."""
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self._cors()
         self.end_headers()
 
     def do_HEAD(self):
-        """Some install clients HEAD the PKG (for size / Accept-Ranges) before GETting it."""
+        """Some install clients HEAD the PKG (for size / Accept-Ranges) before GETting it.
+
+        Every other path answers what GET would: the fall-through here used to be an
+        unconditional 200, so HEAD /does-not-exist and HEAD /thumb/<no-art> both said "it
+        exists" while GET said 404. /library/ and /icon/ are byte-for-byte what they were."""
         srv = self.server
         path = urlparse(self.path).path
         if path.startswith("/library/"):
@@ -5379,6 +5962,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(os.path.getsize(srv.library.file_registry[rk])))
+            # Validators, so a resumed copy can tell the file it is appending to is the one it
+            # started on. Additive; the download managers that only read the two above are fine.
+            for k, v in self._file_validators(srv.library.file_registry[rk]):
+                self.send_header(k, v)
             self._cors()
             self.end_headers()
             return
@@ -5392,11 +5979,37 @@ class Handler(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             return
+        if path.startswith("/thumb/"):
+            # GET generates a thumb from the cached icon, or falls back to the icon itself; HEAD
+            # must not do that work. "Exists" here means a thumb OR its source icon is on disk.
+            base = os.path.basename(unquote(path[len("/thumb/"):]).split("?")[0])
+            tid = re.sub(r"\.(webp|png|jpg)$", "", base, flags=re.I)
+            have = (os.path.isfile(os.path.join(THUMB_DIR, tid + ".webp"))
+                    or os.path.isfile(os.path.join(ICON_DIR, tid + ".png")))
+            return self._empty(200 if have else 404)
+        if path.startswith("/api/"):
+            # Every /api/ route answers 200 to HEAD, as it did before the fall-through was
+            # tightened. A hand-picked allowlist here 404'd a dozen routes GET serves (engine/log,
+            # move/status, ps5-log, discover, ...) - the HEAD/GET disagreement in the other
+            # direction - and the console answers any unknown /api/ with 200 {} too.
+            return self._empty(200)
+        rel = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
+        full, err = self._static_resolve(rel)
+        if full is None:
+            return self._empty(err[0])
         self.send_response(200)
+        self.send_header("Content-Type", guess_type(full))
+        try:
+            self.send_header("Content-Length", str(os.path.getsize(full)))
+        except OSError:
+            pass
         self._cors()
         self.end_headers()
 
     def do_GET(self):
+        return self._guarded(self._do_GET)
+
+    def _do_GET(self):
         u = urlparse(self.path)
         path, srv = u.path, self.server
         q = parse_qs(u.query)
@@ -5429,15 +6042,17 @@ class Handler(BaseHTTPRequestHandler):
             # app sat unresponsive for 10s at a time precisely when the user opened it to find out
             # why the console was not there. A closed TCP port settles it in milliseconds.
             reachable = b.up() if b else False
+            # Only the FTP probe is memoised here now. A `dpi_reachable` used to be computed
+            # beside it, stored, and never emitted - no dpi_* key has left this endpoint since
+            # the third-party host was removed, so there was nothing for "old UIs" to read.
             _pm = getattr(srv, "_health_probe", None)
             if not reachable:
-                dpi_reachable, ftp_on = False, False
+                ftp_on = False
             elif _pm and (time.monotonic() - _pm[0]) < 5.0:
-                dpi_reachable, ftp_on = _pm[1], _pm[2]
+                ftp_on = _pm[1]
             else:
-                dpi_reachable = False        # nothing of ours binds :12800 - kept False for old UIs
                 ftp_on = b.ftp_ok() if b else False
-                srv._health_probe = (time.monotonic(), dpi_reachable, ftp_on)
+                srv._health_probe = (time.monotonic(), ftp_on)
             # WHAT "READY TO INSTALL" ACTUALLY MEANS NOW.
             # It used to mean "something is listening on :12800" - a third-party daemon we no
             # longer call. Our engine is spawned per install by Payload Manager and needs nothing
@@ -5478,8 +6093,8 @@ class Handler(BaseHTTPRequestHandler):
                                "running_title": _run.get("titleId") or "",
                                "running_name": _run.get("titleName") or "",
                                "ps5_ip": cons[0]["ip"] if cons else srv.cfg.get("ps5_ip"),
-                               # Reachability now means OUR lane is usable. dpi_* is unchanged
-                               # underneath for anything still reading it.
+                               # Reachability means OUR lane is usable: the ELF answers and
+                               # Payload Manager can spawn the installer.
                                "ps5_online": engine_ready,
                                "engine": "pms-spawn",
                                "engine_ready": engine_ready,
@@ -5503,6 +6118,10 @@ class Handler(BaseHTTPRequestHandler):
                                # Surfaced so the UI can warn instead of silently running on
                                # defaults while refusing to persist anything the user changes.
                                "config_unreadable": _CONFIG_UNREADABLE or "",
+                               # Which config.json this process is actually reading. The exe
+                               # reads the one BESIDE ITSELF, not companion/config.json, and
+                               # that has cost whole test rounds; now the app says so.
+                               "config_path": CONFIG_PATH,
                                "content_ack": bool(srv.cfg.get("content_ownership_ack"))})
         if path == "/api/engine/log":
             # Proxied, not re-implemented: the console writes this file with O_SYNC precisely so it
@@ -5525,19 +6144,19 @@ class Handler(BaseHTTPRequestHandler):
             # third-party daemon listening". With our own engine that row was wrong in both halves
             # - the port belongs to software we removed, and the LED was off while installs worked.
             b = _first_bridge(srv)
-            mode = (srv.cfg.get("dpi", {}) or {}).get("mode") or "v2"
-            ours = mode in ("pms", "spawn")
+            # ONE ENGINE, whatever an old config.json says. Ps5Bridge.install() always spawns
+            # (install_spawn), so `mode` is reported as what actually runs. It used to be read
+            # from dpi.mode with a default of "v2" - a key DEFAULT_CONFIG never carried - so a
+            # fresh install reported ours:false, a "third-party install host" and never filled
+            # busy/busy_for, while every install went through our engine regardless.
+            mode, ours = "spawn", True
             pl_port = int((srv.cfg.get("dpi", {}) or {}).get("pldmgr_port", 8084))
             shop_port = int(srv.cfg.get("console", {}).get("shop_port", 8710))
             out = {
                 "ok": True, "mode": mode, "ours": ours,
-                "name": ("PKG MUTANT SHOP engine" if ours else "third-party install host"),
+                "name": "PKG MUTANT SHOP engine",
                 "how": ("A fresh installer is started for every install and exits when the console "
-                        "has accepted the package. Nothing stays running, so nothing can wedge."
-                        if mode == "spawn" else
-                        "The console downloads the package itself and registers it."
-                        if mode == "pms" else
-                        "Installs are handed to our own engine on the console."),
+                        "has accepted the package. Nothing stays running, so nothing can wedge."),
                 "shop_port": shop_port, "pldmgr_port": pl_port,
                 "shop_ok": False, "shop_version": "", "ready": False,
                 "busy": False, "busy_for": 0, "log_bytes": 0,
@@ -5555,7 +6174,7 @@ class Handler(BaseHTTPRequestHandler):
                     out["ftp_port"] = int(h.get("ftp_port") or 0)
                 except Exception as e:
                     out["error"] = "PKG MUTANT SHOP on the PS5 did not answer (%s)" % str(e)[:80]
-                if ours and out["shop_ok"]:
+                if out["shop_ok"]:
                     st = b.spawn_status() or {}
                     out["busy"] = bool(st.get("busy"))
                     out["busy_for"] = int(st.get("busy_for") or 0)
@@ -5646,6 +6265,8 @@ class Handler(BaseHTTPRequestHandler):
                 "console": {"ip": b.ip, "name": b.name, "online": b.pldmgr.alive()} if b else None,
                 "scanning": bool(reg.scanning) if reg is not None else False})
         if path == "/api/network/scan":
+            if not self._origin_ok():
+                return self._refuse_cross_site()
             reg = getattr(srv, "peers", None)
             if reg is None:
                 return self._json({"ok": False, "error": "peer registry unavailable"}, 500)
@@ -5666,7 +6287,10 @@ class Handler(BaseHTTPRequestHandler):
                                           "url": p.get("url"), "counts": p.get("counts")}
                                          for p in found]})
         if path == "/api/federation/peers":
-            return self._json({"peers": getattr(srv, "_fed_peers", []),
+            # The registry's known peers, in the same shape /api/library's `peers` uses. This
+            # read a `_fed_peers` attribute that nothing ever set, so it answered [] for ever.
+            reg = getattr(srv, "peers", None)
+            return self._json({"peers": [peer_summary(p) for p in (reg.known() if reg is not None else [])],
                                "enabled": bool(srv.cfg.get("federation", {}).get("enabled"))})
         if path == "/api/storage":
             b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
@@ -5685,8 +6309,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/console/apps":
             b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
             apps = b.console_apps() if b else None
-            return self._json({"reachable": apps is not None, "apps": apps or []})
+            # `reachable` is a LIVE question and gets a live answer: console_apps() serves its
+            # last good list for the life of the process (right for browsing, wrong as a
+            # liveness word - it stayed true for hours after the PS5 went off). The list is
+            # still the cached one.
+            return self._json({"reachable": bool(b and b.up()), "apps": apps or []})
         if path == "/api/discover":
+            if not self._origin_ok():
+                return self._refuse_cross_site()
             return self._json({"found": discover_ps5(srv.cfg)})
         if path == "/api/installed":
             cid = (q.get("console") or [None])[0]
@@ -5714,9 +6344,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "unknown key"}, 404)
             p = srv.library.file_registry[rk]
             try:
-                return self._json({"key": rk, "sha256": sha256_of(p, srv.hashes), "size": os.path.getsize(p)})
+                size = os.path.getsize(p)
             except OSError as e:
                 return self._json({"error": str(e)}, 500)
+            known = cached_sha(p, srv.hashes)
+            if known:
+                return self._json({"key": rk, "sha256": known, "size": size, "cached": True})
+            # The hash is computed on THIS request thread, reading the whole file. An 85 GB
+            # package held a server thread for many minutes while the browser gave up, and
+            # every re-click of the button started another full read of the same file.
+            if size > _HASH_MAX_BYTES:
+                return self._json({"ok": False, "key": rk, "size": size, "error": "too_large",
+                                   "message": "This file is over 8 GB, so it was not hashed - "
+                                              "reading all of it would tie up the PC for a "
+                                              "long time."}, 413)
+            with _HASH_LOCK:
+                if p in _HASHING:
+                    return self._json({"ok": False, "key": rk, "error": "busy",
+                                       "message": "This file is already being hashed - "
+                                                  "wait for that to finish."}, 409)
+                _HASHING.add(p)
+            try:
+                return self._json({"key": rk, "sha256": sha256_of(p, srv.hashes), "size": size})
+            except OSError as e:
+                return self._json({"error": str(e)}, 500)
+            finally:
+                with _HASH_LOCK:
+                    _HASHING.discard(p)
         if path.startswith("/api/manifest/"):
             return self._manifest(unquote(path[len("/api/manifest/"):]))
         if path == "/api/cheats/paths":
@@ -5733,6 +6387,8 @@ class Handler(BaseHTTPRequestHandler):
             info["ftp_port"] = live_ftp or 0
             return self._json(info)
         if path == "/api/cheats/rescan":
+            if not self._origin_ok():
+                return self._refuse_cross_site()
             b = _first_bridge(srv)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
@@ -5740,10 +6396,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/rest/prepare":
             # A plain GET, so a hidden <img src> on a hostile page could stop every homebrew
             # payload on the console. The Origin/Referer guard is what makes that impossible; an
-            # <img> from a public page carries that page's Referer.
+            # <img> from a public page carries that page's Referer - and when it does not (a
+            # no-referrer page), its Sec-Fetch-Dest says "image", which the guard also refuses.
             if not self._origin_ok():
-                return self._json({"ok": False, "error": "forbidden_origin",
-                                   "message": "Cross-site request refused."}, 403)
+                return self._refuse_cross_site()
             # Stopping the console's payloads is most useful from HERE — you are about to walk
             # away and rest the console, so driving it from the PC or a phone beats having to
             # open the app on the PS5 first. Relay it; the console does the actual work.
@@ -5751,6 +6407,26 @@ class Handler(BaseHTTPRequestHandler):
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             q = urlparse(self.path).query
+            # OUR OWN QUEUE FIRST. The console's busy test covers its own download/install job;
+            # it cannot see a spawned base-game install that is mid-transfer from this PC, nor a
+            # backup this PC is pushing over /api/fs/write. Stopping the payloads under either
+            # errors the queue with "console unreachable" while BGFT carries on, or leaves a
+            # half-written .part in a watch folder. Refuse while any of our tasks is live.
+            # For the install lane, "promoting" means every byte has crossed and BGFT (a system
+            # job) owns the install: nothing is leaving this PC, so stopping the payloads cannot
+            # corrupt it - yet it used to refuse this button for up to 35 min with a sentence
+            # that was untrue in that state. The mount/peer lanes keep the full set: their
+            # "promoting" waits on ShadowMount and a pull may still be in flight.
+            _pc_busy = {"claimed", "verifying", "submitting", "transferring"}
+            _live = [x for x in srv.queue.snapshot()
+                     if x.get("state") in (_pc_busy if x.get("lane") == "install" else RUNNING)]
+            if _live and "force=1" not in q:
+                _verb = ("being mounted on" if _live[0].get("state") == "promoting"
+                         else "being sent to")
+                return self._json({"ok": False, "error": "busy",
+                                   "message": "%s is still %s the PS5 - let it finish "
+                                              "before stopping the console's payloads."
+                                              % (_live[0].get("name") or "An install", _verb)}, 409)
             # Establish FIRST that the console is actually there. The call below quits the app on
             # the console as its last step, so a dropped connection is the normal ending — but only
             # if it was reachable to begin with. Without this check an offline PS5 would report
@@ -5758,17 +6434,43 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 b._shop("/api/health", timeout=6)
             except Exception as e:
-                return self._json({"ok": False,
-                                   "error": "the PS5 app is not reachable (%s)" % e}, 502)
+                # The repr goes to pms.log; the person gets a sentence they can act on rather
+                # than a Python exception in a toast.
+                print("[rest] prepare refused - the console did not answer /api/health: %r" % (e,))
+                return self._json({"ok": False, "error": "console_unreachable",
+                                   "message": "PKG MUTANT SHOP on the PS5 is not answering - load "
+                                              "it from Payload Manager, then try again."}, 502)
             try:
                 return self._json(b._shop("/api/rest/prepare" + ("?" + q if q else ""), timeout=45))
-            except Exception as e:
+            except (ConnectionResetError, http.client.RemoteDisconnected,
+                    http.client.IncompleteRead, BrokenPipeError) as e:
+                # The console answers and then _exit()s (server.c: send_json, close, _exit), so
+                # the only way to lose the answer is the socket closing under the read - which is
+                # the app quitting as its last step. That, and only that, is the good ending.
                 return self._json({"ok": True, "self_quit": True, "detached": True,
                                    "note": "the console shut the app down while answering (%s)" % e})
+            except Exception as e:
+                # A TIMEOUT IS NOT A SUCCESS. Forty-five seconds with no answer means the console
+                # was still killing payloads (or never finished), and this branch used to report
+                # ok:true "self_quit" for it - "safe to rest" is the one wrong answer this button
+                # must never give.
+                if isinstance(e, urllib.error.URLError) and isinstance(
+                        getattr(e, "reason", None),
+                        (ConnectionResetError, http.client.RemoteDisconnected, BrokenPipeError)):
+                    return self._json({"ok": True, "self_quit": True, "detached": True,
+                                       "note": "the console shut the app down while answering (%s)" % e})
+                print("[rest] prepare relay did not complete: %r" % (e,))
+                return self._json({"ok": False, "error": "no_answer",
+                                   "message": "The PS5 did not finish stopping its payloads - "
+                                              "check the console before resting it."}, 502)
         if path == "/api/payloads/autostart":
             # Helper auto-start is a console setting, so this is only ever a relay. Without it the
             # button 404s here and looks broken, even though it works on the PS5 itself — and the
             # whole point of the toggle is being able to flip it from a PC or a phone.
+            # Reading the setting is harmless; WRITING it (any query: on=, delay=) is a console
+            # change that must not be reachable from a hostile page's <img>.
+            if urlparse(self.path).query and not self._origin_ok():
+                return self._refuse_cross_site()
             b = _first_bridge(srv)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
@@ -5884,9 +6586,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(bridge.cheat_library_status())
         # ^ MUST stay above the prefix route below. /api/cheats/<title-id> is a startswith match,
         # so it swallowed /api/cheats/library and answered it as a title whose id is the literal
-        # string "library" - {"title_id":"library","cheats":[],"patches":[]}. The settings panel
-        # reads this to show what the cheat library holds, so it always showed nothing.
+        # string "library" - {"title_id":"library","cheats":[],"patches":[]}.
         # Same trap the /api/cred vs /api/credscan pair hit before.
+        #
+        # Neither of these two is read by the page today (index.html calls /api/cheats/paths,
+        # /api/cheats/rescan and /api/mods/*); they stay for curl and the tools. Note that
+        # /api/cheats/<tid> below lists the LEGACY CheatRunner tree (config cheats.root), not the
+        # ELF's own library at CONSOLE_CHEAT_ROOT - the mods panel goes through /api/mods/.
         if path.startswith("/api/cheats/"):
             tid = unquote(path[len("/api/cheats/"):])
             b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
@@ -5896,10 +6602,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/queue":
             return self._json({"tasks": srv.queue.snapshot()})
         if path == "/api/dpi/reload":                # the dock's manual reload button
+            # It clears the console's in-flight install latch - the guard whose clearing is how
+            # the duplicate-install panic happened - so a hostile page must not be able to fire it.
+            if not self._origin_ok():
+                return self._refuse_cross_site()
             return self._dpi_reload()
-        # [B9] GET twins of the DPI controls. The on-console build is GET-only, so serving both verbs
-        # here lets one UI call work whether the page came from the PC or from the PS5 itself.
+        # GET twins of the controls above. The on-console build is GET-only, so serving both
+        # verbs here lets one UI call work whether the page came from the PC or from the PS5 itself.
         return self._static(path.lstrip("/"))
+
+    def _refuse_cross_site(self):
+        return self._json({"ok": False, "error": "forbidden_origin",
+                           "message": "Cross-site request refused."}, 403)
 
     # ---------------------------------------------------------------- request origin guard
     # WHY THIS EXISTS. Both servers answer with Access-Control-Allow-Origin: * and neither has any
@@ -5919,11 +6633,46 @@ class Handler(BaseHTTPRequestHandler):
     #
     # Absent Origin AND Referer is allowed on purpose: that is curl, our own tooling, and
     # server-to-server calls, none of which a remote page can forge.
+    #
+    # But a browser CAN be made to send neither - a page with a no-referrer policy loading a
+    # state-changing GET as an <img>, a <script> or a top-level navigation - and "Origin: null"
+    # from a sandboxed frame is not a name either. So the browser's own statement of HOW the
+    # request was made is consulted too: Sec-Fetch-Mode and Sec-Fetch-Dest cannot be set or
+    # suppressed by a page. A navigation, a subresource load or a no-cors fetch is refused;
+    # ABSENT headers stay allowed (curl, urllib, the console's own calls, older WebKit), and
+    # everything the UI does is fetch() in mode "cors" or "same-origin" with an empty dest, so
+    # nothing the app itself does changes. Mirrors sec_fetch_ok() in server.c.
+    #
+    # Private ranges: RFC 1918, loopback, link-local (169.254 - APIPA when DHCP fails) and the
+    # CGNAT block 100.64/10 that Tailscale hands out - none of them routable from the internet,
+    # so none can be a hostile page's origin. A name is accepted in exactly one case: when it is
+    # this server's own Host header, which makes the page first-party by definition - browsing
+    # the PC as http://asus-lap:8710 used to 403 every button while the page loaded fine.
     _PRIVATE_HOST = re.compile(
         r"^(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+"
-        r"|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|\[::1\]|::1)$")
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+"
+        r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|\[::1\]|::1)$")
+    _BAD_FETCH_MODES = ("no-cors", "navigate", "nested-navigate")
+    _BAD_FETCH_DESTS = ("image", "script", "style", "iframe", "frame", "object", "embed",
+                        "font", "video", "audio")
+    _refused_logged = set()
+
+    def _refuse_log(self, why):
+        # Once per distinct reason, so a 403 is diagnosable from pms.log without flooding it.
+        if why not in Handler._refused_logged and len(Handler._refused_logged) < 64:
+            Handler._refused_logged.add(why)
+            print("[origin] refused %s %s: %s" % (self.command, self.path.split("?")[0], why))
 
     def _origin_ok(self):
+        mode = (self.headers.get("Sec-Fetch-Mode") or "").strip().lower()
+        dest = (self.headers.get("Sec-Fetch-Dest") or "").strip().lower()
+        if mode in self._BAD_FETCH_MODES or dest in self._BAD_FETCH_DESTS:
+            self._refuse_log("Sec-Fetch-Mode=%s Sec-Fetch-Dest=%s" % (mode or "-", dest or "-"))
+            return False
+        try:
+            own = (urlparse("//" + (self.headers.get("Host") or "").strip()).hostname or "").lower()
+        except ValueError:
+            own = ""
         for hdr in ("Origin", "Referer"):
             v = (self.headers.get(hdr) or "").strip()
             if not v or v == "null":
@@ -5931,17 +6680,23 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 host = urlparse(v).hostname or ""
             except ValueError:
+                self._refuse_log("%s header could not be parsed" % hdr)
                 return False
-            if not self._PRIVATE_HOST.match(host):
-                return False        # a public site is talking to us - refuse
-            return True             # first present header decides
+            if self._PRIVATE_HOST.match(host):
+                return True         # first present header decides
+            if own and host.lower() == own:
+                return True         # our own page, by whatever name it was opened under
+            self._refuse_log("%s host %r is not on this network" % (hdr, host))
+            return False            # a public site is talking to us - refuse
         return True                 # no Origin and no Referer: not a browser page
 
     def do_POST(self):
+        return self._guarded(self._do_POST)
+
+    def _do_POST(self):
         path, srv = urlparse(self.path).path, self.server
         if not self._origin_ok():
-            return self._json({"ok": False, "error": "forbidden_origin",
-                               "message": "Cross-site request refused."}, 403)
+            return self._refuse_cross_site()
         body = self._body()
 
         # ---- mods / cheats / patches — OUR Mutant engine first, CheatRunner only as a fallback ----
@@ -6103,7 +6858,10 @@ class Handler(BaseHTTPRequestHandler):
                                    "detail": repr(e)[:200]}, 502)
             if r.get("deleted"):
                 # The library's record of it is now wrong in two places; make both re-read.
+                # invalidate_apps() first: it drops the 30 s backup memo, so the deleted
+                # container leaves the folded-in size/path now rather than half a minute later.
                 try:
+                    b.invalidate_apps()
                     b.installed_titles(force=True)
                 except Exception:
                     pass
@@ -6116,7 +6874,10 @@ class Handler(BaseHTTPRequestHandler):
                                    "error": "no console configured"}, 400)
             # Default to OUR address, not the console's loopback: opening 127.0.0.1 on the console
             # gives the on-console UI, which cannot install anything that lives on this PC.
-            url = body.get("url") or ("http://%s:%d/" % (lan_ip(), srv.cfg["companion"]["port"]))
+            # companion_ip_for(), not lan_ip(): on a dual-homed PC the default route's address
+            # can be one the console has no route to - the same trap the install URL avoids.
+            url = body.get("url") or ("http://%s:%d/" % (companion_ip_for(b.ip),
+                                                         srv.cfg["companion"]["port"]))
             return self._json(b.open_shop(url))
         if path == "/api/transfer":
             # Pull a game from another PC into this one's library folder.
@@ -6287,6 +7048,15 @@ class Handler(BaseHTTPRequestHandler):
         need = int(body.get("size") or 0)
         if need <= 0:
             return None
+        # WHICH DRIVES COUNT depends on the lane, and this runs before the lane is chosen. A PKG
+        # can only ever be installed to internal or extended storage - a USB stick (exFAT) is
+        # never a PKG Installation Location - so a 60 GB package with 20 GB free on the M.2 and
+        # 200 GB on a stick was let through, and the console then refused it with no bgft row.
+        # A backup goes to any drive's homebrew folder, USB included, so it keeps them all.
+        reg = self.server.library.file_registry
+        key = body.get("install_key")
+        local = reg.get(key) if key else None
+        pkg_only = bool(local) and local.lower().endswith(".pkg")
         for cid in targets:
             b = self.server.fleet.bridge(cid)
             if not b:
@@ -6296,14 +7066,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return None                          # cannot ask -> do not stand in the way
             live = [x for x in devs if x.get("detected") and x.get("free")]
+            if pkg_only:
+                live = [x for x in live if not str(x.get("id") or "").lower().startswith("usb")]
             if not live:
                 return None                          # nothing to compare against -> say nothing
             # A little room to work in: the installer writes alongside what it is unpacking.
             roomiest = max(live, key=lambda x: int(x.get("free") or 0))
             if need + (1 << 30) <= int(roomiest["free"]):
                 continue                             # it fits somewhere - the console picks where
+            # Both halves of the sentence now agree: it fits nowhere, so the way out is space.
+            # It used to end "or send it to a drive with room" right after saying no drive had any.
             return ("%s needs %s and no drive on the PS5 has that much free. The most room is %s "
-                    "on %s - free some space, or send it to a drive with room."
+                    "on %s - free some space there, or plug in a drive with room."
                     % (body.get("name") or "This game", human_size(need),
                        human_size(roomiest.get("free")), roomiest.get("label") or roomiest.get("id")))
         return None
@@ -6338,21 +7112,24 @@ class Handler(BaseHTTPRequestHandler):
         # NOT FOR ADD-ONS. A patch or DLC is small and the console has already committed the space
         # for the game it belongs to, so the flat headroom below can refuse one that would have
         # installed - and there is no force button for no_space in the UI, so that is a dead end.
-        if not body.get("force") and kind not in ("update", "patch", "dlc", "backport"):
-            try:
-                refusal = self._space_refusal(body, targets)
-            except Exception:
-                refusal = None
-            if refusal:
-                return self._json({"ok": False, "error": "no_space", "message": refusal}, 409)
-
+        #
+        # ORDER: already-installed FIRST, then space. The installed copy occupies the very space
+        # being measured, so an 80 GB game that is already on a drive with 20 GB left was refused
+        # as "needs 80 GB and no drive has that much" - a dead end - instead of being skipped with
+        # the "already installed - reinstall anyway?" flow the UI has for it.
         if tid and not body.get("force"):
+            # A ShadowMount container is checked as a BACKUP: it is registered but has no
+            # app.pkg, so the base-game proof could never see it and a repeat Install re-sent
+            # the whole container onto the mounted one.
+            _lp = srv.library.file_registry.get(key) if key else None
+            chk_kind = ("backup" if (_lp and (_lp.lower().endswith(MOUNT_EXTS) or os.path.isdir(_lp)))
+                        else (kind or "base"))
             skip_reasons = []
             for cid in targets:
                 b = srv.fleet.bridge(cid)
                 if not b:
                     continue
-                why = b.already_installed(kind or "base", tid,
+                why = b.already_installed(chk_kind, tid,
                                           version=body.get("version") or "",
                                           content_id=body.get("content_id") or "",
                                           pkg_bytes=body.get("size") or 0)
@@ -6361,6 +7138,14 @@ class Handler(BaseHTTPRequestHandler):
             if skip_reasons and len(skip_reasons) == len([c for c in targets if srv.fleet.bridge(c)]):
                 return self._json({"ok": True, "skipped": True, "ids": [],
                                    "reason": "already_installed", "message": skip_reasons[0]})
+
+        if not body.get("force") and kind not in ("update", "patch", "dlc", "backport"):
+            try:
+                refusal = self._space_refusal(body, targets)
+            except Exception:
+                refusal = None
+            if refusal:
+                return self._json({"ok": False, "error": "no_space", "message": refusal}, 409)
 
         if kind in ("update", "patch", "dlc", "backport") and tid:
             for cid in targets:
@@ -6398,10 +7183,15 @@ class Handler(BaseHTTPRequestHandler):
                 srv.library.file_registry[key].lower().endswith(MOUNT_EXTS)
                 or os.path.isdir(srv.library.file_registry[key])):
             path = srv.library.file_registry[key]
-            dest = mount_dest_for_drive(srv.cfg, body.get("drive") or body.get("storage"))
+            # ONE drive value for both the destination and the row. dest used to follow
+            # drive-or-storage while the row recorded drive-or-"ext1", so a caller that sent
+            # only `storage` (or neither) got a row saying ext1 over a file going elsewhere.
+            # Same resolution the two peer lanes below have always used.
+            _drive = body.get("drive") or body.get("storage") or "ext1"
+            dest = mount_dest_for_drive(srv.cfg, _drive)
             jobs = [srv.queue.add({"name": body.get("name", os.path.basename(path)),
                                    "title_id": body.get("title_id"), "kind": "backup", "lane": "mount",
-                                   "console": cid, "drive": (body.get("drive") or "ext1"),
+                                   "console": cid, "drive": _drive,
                                    "local_path": path, "dest": dest,
                                    "hold": body.get("mode") == "queued",   # + Queue must not auto-start
                                    "total": srv.library.file_sizes.get(key, 0)}) for cid in targets]
@@ -6459,9 +7249,14 @@ class Handler(BaseHTTPRequestHandler):
                         sub["name"] = "%s (part %d/%d)" % (
                             body.get("name") or parts_item.get("name") or "Game",
                             p["part"], len(parts_item["parts"]))
-                        # Only the FIRST part honours "install now"; the rest queue behind it so a
-                        # console never has two parts of the same game in flight at once.
-                        if ids:
+                        # Every part takes the SAME mode as the request. Parts 2..n used to be
+                        # forced to "queued" - which means HELD, "press Start" - while this reply
+                        # promised they "install one after the other"; nothing installed them
+                        # after part 1 and the UI covered it with a toast. Ordering is the
+                        # queue's own: parts are added in order and _claim() runs one job per
+                        # console at a time, so the parts never overlap - unless per-console
+                        # parallelism was switched on, in which case the old hold stays.
+                        if ids and srv.queue.allow_ppc:
                             sub["mode"] = "queued"
                         res = self._install(sub)
                         payload, code = res if isinstance(res, tuple) else (res, 200)
@@ -6615,11 +7410,13 @@ class Handler(BaseHTTPRequestHandler):
                                "local_progress": local_progress, "progress_url": progress_url}) for cid in targets]
         return self._json({"ok": True, "ids": jobs, "url": url, "source": source, "consoles": targets})
 
-    def _static(self, rel):
+    def _static_resolve(self, rel):
+        """(full_path, None) for a file under WEB_DIR, or (None, (status, text)) for the refusal
+        GET would send. One resolver, so HEAD and GET cannot disagree about what exists."""
         rel = rel.split("?")[0]
         safe = os.path.normpath(rel).replace("\\", "/").lstrip("/")
         if ".." in safe.split("/"):
-            return self._plain("bad path", 400)
+            return None, (400, "bad path")
         # A ".." check alone is NOT enough on Windows: os.path.join(WEB_DIR, "C:/Windows/win.ini")
         # throws WEB_DIR away entirely, because the drive letter makes the second argument absolute.
         # This handler is the catch-all for every unmatched GET, and the companion listens on
@@ -6629,19 +7426,81 @@ class Handler(BaseHTTPRequestHandler):
         full = os.path.realpath(os.path.join(WEB_DIR, safe))
         try:
             if os.path.commonpath([full, os.path.realpath(WEB_DIR)]) != os.path.realpath(WEB_DIR):
-                return self._plain("bad path", 400)
+                return None, (400, "bad path")
         except ValueError:                      # different drive entirely - never ours
-            return self._plain("bad path", 400)
+            return None, (400, "bad path")
         if not os.path.isfile(full):
-            return self._plain("web/index.html missing" if rel in ("", "index.html") else "not found",
-                               500 if rel in ("", "index.html") else 404)
+            if rel in ("", "index.html"):
+                return None, (500, "web/index.html missing")
+            return None, (404, "not found")
+        return full, None
+
+    # Compressible static types. Images are already compressed and are never gzipped.
+    _GZIP_TYPES = ("text/html", "text/css", "application/javascript", "text/plain")
+
+    def _static(self, rel):
+        """A file from web/. Gzipped for the types that shrink, validated with an ETag, and told
+        how long it may be kept.
+
+        index.html is 636 KB and this served it raw on every page load, with no validator and no
+        cache policy - the largest response the server has was the one left uncompressed, while
+        _json() gzips a 200 KB library and _art_response() sends immutable covers. Now:
+          * ETag from size+mtime, 304 on a matching If-None-Match - a reload costs ~150 bytes;
+          * gzip when the client accepts it (index.html: ~636 KB -> ~150 KB), cached in memory
+            per (path, size, mtime) so the compression is paid once per file version;
+          * Cache-Control no-cache for the page and config.js (always revalidate, so a new build
+            is picked up at once) and a week for assets/* (logos and icons, which carry no
+            version and never change between releases in a way that matters).
+        Content-Length is always the length of the bytes actually sent."""
+        full, err = self._static_resolve(rel)
+        if full is None:
+            return self._plain(err[1], err[0])
         try:
+            st = os.stat(full)
             with open(full, "rb") as f:
                 data = f.read()
         except OSError:
             return self._plain("read error", 500)
+        ctype = guess_type(full)
+        safe = os.path.normpath(rel.split("?")[0]).replace("\\", "/").lstrip("/")
+        cache_ctl = ("public, max-age=604800" if safe.split("/")[0] == "assets"
+                     else "no-cache")
+        enc = None
+        if (ctype.split(";")[0] in self._GZIP_TYPES and len(data) > 1024
+                and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()):
+            enc = "gzip"
+        etag = '"%x-%x%s"' % (st.st_size, int(st.st_mtime), "-gz" if enc else "")
+        if (self.headers.get("If-None-Match") or "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache_ctl)
+            if enc:
+                self.send_header("Vary", "Accept-Encoding")
+            self._cors()
+            self.end_headers()
+            return
+        if enc:
+            ck = (full, st.st_size, int(st.st_mtime))
+            with _STATIC_LOCK:
+                ent = _STATIC_GZ.get(full)
+            if ent and ent[0] == ck:
+                data = ent[1]
+            else:
+                try:
+                    gz = gzip.compress(data, 6)
+                    with _STATIC_LOCK:
+                        _STATIC_GZ[full] = (ck, gz)
+                    data = gz
+                except Exception:
+                    enc = None                  # never fail a page over compression
+                    etag = '"%x-%x"' % (st.st_size, int(st.st_mtime))
         self.send_response(200)
-        self.send_header("Content-Type", guess_type(full))
+        self.send_header("Content-Type", ctype)
+        if enc:
+            self.send_header("Content-Encoding", enc)
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", cache_ctl)
         self.send_header("Content-Length", str(len(data)))
         self._cors()
         self.end_headers()
@@ -6752,6 +7611,35 @@ class Handler(BaseHTTPRequestHandler):
             data = f.read()
         return self._art_response(full, data, "image/png")
 
+    @staticmethod
+    def _file_validators(path):
+        """ETag + Last-Modified for a served library file, as header pairs. Additive: nothing
+        that reads /library/ needs them, but _run_pc_copy's Range resume can now tell that the
+        file it is appending to is still the one it started on."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return []
+        return [("ETag", '"%x-%x"' % (st.st_size, int(st.st_mtime))),
+                ("Last-Modified", time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime)))]
+
+    @staticmethod
+    def _content_disposition(path):
+        """A Content-Disposition the wire can carry for ANY file name.
+
+        HTTP headers are sent latin-1. A name outside that set - six live backups here carry
+        characters that are not - raised UnicodeEncodeError inside send_header, so the console's
+        GET died before a single byte was sent and the install failed with no answer at all.
+        RFC 6266: an ASCII `filename` for old readers, plus `filename*` with the real name
+        percent-encoded as UTF-8 for everything else. Nothing reads this header to decide
+        anything - the console names the file from the URL - so the fallback is cosmetic."""
+        fn = os.path.basename(path)
+        plain = fn.encode("ascii", "ignore").decode("ascii").replace('"', "").replace("\\", "")
+        cd = 'attachment; filename="%s"' % (plain.strip() or "package")
+        if plain != fn:
+            cd += "; filename*=UTF-8''" + quote(fn, safe="")
+        return cd
+
     def _serve_library(self, key):
         srv = self.server
         raw = key.split("?")[0]
@@ -6759,6 +7647,14 @@ class Handler(BaseHTTPRequestHandler):
         if not rk or not os.path.isfile(srv.library.file_registry[rk]):
             return self._plain("unknown library file", 404)
         path = srv.library.file_registry[rk]
+        # The 300 s `timeout` on this class is a reaper for connections that never send a
+        # request line. It must not arm the socket a PKG streams over: a wfile.write that
+        # blocks longer than that (BGFT paused mid-chunk, a receive window that stays full)
+        # would raise socket.timeout and drop the stream. Back to the stdlib default here.
+        try:
+            self.connection.settimeout(None)
+        except Exception:
+            pass
         size = os.path.getsize(path)
         start, end, code = 0, size - 1, 200
         rng = self.headers.get("Range")
@@ -6776,6 +7672,10 @@ class Handler(BaseHTTPRequestHandler):
                 if start > end:
                     self.send_response(416)
                     self.send_header("Content-Range", "bytes */%d" % size)
+                    # A 416 with no Content-Length left a client that waits for a body waiting;
+                    # the browser fetch() that hits it needs the CORS header to even read it.
+                    self.send_header("Content-Length", "0")
+                    self._cors()
                     self.end_headers()
                     return
                 code = 206
@@ -6786,7 +7686,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         if code == 206:
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
-        self.send_header("Content-Disposition", 'attachment; filename="%s"' % os.path.basename(path))
+        self.send_header("Content-Disposition", self._content_disposition(path))
+        for k, v in self._file_validators(path):
+            self.send_header(k, v)
         self.end_headers()
         # Two buckets: one per requesting console (what our own jobs read), and the shared
         # aggregate (what a peer companion polls, since it only knows the key).
@@ -6820,6 +7722,32 @@ class Handler(BaseHTTPRequestHandler):
                     tr["max"] = pos
 
 
+# Gzipped copies of static files, keyed by path -> ((path, size, mtime), bytes). See _static().
+_STATIC_GZ = {}
+_STATIC_LOCK = threading.Lock()
+
+
+class CompanionServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with the two settings a LAN app with several clients needs.
+
+    The stdlib backlog is 5; a page load fires health + library + queue + storage + network and
+    a burst of thumbnails from three devices at once, and with one connection per request that
+    overflowed it - Windows answers the overflow with a reset, seen as a broken card image or a
+    poll that fails with no retry. daemon_threads is already the parent's default."""
+    request_queue_size = 64
+
+    def handle_error(self, request, client_address):
+        """An exception that escaped a handler thread. The parent prints a traceback to stderr,
+        which the frozen exe does not have - so it vanished. One line into pms.log instead."""
+        _et, ev, _tb = sys.exc_info()
+        who = client_address[0] if client_address else "?"
+        if isinstance(ev, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                           socket.timeout, TimeoutError)):
+            print("[http] %s dropped the connection (%s)" % (who, type(ev).__name__))
+            return
+        print("[http] unhandled error serving %s: %s" % (who, _exc_line(ev) if ev else "?"))
+
+
 def guess_type(path):
     p = path.lower()
     return ("text/html; charset=utf-8" if p.endswith(".html") else
@@ -6851,9 +7779,14 @@ def ps5_log_add(line, src=""):
     print("[PS5 %s] %s" % (ts, line))
 
 
+PS5_LOG_LINE_MAX = 8192          # one line; a sender that never sends a newline is cut here
+PS5_LOG_CONN_MAX = 2000          # lines per connection; every line is also a pms.log print()
+
+
 def _ps5_log_conn(conn, addr):
     ip = addr[0] if addr else "?"
     buf = b""
+    n = 0
     conn.settimeout(15)
     try:
         while True:
@@ -6861,13 +7794,24 @@ def _ps5_log_conn(conn, addr):
             if not data:
                 break
             buf += data
+            # A peer streaming bytes with no newline grew `buf` without bound. Cut a line at
+            # PS5_LOG_LINE_MAX and drop the rest of it up to the next newline.
+            if len(buf) > PS5_LOG_LINE_MAX and b"\n" not in buf:
+                ps5_log_add(buf[:PS5_LOG_LINE_MAX].decode("utf-8", "replace").strip() + " [cut]", src=ip)
+                buf = b""
+                n += 1
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
-                s = line.decode("utf-8", "replace").strip()
+                s = line[:PS5_LOG_LINE_MAX].decode("utf-8", "replace").strip()
                 if s:
                     ps5_log_add(s, src=ip)
+                    n += 1
+            if n >= PS5_LOG_CONN_MAX:
+                ps5_log_add("[PS5-log] %s sent %d lines on one connection - closing it" % (ip, n), src=ip)
+                buf = b""
+                break
         if buf.strip():
-            ps5_log_add(buf.decode("utf-8", "replace").strip(), src=ip)
+            ps5_log_add(buf[:PS5_LOG_LINE_MAX].decode("utf-8", "replace").strip(), src=ip)
     except OSError:
         pass
     finally:
@@ -6901,7 +7845,11 @@ def start_pc_register_thread(cfg, fleet):
     """Push our LAN address to the on-console shop server so the PS5 auto-finds the PC (2-way connect).
     Fire-and-forget; harmless when the on-console server isn't running."""
     port = cfg["companion"]["port"]
-    oc_port = cfg.get("console", {}).get("onconsole_port", 8710)
+    # console.shop_port is the one name every other path uses for the ELF's port; this thread
+    # alone read a key called onconsole_port that nothing else read or wrote, so changing the
+    # port in config left PC registration on 8710. The old key still works as a fallback.
+    con = cfg.get("console", {}) or {}
+    oc_port = int(con.get("shop_port") or con.get("onconsole_port") or 8710)
 
     def loop():
         while True:
@@ -6912,6 +7860,14 @@ def start_pc_register_thread(cfg, fleet):
                 # to - while the install URL, built with companion_ip_for(), correctly used the
                 # Ethernet one. The console's own UI then pointed at the wrong PC.
                 ip = companion_ip_for(c.get("ip"))
+                # Only when the console is there. The cached TCP probe costs nothing; a request
+                # to a switched-off console blocked this thread for the full 2 s every 8 s.
+                try:
+                    b = fleet.bridge(c.get("id"))
+                    if b is not None and not b.up():
+                        continue
+                except Exception:
+                    pass
                 try:
                     urllib.request.urlopen(
                         # State our version too: the console ranks companions by it, and until
@@ -6984,6 +7940,30 @@ def library_signature(cfg):
         if not root or not os.path.isdir(root):
             continue
         for dirpath, _dirs, files in os.walk(root):
+            # A game stored as a FOLDER. scan() lists these (is_game_folder), but the fingerprint
+            # only looked at files, so an unpacked dump dropped in - or deleted - never changed
+            # it and the title appeared (or lingered) until a manual rescan. Summarise the whole
+            # tree as (files, bytes, newest mtime), the same figures the scan sizes it by, and
+            # take it out of the walk exactly as scan() does.
+            claimed = []
+            for d in list(_dirs):
+                full = os.path.join(dirpath, d)
+                if not is_game_folder(full, d):
+                    continue
+                n = total = newest = 0
+                for dp, _dd, fs in os.walk(full):
+                    for f in fs:
+                        try:
+                            st = os.stat(os.path.join(dp, f))
+                        except OSError:
+                            continue
+                        n += 1
+                        total += st.st_size
+                        newest = max(newest, int(st.st_mtime))
+                sig.append((full, total, newest, n))
+                claimed.append(d)
+            if claimed:
+                _dirs[:] = [d for d in _dirs if d not in claimed]
             for fn in files:
                 low = fn.lower()
                 if not (low.endswith(".pkg") or low.endswith(MOUNT_EXTS)):
@@ -7034,20 +8014,22 @@ def start_library_watch(httpd):
 
 
 def start_cheat_sync_thread(httpd):
-    """Self-repair the console's cheat library in the background.
+    """Self-repair the console's cheat library in the background - from a SOURCE checkout only.
 
-    The library ships inside the exe, so the console should always have it — but a fresh console,
-    a wiped /data, or an interrupted first sync leaves it short. This notices and fills the gap with
-    no user action. It is incremental (only missing files) so the normal case costs one directory
-    listing and sends nothing, and it is time-budgeted so it can never monopolise the FTP link that
-    installs depend on: it stops after the budget and finishes on a later pass.
+    The ELF embeds the library and writes it to the console itself; the exe bundles only web/
+    (see CHEATS_DIR at the top), so in the frozen build CHEATS_DIR is absent and this loop finds
+    nothing local to compare and sends nothing. From source it fills a wiped /data with no user
+    action. It is incremental (only files a COMPLETE listing proves missing) so the normal case
+    costs a few directory listings and sends nothing, and it is time-budgeted so it can never
+    monopolise the link that installs depend on: it stops after the budget and finishes on a
+    later pass. sync_cheat_library() holds _CHEAT_SYNC_LOCK, so a manual POST cannot overlap it.
     """
     def loop():
         time.sleep(25)                       # let the library scan and the first UI poll settle
         while True:
             try:
                 bridge = _first_bridge(httpd)
-                if bridge is not None and bridge.engine_available():
+                if bridge is not None and os.path.isdir(CHEATS_DIR) and bridge.engine_available():
                     st = bridge.cheat_library_status()
                     missing = st.get("missing_total")
                     if missing:
@@ -7076,28 +8058,97 @@ def _already_running(port):
     which is how one process silently overwrites the other's record of what is installed.
     """
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=2) as r:
+        # 4 s, not 2: a cold /api/health on the running copy has measured 2.3 s (it joins a
+        # helper probe and asks the console), and a probe that gives up before the answer arrives
+        # is a guard that fails open - the second copy binds and both write installed.json.
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=4) as r:
             j = json.loads(r.read().decode("utf-8", "replace"))
         return str(j.get("version") or "?") if j.get("ok") else None
     except Exception:
         return None
 
 
+def sweep_mei_leftovers(max_age_sec=24 * 3600):
+    """Delete orphaned PyInstaller one-file extraction folders that are provably OURS.
+
+    Every launch of the exe unpacks itself into <temp>/_MEIxxxxxx and removes it on a clean exit;
+    a crash, a kill from Task Manager or a power cut leaves the folder (~40 MB each) behind for
+    ever. Only when frozen; only folders named _MEI* that hold our own marker files; never the one
+    this process is running from; only older than a day. Every error is ignored - a tidy-up must
+    not be able to stop the app."""
+    if not getattr(sys, "frozen", False):
+        return
+    mine = os.path.normcase(os.path.realpath(getattr(sys, "_MEIPASS", "") or ""))
+    now, n = time.time(), 0
+    try:
+        tmp = tempfile.gettempdir()
+        for fn in os.listdir(tmp):
+            if not fn.startswith("_MEI"):
+                continue
+            p = os.path.join(tmp, fn)
+            try:
+                if not os.path.isdir(p) or os.path.normcase(os.path.realpath(p)) == mine:
+                    continue
+                if not (os.path.isfile(os.path.join(p, "web", "index.html"))
+                        and os.path.isfile(os.path.join(p, "web", "assets", "logo.png"))):
+                    continue
+                if now - os.path.getmtime(p) < max_age_sec:
+                    continue
+                shutil.rmtree(p, ignore_errors=True)
+                n += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if n:
+        print("[boot] removed %d leftover extraction folder(s) from an earlier run" % n)
+
+
 def main():
     _log_open()                       # before anything else: the boot lines are worth keeping
+    cfg = load_config()
+    # SINGLE INSTANCE, before any side effect. This used to be asked after the library scan (which
+    # RENAMES unsafe .pkg names), the LAN sweep (which can save config.json) and the queue's
+    # workers had all started - so a second launch rewrote files the live copy owns before
+    # deciding to exit. On Windows a second bind can also succeed while the first process keeps
+    # running every background thread it owns, and both then write installed.json.
+    _other = _already_running(cfg["companion"]["port"])
+    if _other:
+        print("[boot] PKG MUTANT SHOP v%s is ALREADY running on port %d - not starting a second "
+              "copy. Close the other one first, or change companion.port."
+              % (_other, cfg["companion"]["port"]))
+        try:
+            # imported locally: the module-level imports here are deliberately minimal, and the
+            # other caller in this file does the same.
+            import webbrowser as _wb
+            _wb.open("http://127.0.0.1:%d/" % cfg["companion"]["port"])
+        except Exception:
+            pass
+        return 0
     os.makedirs(ICON_DIR, exist_ok=True)
-    cfg = _adopt_library_root(load_config())
+    cfg = _adopt_library_root(cfg)
+    sweep_mei_leftovers()
     library = Library(cfg)
     library.scan()
     fleet = Fleet(cfg)
     # If the saved PS5 isn't reachable, auto-find it on the LAN so the app just works with no config.
     try:
         b0 = fleet.bridge(fleet.ids()[0]) if fleet.consoles else None
-        if b0 is None or not b0.engine_available():
+        # A console that answers on its shop port, or whose Payload Manager (8084) answers, IS
+        # there - the ELF merely is not loaded yet. That used to trigger the whole /24 sweep on
+        # every boot with the PS5 asleep or before the payload was loaded (pms.log: three
+        # "Auto-found" lines in one day for the same, already configured, address).
+        present = bool(b0 and b0.ip and (b0.engine_available() or b0.up()
+                                          or _port_open(b0.ip, cfg.get("dpi", {}).get("pldmgr_port", 8084), 0.6)))
+        if not present:
             found = discover_ps5(cfg)
             if found:
                 newip = found[0]["ip"]
                 confirmed = bool(found[0].get("confirmed"))
+                # Only rewrite config.json when the address actually changed. A console that is
+                # merely not loaded yet used to get "Auto-found" and a config save on every boot.
+                unchanged = (cfg.get("ps5_ip") == newip and
+                             all(c.get("ip") == newip for c in (cfg.get("consoles") or [])))
                 cfg["ps5_ip"] = newip
                 if cfg.get("consoles"):
                     for c in cfg["consoles"]:
@@ -7109,7 +8160,9 @@ def main():
                 # Only a host that CONFIRMED it is a console gets written to disk. A guess is good
                 # enough to try for this run, but must not outlive it - that is how the console
                 # address silently became a peer PC's and stayed there.
-                if confirmed:
+                if confirmed and unchanged:
+                    print(" PS5 at %s is not answering yet - keeping that address" % newip)
+                elif confirmed:
                     try:
                         save_config(cfg)
                     except Exception:
@@ -7126,23 +8179,8 @@ def main():
     library.queue = queue            # and back, so renaming never touches a file a live job holds
     engine = source_engine.SourceEngine(assemble_sources(cfg))
 
-    # SINGLE INSTANCE. Ask before binding: on Windows a second bind can succeed while the first
-    # process keeps running every background thread it owns, and both then write installed.json.
-    _other = _already_running(cfg["companion"]["port"])
-    if _other:
-        print("[boot] PKG MUTANT SHOP v%s is ALREADY running on port %d - not starting a second "
-              "copy. Close the other one first, or change companion.port."
-              % (_other, cfg["companion"]["port"]))
-        try:
-            # imported locally: the module-level imports here are deliberately minimal, and the
-            # other caller in this file does the same.
-            import webbrowser as _wb
-            _wb.open("http://127.0.0.1:%d/" % cfg["companion"]["port"])
-        except Exception:
-            pass
-        return 0
-
-    httpd = ThreadingHTTPServer((cfg["companion"]["host"], cfg["companion"]["port"]), Handler)
+    # The single-instance guard now runs at the top of main(), before anything has side effects.
+    httpd = CompanionServer((cfg["companion"]["host"], cfg["companion"]["port"]), Handler)
     httpd.cfg, httpd.library, httpd.fleet, httpd.queue = cfg, library, fleet, queue
     httpd.transfers, httpd.engine, httpd.hashes = transfers, engine, load_hashes()
     httpd.peers = PeerRegistry(cfg)
@@ -7166,6 +8204,7 @@ def main():
     print(" UI:        http://localhost:%d   (LAN http://%s:%d)" % (port, ip, port))
     print(" Phone/tablet: open  http://%s:%d  on any device on this network" % (ip, port))
     print(" This PC:   %s   id=%s" % (_dev.get("name"), _dev.get("id")))
+    print(" Config:    %s" % CONFIG_PATH)
     print(" Consoles:  %s" % (", ".join("%s@%s" % (c["name"], c["ip"]) for c in fleet.consoles) or "(none set)"))
     print(" Parallel:  %d worker(s), per-console-parallel=%s" %
           (queue.max_parallel, queue.allow_ppc))

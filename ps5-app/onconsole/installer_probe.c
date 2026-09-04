@@ -33,8 +33,15 @@
  *   reads   /data/pkg-mutant-shop/installer-req.txt
  *             line 1  the URI (http:// or a local path)
  *             line 2  OPTIONAL - a display name, used in the on-screen toast
+ *             line 3  OPTIONAL - the shop's per-request token, echoed back unchanged
  *   writes  /data/pkg-mutant-shop/installer-res.json
- *             {"ok":…,"rc":"0x…","init_rc":"0x…","content_id":"…","pid":…,"uri":"…"}
+ *             {"ok":…,"rc":"0x…","init_rc":"0x…","content_id":"…","pid":…,"uri":"…","token":"…"}
+ *
+ * The token is how the shop tells THIS run's verdict from a late one: an installer still
+ * pre-allocating a large package when the shop's lane gave up used to write its result after the
+ * next request had started, and that result was read as the new job's. The shop ignores a verdict
+ * whose token is not the one it wrote. The request file is consumed once it has been read, so an
+ * installer launched by hand afterwards finds nothing and installs nothing.
  */
 #include <fcntl.h>
 #include <stdarg.h>
@@ -111,7 +118,8 @@ static void notifyf(const char *fmt, ...) {
     sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
 
-static int read_request(const char *path, char *uri, size_t urisz, char *label, size_t labelsz) {
+static int read_request(const char *path, char *uri, size_t urisz, char *label, size_t labelsz,
+                        char *token, size_t toksz) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
     char buf[2048] = {0};
@@ -124,9 +132,17 @@ static int read_request(const char *path, char *uri, size_t urisz, char *label, 
     if (nl) {
         *nl = 0;
         size_t j = 0;
-        for (const char *p = nl + 1; *p && *p != '\r' && *p != '\n' && j < labelsz - 1; p++)
+        const char *p = nl + 1;
+        for (; *p && *p != '\r' && *p != '\n' && j < labelsz - 1; p++)
             label[j++] = *p;
         label[j] = 0;
+        /* Line 3, the token: digits only, so nothing else in the file can ever reach the JSON. */
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') {
+            size_t k = 0;
+            for (p++; *p >= '0' && *p <= '9' && k < toksz - 1; p++) token[k++] = *p;
+            token[k] = 0;
+        }
     }
     for (char *p = buf; *p; p++)
         if (*p == '\r') { *p = 0; break; }
@@ -186,14 +202,19 @@ int main(void) {
     jb_escalate_pid(getpid());
     sceUserServiceInitialize(0);
 
-    char uri[1200] = {0}, label[240] = {0};
-    if (read_request(REQ_PATH, uri, sizeof(uri), label, sizeof(label)) != 0) {
+    char uri[1200] = {0}, label[240] = {0}, token[32] = {0};
+    if (read_request(REQ_PATH, uri, sizeof(uri), label, sizeof(label), token, sizeof(token)) != 0) {
         write_result("{\"ok\":false,\"error\":\"no request file\"}");
         /* Reached only if this ELF was launched by hand from Payload Manager instead of by
            the shop, so say that rather than describing an internal hand-off. */
         notifyf("Nothing to install\nStart installs from PKG MUTANT SHOP, not from Payload Manager");
         return 1;
     }
+    /* Consume the request the moment it has been read. It used to stay on disk until the
+       companion's cleanup, so a copy of this installer launched by hand re-ran the LAST install
+       on top of whatever was live by then - the duplicate-install shape that has already taken
+       this console down. The shop removes it too; this is the belt to that brace. */
+    unlink(REQ_PATH);
 
     int init_rc = sceAppInstUtilInitialize();
 
@@ -218,12 +239,13 @@ int main(void) {
     char cid[64] = {0};
     snprintf(cid, sizeof(cid), "%.48s", pkg.content_id);
 
-    char out[1800];
+    char out[1900];
     snprintf(out, sizeof(out),
              "{\"ok\":%s,\"rc\":\"0x%08X\",\"init_rc\":\"0x%08X\",\"via\":\"spawned-process\","
-             "\"pid\":%d,\"authid\":\"0x%016llx\",\"content_id\":\"%s\",\"uri\":\"%s\"}",
+             "\"pid\":%d,\"authid\":\"0x%016llx\",\"content_id\":\"%s\",\"uri\":\"%s\","
+             "\"token\":\"%s\"}",
              rc == 0 ? "true" : "false", (unsigned)rc, (unsigned)init_rc, (int)getpid(),
-             (unsigned long long)kernel_get_ucred_authid(getpid()), cid, uri);
+             (unsigned long long)kernel_get_ucred_authid(getpid()), cid, uri, token);
     write_result(out);
 
     /* What the user sees on the TV. The console posts its own "Ready to play" toast when the
@@ -234,9 +256,10 @@ int main(void) {
         notifyf("%s is installing\nThe console is downloading it now - watch your home screen",
                 label[0] ? label : "Your game");
     else
-        /* The code still goes to installer-res.json and from there into install.log; the screen
-           gets the sentence, with the number in brackets so a bug report can still quote it. */
-        notifyf("%s could not be installed\n%s (0x%08X)", label[0] ? label : "That package",
-                install_error_text((unsigned)rc), (unsigned)rc);
+        /* The code goes to installer-res.json and from there into install.log and the app's queue
+           row, all of which keep it; the screen gets the sentence alone. A hex number on a
+           television is the one thing the house style forbids, and it used to ride along here. */
+        notifyf("%s could not be installed\n%s", label[0] ? label : "That package",
+                install_error_text((unsigned)rc));
     return rc == 0 ? 0 : 1;
 }

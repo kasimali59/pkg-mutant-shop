@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 """
+DEPRECATED - the tile no longer needs this, and --apply has locked games before.
+=================================================================================
+The shipping tile is pms-tile.pkg, EMBEDDED IN THE SHOP ELF (tile_bundle.h) and installed by the
+console's own installer on boot (tile_install() in server.c). Nothing edits app.db for it. If the
+tile is missing, the safe route is one request to the running shop:
+
+    GET http://<ps5>:8710/api/tile/install          (add ?force=1 to reinstall over a stale one)
+    GET http://<ps5>:8710/api/tile/status           (is it registered?)
+
+What this script does instead - rewriting app.db and appinfo.db by hand over FTP - is the action
+the project's notes record as LOCKING THE USER'S GAMES and putting the console into "recover the
+database". "SAFE BY DESIGN" below describes the dry-run and the backups; it does not make the
+write safe. --apply therefore refuses unless --i-accept-app-db-rewrite is also given, and the
+dry-run stays available as a way to LOOK at the rows.
+
 Register the PKG MUTANT SHOP dashboard tile by CLONING Payload Manager's rows.
 ============================================================================
 A PS5 dashboard tile is a "deeplink app": no eboot, just database rows whose
@@ -355,10 +370,26 @@ def main():
     ap.add_argument("--remove", action="store_true")
     ap.add_argument("--ip", default=None)
     ap.add_argument("--shop-url", default=None)
+    ap.add_argument("--i-accept-app-db-rewrite", action="store_true",
+                    help="required with --apply: you accept that hand-editing app.db can lock "
+                         "your games and force a database recovery")
     a = ap.parse_args()
 
     cfg_ip, cfg_shop = load_cfg()
     ip = a.ip or cfg_ip
+
+    # The safer route first, every time - it is the one that ships. The database rewrite below
+    # stays reachable for research, behind a flag that says what it can cost.
+    print("The tile is embedded in the shop ELF and installs itself. To put it back safely:")
+    print("    GET http://%s:8710/api/tile/install     (force=1 to reinstall over a stale one)" % ip)
+    print("    GET http://%s:8710/api/tile/status" % ip)
+    print("")
+    if a.apply and not a.i_accept_app_db_rewrite:
+        print("REFUSED: --apply rewrites app.db and appinfo.db by hand. On this console that has")
+        print("locked every installed game and forced a 'recover the database' pass. Use the")
+        print("/api/tile/install route above. If you really want the rewrite, add")
+        print("--i-accept-app-db-rewrite. Nothing was changed.")
+        sys.exit(2)
     shop_url = a.shop_url or cfg_shop or "http://10.0.0.76:8710/"
     work = os.path.join(HERE, "_appdb_work")
     os.makedirs(work, exist_ok=True)

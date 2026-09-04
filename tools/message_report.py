@@ -15,8 +15,11 @@ HOUSE STYLE (enforced by --check)
   * the words "PKG MUTANT SHOP" appear only when the shop itself is the subject
   * no raw error codes, JSON, or file paths on a television
   * no bare-verb failures ("Failed", "Rescan failed") anywhere
-  * no reference to software we do not ship (etaHEN, Elf Arsenal, DPI, :12800) outside the one
-    control whose whole job is to remove it
+  * no reference to software we do not ship (etaHEN, Elf Arsenal, DPI, :12800) - anywhere
+
+WHAT IS READ: every notify()/notifyf() in the two console binaries, every literal in the first
+argument of every toast() in index.html (t("key") resolved to its English sentence), the ERR_TEXT
+table, every queue-row msg= and every "error"/"message"/"detail" sentence in companion/server.py.
 """
 import argparse
 import html
@@ -33,9 +36,15 @@ PROBE_C = os.path.join(ROOT, "ps5-app", "onconsole", "installer_probe.c")
 COMPANION = os.path.join(ROOT, "companion", "server.py")
 WEB = os.path.join(ROOT, "web", "index.html")
 
-# Words that should not appear in anything a user reads. The cleanup control is the one place
-# they legitimately do, so it is excluded by id rather than by pretending the rule does not exist.
-BANNED = ("etahen", "elf arsenal", "dpiv2", "goldhen")
+# Words that should not appear in anything a user reads. The docstring promised etaHEN, Elf
+# Arsenal, DPI and :12800; the tuple only carried "dpiv2", so "DPI v2 host on :12800" sailed
+# through the gate that was written for it. Regexes, so that "dpi" matches the word and not the
+# inside of another one. Nothing shipped is exempt today: an ALLOW_WHERE used to name two
+# "remove that software" controls that no longer exist anywhere in the three sources (and web
+# rows all carry where="app toast", so it could never have matched them anyway). If a control
+# that removes third-party software returns, exempt it here by its function name - do not
+# pretend the rule does not exist.
+BANNED = (r"etahen", r"elf\s*arsenal", r"\bdpi\b", r"dpiv2", r":12800\b", r"goldhen")
 BARE_VERBS = ("failed", "error", "failed.", "rescan failed", "scan failed", "hash failed",
               "copy failed", "move failed", "verify failed", "toggle failed", "patch failed",
               "retry failed", "reload failed", "could not save")
@@ -126,18 +135,61 @@ def console_messages():
     return out
 
 
+def _en_dict(src):
+    """{key: English text} out of the I18N literal, so a toast written as toast(t("key")) is
+    linted by the sentence the user reads, not by the key."""
+    i = src.find("var I18N=")
+    j = src.find("\n  en:{", i) if i >= 0 else -1
+    if j < 0:
+        return {}
+    k = src.find("\n  ", j + 6)          # the next language starts at the same indent
+    body = src[j:k if k > 0 else len(src)]
+    return dict((m.group(1), m.group(2))
+                for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*):"((?:[^"\\]|\\.)*)"', body))
+
+
+def _js_literals(expr):
+    """Every double-quoted literal in a JS expression, in order."""
+    return re.findall(r'"((?:[^"\\]|\\.)*)"', expr)
+
+
 def web_messages():
+    """Every sentence the app can put in a toast.
+
+    ONLY toast("literal") USED TO BE SEEN. 23 of the 123 toast() calls build their text from an
+    expression - toast(r.message || "Already installed"), toast(on ? "Enabled" : "Disabled"),
+    toast(t("key")) - and every literal in those was outside the gate, so a bare-verb or a banned
+    name there shipped unchecked. Now every literal inside the FIRST argument counts, a t("key")
+    or tsub("key", ...) inside it is replaced by the English sentence behind the key, and the
+    ERR_TEXT table - the sentences errText() substitutes for the server's codes - is linted too."""
     src = read(WEB)
+    en = _en_dict(src)
     out = []
-    for m in re.finditer(r'toast\(\s*("(?:[^"\\]|\\.)*")', src):
+    key_call = r'(?<![A-Za-z0-9_.$])(?:t|tsub)\(\s*"([A-Za-z0-9_]+)"'
+    for m in re.finditer(r'(?<![A-Za-z0-9_.$])toast\(', src):
+        arg = _first_arg(src[m.start():m.start() + 4000])
         lineno = src.count("\n", 0, m.start()) + 1
-        out.append({"text": m.group(1)[1:-1], "file": "web/index.html", "line": lineno,
-                    "where": "app toast", "who": "app"})
+        # keys first, so a key's literal is not also reported as a sentence of its own
+        texts = [en.get(km.group(1), "") for km in re.finditer(key_call, arg)]
+        texts += _js_literals(re.sub(key_call, "", arg))
+        for t in texts:
+            if not t.strip():
+                continue
+            out.append({"text": t, "file": "web/index.html", "line": lineno,
+                        "where": "app toast", "who": "app"})
     # the ones built from an expression get listed by their fallback sentence instead
     for m in re.finditer(r'errText\([^,]+,\s*("(?:[^"\\]|\\.)*")\s*\)', src):
         lineno = src.count("\n", 0, m.start()) + 1
         out.append({"text": m.group(1)[1:-1], "file": "web/index.html", "line": lineno,
                     "where": "app toast (fallback)", "who": "app"})
+    # ERR_TEXT: what the app says in place of a server code
+    i = src.find("var ERR_TEXT={")
+    j = src.find("\n};", i) if i >= 0 else -1
+    if i >= 0 and j > i:
+        for m in re.finditer(r'"(?:[^"\\]|\\.)*"\s*:\s*"((?:[^"\\]|\\.)*)"', src[i:j]):
+            lineno = src.count("\n", 0, i + m.start()) + 1
+            out.append({"text": m.group(1), "file": "web/index.html", "line": lineno,
+                        "where": "ERR_TEXT", "who": "app"})
     return out
 
 
@@ -154,19 +206,42 @@ def queue_messages():
     return out
 
 
+def server_messages():
+    """The companion's own sentences: every "error"/"message"/"detail": "..." literal in
+    server.py. errText() in the UI shows any of these to the user unchanged when it is shaped
+    like a sentence, so they are user-facing whether or not a toast() names them. Python's
+    implicit concatenation across lines is joined the way the interpreter joins it. Codes such
+    as "no_space" are keys the UI translates, not sentences; they are skipped."""
+    src = read(COMPANION)
+    out = []
+    pat = re.compile(r'"(error|message|detail)":\s*\(?\s*("(?:[^"\\]|\\.)*"'
+                     r'(?:\s*\n?\s*"(?:[^"\\]|\\.)*")*)')
+    for m in pat.finditer(src):
+        text = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2)))
+        if not text.strip() or re.match(r"^[a-z0-9_]+$", text):
+            continue
+        lineno = src.count("\n", 0, m.start()) + 1
+        out.append({"text": text, "file": "companion/server.py", "line": lineno,
+                    "where": "API %s" % m.group(1), "who": "companion"})
+    return out
+
+
 def lint(rows):
     """Return a list of (row, complaint). Empty means the whole app is on style."""
     bad = []
     for r in rows:
         t = r["text"]
         low = t.lower()
-        if any(b in low for b in BANNED):
+        if any(re.search(b, low) for b in BANNED):
             bad.append((r, "names software we do not ship"))
         if low.strip().rstrip(".") in BARE_VERBS:
             bad.append((r, "bare-verb failure - says nothing about what to do"))
-        if r["who"] != "app" and t.count("\\n") > 1:
+        if r["who"] not in ("app", "companion") and t.count("\\n") > 1:
             bad.append((r, "more than two lines on a television"))
-        if re.search(r'0x%08X|\{\\"', t) and "%s" not in t:
+        # No exception for messages that also carry a %s. That loophole let "%s could not be
+        # installed (0x%08X)" through: a sentence in front of a hex code is still a hex code on
+        # a television. The code belongs in the install log, which every one of these writes.
+        if re.search(r'0x%0?8[xX]|0x[0-9A-Fa-f]{8}\b|\{\\"', t):
             bad.append((r, "puts a raw code or JSON on screen"))
         if r["who"] in ("shop ELF", "installer ELF") and t.startswith("PKG MUTANT SHOP\\n"):
             bad.append((r, "app name used as a title line - the icon already says who is speaking"))
@@ -268,7 +343,7 @@ def main():
 
     con = console_messages()
     web = web_messages()
-    que = queue_messages()
+    que = queue_messages() + server_messages()
     allrows = con + web + que
 
     bad = lint(allrows)

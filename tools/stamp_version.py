@@ -1,10 +1,17 @@
-"""Stamp the real version into web/index.html before it is bundled.
+"""Stamp the real version into every artifact that carries one, before anything is bundled.
 
 The UI carried a hardcoded APP_VERSION used until /api/health answers, so every load
 flashed whatever number was last typed there (1.1.1) before snapping to the true one.
 Both artifacts bundle web/ directly, so stamping the file once covers the EXE and the ELF.
 
-Single source of truth: companion/server.py VERSION.
+Single source of truth: companion/server.py VERSION. Stamped into:
+    web/index.html                 var APP_VERSION="..."
+    ps5-app/onconsole/server.c     #define SHOP_VERSION "..."
+    ps5-app/homebrew.js            "version": "..."      (the launcher manifest sat at 0.5.0)
+
+REFUSES if any target is missing or carries no stamp point. An earlier version silently skipped
+server.c when it could not be read, and "stamped" then meant only the UI - which is how the
+console reported 3.39.0 while the companion said 3.40.0.
 """
 import os
 import re
@@ -15,6 +22,14 @@ ROOT = os.path.dirname(HERE)
 SERVER = os.path.join(ROOT, "companion", "server.py")
 SHOP_C = os.path.join(ROOT, "ps5-app", "onconsole", "server.c")
 INDEX = os.path.join(ROOT, "web", "index.html")
+HOMEBREW_JS = os.path.join(ROOT, "ps5-app", "homebrew.js")
+
+# (path, pattern with the version as group 2 between group 1 and group 3, human name)
+TARGETS = (
+    (SHOP_C, rb'(#define\s+SHOP_VERSION\s+")([^"]+)(")', "ps5-app/onconsole/server.c SHOP_VERSION"),
+    (INDEX, rb'(var APP_VERSION=")([^"]*)(";)', "web/index.html APP_VERSION"),
+    (HOMEBREW_JS, rb'("version"\s*:\s*")([^"]*)(")', "ps5-app/homebrew.js version"),
+)
 
 
 def read_version():
@@ -26,6 +41,7 @@ def read_version():
 
 
 def elf_version():
+    """Kept for callers that only want to read it (ready_check does its own)."""
     try:
         with open(SHOP_C, "rb") as f:
             m = re.search(rb'#define\s+SHOP_VERSION\s+"([^"]+)"', f.read())
@@ -34,33 +50,38 @@ def elf_version():
         return None
 
 
+def stamp(path, pattern, label, ver):
+    """STAMP it, do not warn about it. The artifacts must ship the same number, and a warning
+    in the middle of a long build is not a mechanism - it scrolls past."""
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        raise SystemExit("stamp_version: %s is missing (%s) - refusing to stamp a partial set"
+                         % (label, e))
+    m = re.search(pattern, raw)
+    if not m:
+        raise SystemExit("stamp_version: no stamp point for %s - refusing to stamp a partial set"
+                         % label)
+    old = m.group(2).decode("utf-8", "replace")
+    if old == ver:
+        print("%s already at %s" % (label, ver))
+        return
+    new_raw, k = re.subn(pattern, lambda mm: mm.group(1) + ver.encode() + mm.group(3), raw, count=1)
+    if k != 1:
+        raise SystemExit("stamp_version: could not rewrite %s" % label)
+    open(path, "wb").write(new_raw)
+    print("stamped %s -> %s (was %s)" % (label, ver, old))
+
+
 def main():
     ver = read_version()
-    elf = elf_version()
-    if elf and elf != ver:
-        # STAMP it, do not warn about it. The two artifacts must ship the same number, and a
-        # warning in the middle of a long build is not a mechanism - it scrolls past. Today the
-        # console reported 3.39.0 while the companion said 3.40.0, and the only way to tell which
-        # build was actually on the console was the compile timestamp in /api/health.
-        raw = open(SHOP_C, "rb").read()
-        new_raw, k = re.subn(rb'(#define\s+SHOP_VERSION\s+")[^"]+(")',
-                             lambda m: m.group(1) + ver.encode() + m.group(2), raw, count=1)
-        if k != 1:
-            raise SystemExit("SHOP_VERSION not found in ps5-app/onconsole/server.c")
-        open(SHOP_C, "wb").write(new_raw)
-        print("stamped server.c -> SHOP_VERSION=%s (was %s)" % (ver, elf))
-
-    raw = open(INDEX, "rb").read()
-    text = raw.decode("utf-8")
-    new, n = re.subn(r'var APP_VERSION="[^"]*";',
-                     'var APP_VERSION="%s";' % ver, text, count=1)
-    if n != 1:
-        raise SystemExit("APP_VERSION not found in web/index.html")
-    if new != text:
-        open(INDEX, "wb").write(new.encode("utf-8"))
-        print("stamped web/index.html -> APP_VERSION=%s" % ver)
-    else:
-        print("web/index.html already at %s" % ver)
+    # Check every target exists BEFORE writing any, so a missing one never leaves the others
+    # half-stamped.
+    for path, pattern, label in TARGETS:
+        if not os.path.isfile(path):
+            raise SystemExit("stamp_version: %s is missing - refusing to stamp a partial set" % label)
+    for path, pattern, label in TARGETS:
+        stamp(path, pattern, label, ver)
     return 0
 
 

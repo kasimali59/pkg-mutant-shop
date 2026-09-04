@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
 """
+DEPRECATED - this route is dead on FW 12.70 and the tile no longer needs it.
+===========================================================================
+The shipping tile is pms-tile.pkg, embedded in the shop ELF (tile_bundle.h) and installed by
+the console's own installer on boot (tile_install() in server.c). To put it back by hand:
+
+    GET http://<ps5>:8710/api/tile/install          (?force=1 to reinstall over a stale one)
+
+What this script does - MTRW-mounting the system partition and writing /system_ex/app and
+/user/app by hand, then relying on install-tile-payload.elf and sceAppInstUtilAppInstallTitleDir,
+which is not exported on 12.70 and whose toasts never render - cannot produce a working tile any
+more. It is kept for the record only and exits before touching the console.
+
 Deploy the PKG MUTANT SHOP dashboard tile to the PS5 over FTP.
   python deploy-tile.py [ps5_ip]
 Then send install-tile-payload.elf to the PS5 (Payload Manager) to register the tile.
 Reads ps5_ip / ftp port from companion/config.json if not given.
 """
 import ftplib, json, os, sys
+
+print("deploy-tile.py is DEPRECATED: the tile is embedded in the shop ELF and installs itself.")
+print("Use  GET http://<ps5>:8710/api/tile/install  instead. Nothing was written to the console.")
+if "--i-know-this-is-dead" not in sys.argv:
+    sys.exit(2)
+sys.argv = [a for a in sys.argv if a != "--i-know-this-is-dead"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TID = "PKGM00001"

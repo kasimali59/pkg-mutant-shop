@@ -72,12 +72,60 @@ def languages(block):
     return out
 
 
+def _first_arg(s, start):
+    """The text of the first argument of the call whose '(' is at s[start]. Stops at the first
+    comma that is not inside brackets or a string, or at the matching close paren."""
+    depth, j, q, esc = 0, start, None, False
+    while j < len(s):
+        c = s[j]
+        if q:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth == 0:
+                return s[start + 1:j]
+        elif c == "," and depth == 1:
+            return s[start + 1:j]
+        j += 1
+    return s[start + 1:]
+
+
 def used_keys(s):
-    """Every key the app actually asks for."""
+    """Every key the app actually asks for.
+
+    THIS USED TO SEE ONLY t("literal"). The app also reaches keys through tsub("key", {...}),
+    through t("key", extra) and through ternaries - t(n === 1 ? "one" : "many"),
+    tsub(on ? "gp_mod_enabled" : "gp_mod_disabled", {...}) - and none of those were counted. So
+    29 live keys were reported as "never used (dead weight)", inviting their deletion, and the
+    eight languages added in 3.60.0 shipped without any of them while --check printed 100%. The
+    fallback to English hid it on screen. Now every string literal inside the FIRST argument of a
+    t( or tsub( call counts as used, whatever expression it sits in."""
     keys = set()
     for attr in ("data-i18n", "data-i18n-ph", "data-i18n-tip", "data-i18n-aria"):
         keys |= set(re.findall(attr + r'="([^"]+)"', s))
-    keys |= set(re.findall(r'[^A-Za-z_.]t\(\s*"([A-Za-z0-9_]+)"\s*\)', s))
+    for m in re.finditer(r'(?<![A-Za-z0-9_.$])(?:t|tsub)\(', s):
+        arg = _first_arg(s, m.end() - 1)
+        # A literal is a KEY only where the value of the expression can be it: the whole
+        # argument, or an arm of a ternary. t(kind === "update" ? "gp_kind_patch" : "gp_kind_dlc")
+        # compares against "update" - that is not a key, and counting it reported a phantom
+        # "used but not defined" failure.
+        for lm in re.finditer(r'"([A-Za-z0-9_]+)"', arg):
+            before = arg[:lm.start()].rstrip()
+            after = arg[lm.end():].lstrip()
+            if before and before[-1] not in "?:":
+                continue
+            if after and after[0] not in "?:":
+                continue
+            keys.add(lm.group(1))
     return keys
 
 
