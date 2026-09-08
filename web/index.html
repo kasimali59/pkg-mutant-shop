@@ -5054,6 +5054,7 @@ var I18N={
     gp_dest_not_detected:"  （未检测到）",
     msg_q_console_decides_drive:"由 PS5 决定存储位置",
     msg_conn_companion_lost:"PC 伴侣已失联 — 正在寻找",
+    msg_set_sources_none:"无",
     msg_copy_this_pc:"此电脑",
     msg_dev_this_pc_fallback:"此电脑",
     msg_dev_this_pc_label:"（此电脑）",
@@ -5406,6 +5407,7 @@ var I18N={
     gp_dest_not_detected:"  (पता नहीं चला)",
     msg_q_console_decides_drive:"ड्राइव PS5 तय करता है",
     msg_conn_companion_lost:"PC साथी से संपर्क टूटा — खोज जारी",
+    msg_set_sources_none:"कोई नहीं",
     msg_copy_this_pc:"यह PC",
     msg_dev_this_pc_fallback:"यह PC",
     msg_dev_this_pc_label:"(यह PC)",
@@ -5758,6 +5760,7 @@ var I18N={
     gp_dest_not_detected:"  (не обнаружен)",
     msg_q_console_decides_drive:"Диск выбирает PS5",
     msg_conn_companion_lost:"Связь с ПК потеряна — идёт поиск",
+    msg_set_sources_none:"нет",
     msg_copy_this_pc:"этот ПК",
     msg_dev_this_pc_fallback:"этот ПК",
     msg_dev_this_pc_label:"(этот ПК)",
@@ -6110,6 +6113,7 @@ var I18N={
     gp_dest_not_detected:"  (non rilevato)",
     msg_q_console_decides_drive:"Il disco lo sceglie la PS5",
     msg_conn_companion_lost:"PC companion perso — lo sto cercando",
+    msg_set_sources_none:"nessuna",
     msg_copy_this_pc:"questo PC",
     msg_dev_this_pc_fallback:"questo PC",
     msg_dev_this_pc_label:"(questo PC)",
@@ -6462,6 +6466,7 @@ var I18N={
     gp_dest_not_detected:"  (감지되지 않음)",
     msg_q_console_decides_drive:"드라이브는 PS5가 정합니다",
     msg_conn_companion_lost:"PC 컴패니언 연결 끊김 — 찾는 중",
+    msg_set_sources_none:"없음",
     msg_copy_this_pc:"이 PC",
     msg_dev_this_pc_fallback:"이 PC",
     msg_dev_this_pc_label:"(이 PC)",
@@ -6814,6 +6819,7 @@ var I18N={
     gp_dest_not_detected:"  (algılanmadı)",
     msg_q_console_decides_drive:"Sürücüye PS5 karar verir",
     msg_conn_companion_lost:"PC yardımcısı kayboldu — aranıyor",
+    msg_set_sources_none:"yok",
     msg_copy_this_pc:"bu PC",
     msg_dev_this_pc_fallback:"bu PC",
     msg_dev_this_pc_label:"(bu PC)",
@@ -7166,6 +7172,7 @@ var I18N={
     gp_dest_not_detected:"  (nie wykryto)",
     msg_q_console_decides_drive:"O dysku decyduje PS5",
     msg_conn_companion_lost:"Utracono aplikację na PC — szukam",
+    msg_set_sources_none:"brak",
     msg_copy_this_pc:"ten komputer",
     msg_dev_this_pc_fallback:"ten komputer",
     msg_dev_this_pc_label:"(ten komputer)",
@@ -7518,6 +7525,7 @@ var I18N={
     gp_dest_not_detected:"  (niet gevonden)",
     msg_q_console_decides_drive:"De PS5 kiest de schijf",
     msg_conn_companion_lost:"Pc-companion kwijt — aan het zoeken",
+    msg_set_sources_none:"geen",
     msg_copy_this_pc:"deze pc",
     msg_dev_this_pc_fallback:"deze pc",
     msg_dev_this_pc_label:"(deze pc)",
@@ -7671,6 +7679,11 @@ function setLang(code){
   try{ if(typeof updateSrcBar==="function")updateSrcBar(); }catch(e){}
   try{ if(typeof paintServices==="function"&&state&&state.health)paintServices(state.health); }catch(e){}
   try{ if(typeof paintPcOnly==="function")paintPcOnly(); }catch(e){}
+  /* The rows Settings filled with WORDS (connection, engine, helpers, devices, rest note) keep
+     the language they were painted in - applyI18n only reaches markup. Repaint them, and ask for
+     health again so the header pill changes language now rather than at its next poll. */
+  try{ if(typeof repaintSettingsWords==="function")repaintSettingsWords(); }catch(e){}
+  try{ if(typeof refreshHealth==="function"&&API!==null)refreshHealth(); }catch(e){}
   /* An OPEN game panel is rebuilt in place. openDrawer() survives being called again - the action
      bar is rescued out of #dbody before the clear, which is what makes a second open safe - and
      without this the panel a person is looking at while they change language is the one thing
@@ -10160,12 +10173,14 @@ function stopAllHomebrew(btn){
     if(failed.length){
       var fn=failed.map(function(x){return x.name;}).join(", ");
       toast("Still running: "+fn+" — do NOT rest yet","err");
+      state.restNote={fail:fn};
       if(rn) rn.textContent=tsub("msg_rest_could_not_stop",{names:fn});
       return;
     }
     var names=stopped.map(function(x){return x.name;}).join(", ");
     toast(stopped.length ? ("Stopped "+stopped.length+": "+names+" — safe to rest the console")
                          : "Nothing left to stop — safe to rest the console","ok");
+    state.restNote="ok";
     if(rn) rn.textContent=t("msg_rest_all_stopped");
   }).catch(function(){
     // The console exits as its last step ONLY when everything really stopped, so a dropped reply
@@ -10315,6 +10330,34 @@ function refreshEngine(){
    the PS5's browser does not reliably support, and no arrow functions. The chosen tab is remembered
    for the session only: reopening Settings to work on the same thing is the common case, but a tab
    remembered across a restart would hide the fact that the panel starts at Console. */
+/* EVERY VALUE SETTINGS PAINTS, AGAIN, IN THE NEW LANGUAGE. applyI18n() re-labels the markup,
+   but the rows openSettings() filled with words - the connection line, the engine rows and their
+   sentences, the helper toggle, the rest note, the device list, "installs run through" - kept the
+   language they were painted in until something happened to repaint them. Measured: switch to
+   Spanish with the panel open and eleven rows stayed English. This is run from setLang() while
+   the panel is open. It touches no input: an address half-typed while the language changes must
+   survive the switch, so the form is not refilled. */
+function repaintSettingsWords(){
+  var sh=$("#settings"); if(!sh||!sh.classList.contains("show")) return;
+  var h=state.health||{};
+  var _con=!!(h.connected||h.on_console);
+  setTxt("conState", _con?(t("msg_set_connected_to")+(h.ps5_ip||t("msg_set_the_ps5"))):t("msg_set_not_answering"));
+  modeNote();
+  var rn=$("#restNote");
+  if(rn){
+    var r=state.restNote;
+    rn.textContent = (r==="ok") ? t("msg_rest_all_stopped")
+                   : (r&&r.fail) ? tsub("msg_rest_could_not_stop",{names:r.fail})
+                   : t("msg_set_rest_note");
+  }
+  try{ refreshEngine(); }catch(e){}
+  try{ refreshAutostart(); }catch(e){}
+  try{ if(state.network) renderDevices(state.network); }catch(e){}
+  var sc=$("#setConsoles");
+  if(sc&&sc.textContent&&sc.textContent.indexOf("—")<0) sc.textContent=t("msg_set_consoles_none");
+  var ss=$("#setSources");
+  if(ss&&ss.textContent&&ss.textContent.indexOf("·")<0) ss.textContent=t("msg_set_sources_none");
+}
 function openSettings(){
   var c=state.config||{};
   var h=state.health||{};
@@ -10349,7 +10392,7 @@ function openSettings(){
       // Helper services live in the Console block above - keep this list to actual sources
       // so nothing is listed twice.
       $("#setSources").innerHTML=(s.sources||[]).map(function(x){
-        return led(x.ok)+" "+esc(x.name)+" · "+(x.latency_ms!=null?x.latency_ms+"ms":"-");}).join("<br>")||"none";
+        return led(x.ok)+" "+esc(x.name)+" · "+(x.latency_ms!=null?x.latency_ms+"ms":"-");}).join("<br>")||t("msg_set_sources_none");
       /* The ShadowMount row is paintServices()' alone. This used to repaint it two-state from
          s.helpers - null as a red "not running", in different words - and the next health tick
          put the three-state version back, so the row flickered between two truths every 6 s. */
@@ -10363,12 +10406,13 @@ function openSettings(){
       _sc.innerHTML=(r.consoles||[]).map(function(x){
         /* The port here used to be dpi_port (12800) - a daemon this app no longer talks to. The
            address alone is what identifies a console; its port is in the field at the top. */
-        return led(x.online)+" "+esc(x.name)+" — "+esc(x.ip);}).join("<br>")||"none configured";
+        return led(x.online)+" "+esc(x.name)+" — "+esc(x.ip);}).join("<br>")||t("msg_set_consoles_none");
     }).catch(function(){});
     // Real paths straight from the console, so they can be reached over FTP from here.
     api("/api/network").then(function(d){ renderDevices(d); }).catch(function(){});
     refreshAutostart();
     var rn=$("#restNote");
+    state.restNote="base";                  /* what the note shows, so a language switch can repaint it */
     if(rn) rn.textContent=t("msg_set_rest_note");
     api("/api/cheats/paths").then(function(r){
       /* The FOLDERS are chips now, and a chip shows the format - a full Windows path stretched
@@ -10394,6 +10438,7 @@ function openSettings(){
 /* Who is on the network: this PC, any peer PCs, and the console. */
 function renderDevices(d){
   if(!d) return;
+  state.network=d;                          /* kept so a language switch can redraw this list */
   var me=d.this_pc||{};
   state.pcName=me.name||"";                 /* the source bar names the PC by this */
   setTxt("devPhone",me.url||"—");
