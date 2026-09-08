@@ -538,6 +538,25 @@ main{flex:1 1 auto;overflow-y:scroll;scrollbar-gutter:stable;padding:18px 18px 2
 .qx:hover{border-color:var(--danger);color:var(--danger)}
 .qretry:hover{border-color:var(--ok);color:var(--ok)}
 #driveSel[disabled]{opacity:.72;cursor:help}
+/* THE DESTINATION PICKER NEVER GROWS. A flex item's min-width is "auto", which for a <select> is
+   its longest option - so a long translation widened the control past its column. The wrapper is
+   the flex item (min-width:0), the select fills it, and a label that does not fit is shown by
+   .selmarq, an overlay that scrolls the text end to end and starts again (a marquee), while the
+   select's own text goes transparent underneath. The list of options is untouched: it keeps its
+   colours, and the select keeps its id, value, focus and handlers - the overlay ignores the pointer. */
+.selwrap{position:relative;flex:1 1 100%;min-width:0;display:flex;align-items:center}
+.dfoot .selwrap select{flex:1 1 auto;width:100%;min-width:0;max-width:100%;box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.selwrap.marq select{color:transparent;text-shadow:none}
+.selwrap.marq select option{color:var(--text);background:var(--surface)}
+.selmarq{position:absolute;left:11px;right:30px;top:0;bottom:0;display:none;align-items:center;overflow:hidden;white-space:nowrap;pointer-events:none;color:var(--text)}
+.selwrap.marq .selmarq,.selmarq.measure{display:flex}
+.selmarq.measure{visibility:hidden}
+.selmarq span{display:inline-block}
+.selwrap.marq .selmarq span{animation:selmarq 12s linear infinite}
+[dir=rtl] .selwrap.marq .selmarq span{animation-name:selmarq-rtl}
+#driveSel[disabled]~.selmarq{opacity:.72}
+@keyframes selmarq{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@keyframes selmarq-rtl{from{transform:translateX(0)}to{transform:translateX(50%)}}
 /* --- panel density: stop long values overflowing and buttons colliding with text --- */
 .dgrid .cell .vv.one{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sec .row{display:flex;align-items:center;gap:10px}
@@ -1149,7 +1168,11 @@ html{scroll-behavior:smooth}
   </div>
   <div class="dbody" id="dbody"></div>
   <div class="dfoot">
-    <select id="driveSel" aria-label="Install destination" data-i18n-aria="ui_aria_install_dest"></select>
+    <!-- The picker sits in a wrapper that never grows: a long translation used to widen the
+         <select> to its longest option and push it across the other column. When the chosen text
+         does not fit, an overlay scrolls it (syncDriveMarquee); the <select> keeps its id, its
+         handlers and its value - the overlay is display-only and ignores the pointer. -->
+    <div class="selwrap"><select id="driveSel" aria-label="Install destination" data-i18n-aria="ui_aria_install_dest"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
     <button class="btn ghost tip" id="sendPkg"
             data-tip="Copy the package onto the PS5's own drive first, then install it from there. Useful when you want the console to hold the file rather than stream it over the network." data-i18n-tip="ui_tip_send_pkg">📥 Send to PS5</button>
     <button class="btn ghost tip" id="queueBtn"
@@ -1171,7 +1194,7 @@ html{scroll-behavior:smooth}
   <div class="sheet">
     <header class="sethead">
       <span class="hz">
-        <button class="backbtn" id="backSettings" aria-label="Back" data-i18n-aria="ui_aria_back"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Back</button>
+        <button class="backbtn" id="backSettings" aria-label="Back" data-i18n-aria="ui_aria_back"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg><span data-i18n="ui_back">Back</span></button>
         <span id="saveState" class="savestate"></span>
       </span>
       <h2 data-i18n="settings">SETTINGS</h2>
@@ -1260,9 +1283,9 @@ html{scroll-behavior:smooth}
         <!-- ================= CHEATS ================= -->
         <section class="scard">
           <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h4M8 10v4M15 11h.01M18 13h.01"/><rect x="2" y="6" width="20" height="12" rx="4"/></svg></span><span data-i18n="sec_cheats">Cheats &amp; mods</span></h3><div class="hact"><button class="btn ghost sm tip" id="cheatRescan" data-tip="File anything newly dropped into the watched folders, then re-read the library." data-i18n-tip="ui_tip_cheat_rescan" data-i18n="ui_btn_rescan">Rescan</button></div></div>
-          <div class="hint" style="margin-top:0">Drop <b>.json</b>, <b>.shn</b> or <b>.mc4</b> files
-            into the inbox and press Rescan. They are sorted by what is inside them, so the file
-            name does not matter. A <b>/cheats</b> folder on a plugged-in USB stick is picked up too.</div>
+          <!-- Six spans, not one data-i18n: the file types stay bold and untranslated, and the words
+               around them each carry their own key, so the sentence reads right in every language. -->
+          <div class="hint" style="margin-top:0"><span data-i18n="ui_cheats_drop_pre">Drop </span><b>.json</b><span data-i18n="ui_cheats_drop_sep">, </span><b>.shn</b><span data-i18n="ui_cheats_drop_or"> or </span><b>.mc4</b><span data-i18n="ui_cheats_drop_mid"> files into the inbox and press Rescan. They are sorted by what is inside them, so the file name does not matter. A </span><b>/cheats</b><span data-i18n="ui_cheats_drop_end"> folder on a plugged-in USB stick is picked up too.</span></div>
           <!-- THE INBOX PATH IS PRINTED, NOT TOOLTIPPED. It was a chip carrying its path in
                data-tip, and on the two devices that matter that path was unreachable: .tipbox is
                display:none under pointer:coarse (index.html:500), which covers the phone the
@@ -1270,7 +1293,7 @@ html{scroll-behavior:smooth}
                (index.html:3680) - which a bare <span> can never fire, because it takes no focus
                without a tabindex. This is the one folder you have to type, so it is a row. -->
           <div class="chips">
-            <span class="chip tip" id="cpDrop" tabindex="0" data-tip="Where to drop new cheat files" data-i18n-tip="ui_tip_cp_drop">Inbox</span>
+            <span class="chip tip" id="cpDrop" tabindex="0" data-tip="Where to drop new cheat files" data-i18n-tip="ui_tip_cp_drop" data-i18n="ui_chip_inbox">Inbox</span>
             <span class="chip tip" id="cpJson" tabindex="0" data-tip="JSON cheats">JSON</span>
             <span class="chip tip" id="cpShn" tabindex="0" data-tip="SHN cheats">SHN</span>
             <span class="chip tip" id="cpMc4" tabindex="0" data-tip="MC4 cheats" data-i18n-tip="ui_tip_cp_mc4">MC4</span>
@@ -1286,7 +1309,7 @@ html{scroll-behavior:smooth}
 
         <!-- ================= DEVICES ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="13" height="9" rx="1.5"/><rect x="16" y="9" width="6" height="10" rx="1.5"/><path d="M6 19h6"/></svg></span><span data-i18n="sec_devices">Devices &amp; sources</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="devScan" data-tip="Look for other PCs running PKG MUTANT SHOP on this network." data-i18n-tip="ui_tip_dev_scan">Find PCs</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="13" height="9" rx="1.5"/><rect x="16" y="9" width="6" height="10" rx="1.5"/><path d="M6 19h6"/></svg></span><span data-i18n="sec_devices">Devices &amp; sources</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="devScan" data-i18n="ui_btn_find_pcs" data-tip="Look for other PCs running PKG MUTANT SHOP on this network." data-i18n-tip="ui_tip_dev_scan">Find PCs</button></div></div>
           <span class="flabel" data-i18n="ui_on_this_network">On this network</span>
           <div class="hint" id="devSelf" style="margin-top:0">-</div>
           <div class="hint" id="devPeers">-</div>
@@ -1317,7 +1340,7 @@ html{scroll-behavior:smooth}
                moment it is pressed. It is a red-outlined button on its own row and it says what it
                does, so it cannot be read as a switch that merely remembers something. -->
           <div class="btnrow" id="restRow" style="display:none">
-            <button class="btn ghost sm danger tip" id="restOff" data-tip="Stops every homebrew payload on the PS5 right now - the backup services, anything else loaded, and this app last. Your jailbreak and Payload Manager keep running, so nothing needs re-jailbreaking afterwards." data-i18n-tip="ui_tip_rest_off">Stop all homebrew now</button>
+            <button class="btn ghost sm danger tip" id="restOff" data-i18n="ui_btn_stop_homebrew" data-tip="Stops every homebrew payload on the PS5 right now - the backup services, anything else loaded, and this app last. Your jailbreak and Payload Manager keep running, so nothing needs re-jailbreaking afterwards." data-i18n-tip="ui_tip_rest_off">Stop all homebrew now</button>
           </div>
           <div class="hint" id="restNote"></div>
         </section>
@@ -1334,9 +1357,8 @@ html{scroll-behavior:smooth}
 
         <!-- ================= ADVANCED ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n="ui_btn_install_log">Install log</button></div></div>
-          <div class="hint" style="margin-top:0">For working out why something is not happening.
-            Nothing here is needed to use the app.</div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-i18n="ui_btn_clear_state" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n="ui_btn_install_log">Install log</button></div></div>
+          <div class="hint" style="margin-top:0" data-i18n="ui_advanced_hint">For working out why something is not happening. Nothing here is needed to use the app.</div>
           <div class="frow" style="margin-top:10px">
             <span class="flabel" data-i18n="ui_shop_port_label">Shop port on the console</span>
             <input id="setPort" placeholder="8710" inputmode="numeric" aria-label="Shop port on the PS5">
@@ -1854,6 +1876,25 @@ var I18N={
     msg_btn_rescan_short:"Rescan",
     msg_q_console_decides_drive:"PS5 decides the drive",
     msg_conn_companion_lost:"PC companion lost — looking for one",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Ready - installs can start straight away.",
+    msg_eng_detail_busy:"An install is being handed to the console right now.",
+    msg_eng_detail_no_pldmgr:"Payload Manager is not answering on :{port}, and our engine needs it to start each install. Reload it on the PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP is not answering on the PS5. Load it from Payload Manager, then reopen this panel.",
+    msg_eng_detail_no_console:"No PS5 is set up yet - add its address above.",
+    msg_eng_how_spawn:"A fresh installer is started for every install and exits when the console has accepted the package. Nothing stays running, so nothing can wedge.",
+    msg_ver_older_than_page:" · older than this page",
+    msg_ver_newer_than_page:" · newer than this page",
+    msg_helpers_autostart_on:"Helpers auto-start: on",
+    msg_helpers_autostart_off:"Helpers auto-start: off",
+    msg_src_titles:"{n} titles",
+    msg_src_title_one:"1 title",
+    msg_src_sources:"{n} sources · auto-picked {best}",
+    msg_src_source_one:"1 source · auto-picked {best}",
+    msg_copy_the_pc:"the PC",
+    msg_rest_could_not_stop:"Could not stop: {names}. These survive into rest mode and are the likely cause of a crash.",
+    msg_rest_all_stopped:"All homebrew stopped — safe to rest.",
+    msg_set_cfg_unreadable:"config.json next to PKG-MUTANT-SHOP.exe cannot be read ({err}), so the app is running on its defaults and will not overwrite the file. Fix or delete it, then restart the app - nothing typed here can be saved until then.",
     msg_needs_pc_tip:"This asks the PC to do it, and no PC is answering right now. Open the shop from the PC app, or wait for one to be found.",
     msg_pc_seat_tip:"This opens a window on the PC itself. Use it from the PC."},
   es:{q_installing:"instalando",q_working:"Trabajando",q_waiting:"esperando para empezar",q_failed:"con error",q_needslook:"necesitan revisión",q_alldone:"Todo listo",search:"Buscar biblioteca…",all:"Todos",installed:"Instalado",updates:"Actualizaciones",notinstalled:"No instalado",
@@ -2321,6 +2362,25 @@ var I18N={
     msg_btn_rescan_short:"Reexplorar",
     msg_q_console_decides_drive:"La PS5 elige la unidad",
     msg_conn_companion_lost:"Se perdió el PC compañero — buscando uno",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Listo - las instalaciones pueden empezar ahora mismo.",
+    msg_eng_detail_busy:"Se está entregando una instalación a la consola ahora mismo.",
+    msg_eng_detail_no_pldmgr:"Payload Manager no responde en :{port}, y nuestro motor lo necesita para iniciar cada instalación. Vuelve a cargarlo en la PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP no responde en la PS5. Cárgalo desde Payload Manager y vuelve a abrir este panel.",
+    msg_eng_detail_no_console:"Aún no hay ninguna PS5 configurada - añade su dirección arriba.",
+    msg_eng_how_spawn:"Se inicia un instalador nuevo para cada instalación y termina cuando la consola ha aceptado el paquete. Nada queda en ejecución, así que nada puede atascarse.",
+    msg_ver_older_than_page:" · más antigua que esta página",
+    msg_ver_newer_than_page:" · más nueva que esta página",
+    msg_helpers_autostart_on:"Ayudantes al inicio: activado",
+    msg_helpers_autostart_off:"Ayudantes al inicio: desactivado",
+    msg_src_titles:"{n} títulos",
+    msg_src_title_one:"1 título",
+    msg_src_sources:"{n} fuentes · elegida automáticamente: {best}",
+    msg_src_source_one:"1 fuente · elegida automáticamente: {best}",
+    msg_copy_the_pc:"el PC",
+    msg_rest_could_not_stop:"No se pudo detener: {names}. Siguen activos en modo reposo y son la causa probable de un bloqueo.",
+    msg_rest_all_stopped:"Todo el homebrew detenido — es seguro poner en reposo.",
+    msg_set_cfg_unreadable:"No se puede leer config.json junto a PKG-MUTANT-SHOP.exe ({err}), así que la app funciona con sus valores por defecto y no sobrescribirá el archivo. Arréglalo o bórralo y reinicia la app - hasta entonces nada de lo que escribas aquí se puede guardar.",
     msg_needs_pc_tip:"Esto lo hace el PC, y ahora mismo ningún PC responde. Abre la tienda desde la app del PC, o espera a que se encuentre uno.",
     msg_pc_seat_tip:"Esto abre una ventana en el propio PC. Úsalo desde el PC."},
   pt:{q_installing:"a instalar",q_working:"A trabalhar",q_waiting:"à espera de começar",q_failed:"com erro",q_needslook:"precisam de atenção",q_alldone:"Tudo pronto",search:"Pesquisar biblioteca…",all:"Todos",installed:"Instalado",updates:"Atualizações",notinstalled:"Não instalado",
@@ -2788,6 +2848,25 @@ var I18N={
     msg_btn_rescan_short:"Reanalisar",
     msg_q_console_decides_drive:"A PS5 escolhe a unidade",
     msg_conn_companion_lost:"PC companheiro perdido — à procura de um",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Pronto - as instalações podem começar já.",
+    msg_eng_detail_busy:"Uma instalação está a ser entregue à consola neste momento.",
+    msg_eng_detail_no_pldmgr:"O Payload Manager não responde em :{port}, e o nosso motor precisa dele para iniciar cada instalação. Volta a carregá-lo na PS5.",
+    msg_eng_detail_shop_down:"O PKG MUTANT SHOP não responde na PS5. Carrega-o a partir do Payload Manager e volta a abrir este painel.",
+    msg_eng_detail_no_console:"Ainda não há nenhuma PS5 configurada - adiciona o endereço acima.",
+    msg_eng_how_spawn:"Um instalador novo é iniciado em cada instalação e termina quando a consola aceita o pacote. Nada fica a correr, por isso nada pode encravar.",
+    msg_ver_older_than_page:" · mais antiga que esta página",
+    msg_ver_newer_than_page:" · mais recente que esta página",
+    msg_helpers_autostart_on:"Ajudantes no arranque: ligado",
+    msg_helpers_autostart_off:"Ajudantes no arranque: desligado",
+    msg_src_titles:"{n} títulos",
+    msg_src_title_one:"1 título",
+    msg_src_sources:"{n} fontes · escolhida automaticamente: {best}",
+    msg_src_source_one:"1 fonte · escolhida automaticamente: {best}",
+    msg_copy_the_pc:"o PC",
+    msg_rest_could_not_stop:"Não foi possível parar: {names}. Continuam ativos no modo de repouso e são a causa provável de um bloqueio.",
+    msg_rest_all_stopped:"Todo o homebrew parado — é seguro entrar em repouso.",
+    msg_set_cfg_unreadable:"Não é possível ler o config.json ao lado de PKG-MUTANT-SHOP.exe ({err}), por isso a app usa os valores por defeito e não vai substituir o ficheiro. Corrige-o ou apaga-o e reinicia a app - até lá nada do que escreveres aqui pode ser guardado.",
     msg_needs_pc_tip:"Isto é feito pelo PC, e neste momento nenhum PC responde. Abre a loja a partir da app do PC, ou espera que seja encontrado.",
     msg_pc_seat_tip:"Isto abre uma janela no próprio PC. Usa-o a partir do PC."},
   fr:{q_installing:"en installation",q_working:"En cours",q_waiting:"en attente de démarrage",q_failed:"en échec",q_needslook:"à vérifier",q_alldone:"Terminé",search:"Rechercher…",all:"Tous",installed:"Installé",updates:"Mises à jour",notinstalled:"Non installé",
@@ -3255,6 +3334,25 @@ var I18N={
     msg_btn_rescan_short:"Réanalyser",
     msg_q_console_decides_drive:"La PS5 choisit le disque",
     msg_conn_companion_lost:"PC compagnon perdu — recherche en cours",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Prêt - les installations peuvent commencer tout de suite.",
+    msg_eng_detail_busy:"Une installation est en cours de transmission à la console.",
+    msg_eng_detail_no_pldmgr:"Payload Manager ne répond pas sur :{port}, et notre moteur en a besoin pour lancer chaque installation. Rechargez-le sur la PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP ne répond pas sur la PS5. Chargez-le depuis Payload Manager, puis rouvrez ce panneau.",
+    msg_eng_detail_no_console:"Aucune PS5 n'est encore configurée - ajoutez son adresse ci-dessus.",
+    msg_eng_how_spawn:"Un nouvel installateur est lancé à chaque installation et se termine dès que la console a accepté le paquet. Rien ne reste en cours, donc rien ne peut se bloquer.",
+    msg_ver_older_than_page:" · plus ancienne que cette page",
+    msg_ver_newer_than_page:" · plus récente que cette page",
+    msg_helpers_autostart_on:"Démarrage auto des assistants : activé",
+    msg_helpers_autostart_off:"Démarrage auto des assistants : désactivé",
+    msg_src_titles:"{n} titres",
+    msg_src_title_one:"1 titre",
+    msg_src_sources:"{n} sources · choisie automatiquement : {best}",
+    msg_src_source_one:"1 source · choisie automatiquement : {best}",
+    msg_copy_the_pc:"le PC",
+    msg_rest_could_not_stop:"Impossible d'arrêter : {names}. Ils restent actifs en mode repos et sont la cause probable d'un plantage.",
+    msg_rest_all_stopped:"Tout le homebrew est arrêté — mode repos possible en toute sécurité.",
+    msg_set_cfg_unreadable:"Impossible de lire config.json à côté de PKG-MUTANT-SHOP.exe ({err}) : l'application fonctionne avec ses valeurs par défaut et n'écrasera pas le fichier. Corrigez-le ou supprimez-le, puis relancez l'application - d'ici là, rien de ce qui est saisi ici ne peut être enregistré.",
     msg_needs_pc_tip:"C'est le PC qui s'en charge, et aucun PC ne répond pour l'instant. Ouvrez la boutique depuis l'application du PC, ou attendez qu'il soit trouvé.",
     msg_pc_seat_tip:"Ceci ouvre une fenêtre sur le PC lui-même. À utiliser depuis le PC."},
   de:{q_installing:"werden installiert",q_working:"Läuft",q_waiting:"warten auf den Start",q_failed:"fehlgeschlagen",q_needslook:"brauchen einen Blick",q_alldone:"Alles fertig",search:"Bibliothek suchen…",all:"Alle",installed:"Installiert",updates:"Updates",notinstalled:"Nicht installiert",
@@ -3722,6 +3820,25 @@ var I18N={
     msg_btn_rescan_short:"Neu einlesen",
     msg_q_console_decides_drive:"Das Laufwerk bestimmt die PS5",
     msg_conn_companion_lost:"PC-Begleiter verloren — es wird einer gesucht",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Bereit - Installationen können sofort starten.",
+    msg_eng_detail_busy:"Gerade wird eine Installation an die Konsole übergeben.",
+    msg_eng_detail_no_pldmgr:"Payload Manager antwortet nicht auf :{port}, und unsere Engine braucht ihn für jede Installation. Lade ihn auf der PS5 neu.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP antwortet auf der PS5 nicht. Lade es über Payload Manager und öffne dieses Panel erneut.",
+    msg_eng_detail_no_console:"Noch keine PS5 eingerichtet - trage oben ihre Adresse ein.",
+    msg_eng_how_spawn:"Für jede Installation startet ein frischer Installer, der endet, sobald die Konsole das Paket angenommen hat. Nichts bleibt laufen, also kann nichts hängen bleiben.",
+    msg_ver_older_than_page:" · älter als diese Seite",
+    msg_ver_newer_than_page:" · neuer als diese Seite",
+    msg_helpers_autostart_on:"Helfer-Autostart: an",
+    msg_helpers_autostart_off:"Helfer-Autostart: aus",
+    msg_src_titles:"{n} Titel",
+    msg_src_title_one:"1 Titel",
+    msg_src_sources:"{n} Quellen · automatisch gewählt: {best}",
+    msg_src_source_one:"1 Quelle · automatisch gewählt: {best}",
+    msg_copy_the_pc:"der PC",
+    msg_rest_could_not_stop:"Konnte nicht stoppen: {names}. Sie laufen im Ruhemodus weiter und sind die wahrscheinliche Ursache eines Absturzes.",
+    msg_rest_all_stopped:"Alles Homebrew gestoppt — Ruhemodus ist sicher.",
+    msg_set_cfg_unreadable:"config.json neben PKG-MUTANT-SHOP.exe kann nicht gelesen werden ({err}); die App läuft mit Standardwerten und überschreibt die Datei nicht. Repariere oder lösche sie und starte die App neu - bis dahin kann hier nichts gespeichert werden.",
     msg_needs_pc_tip:"Das erledigt der PC, und gerade antwortet keiner. Öffne den Shop aus der PC-App, oder warte, bis einer gefunden ist.",
     msg_pc_seat_tip:"Das öffnet ein Fenster auf dem PC selbst. Vom PC aus benutzen."},
   ja:{q_installing:"インストール中",q_working:"処理中",q_waiting:"開始待ち",q_failed:"失敗",q_needslook:"要確認",q_alldone:"すべて完了",search:"ライブラリを検索…",all:"すべて",installed:"インストール済み",updates:"アップデート",notinstalled:"未インストール",
@@ -4189,6 +4306,25 @@ var I18N={
     msg_btn_rescan_short:"再スキャン",
     msg_q_console_decides_drive:"保存先は PS5 が決めます",
     msg_conn_companion_lost:"PC コンパニオンを見失いました — 探しています",
+    ui_cheats_drop_sep:"、",
+    msg_eng_detail_ready:"準備完了 - すぐにインストールを開始できます。",
+    msg_eng_detail_busy:"現在、インストールをコンソールに引き渡しています。",
+    msg_eng_detail_no_pldmgr:"Payload Manager が :{port} で応答しません。エンジンは各インストールの開始に必要です。PS5 で再読み込みしてください。",
+    msg_eng_detail_shop_down:"PS5 上の PKG MUTANT SHOP が応答しません。Payload Manager から読み込み、このパネルを開き直してください。",
+    msg_eng_detail_no_console:"PS5 がまだ設定されていません - 上にアドレスを入力してください。",
+    msg_eng_how_spawn:"インストールごとに新しいインストーラーが起動し、コンソールがパッケージを受け付けると終了します。何も常駐しないので、詰まることはありません。",
+    msg_ver_older_than_page:" · このページより古い",
+    msg_ver_newer_than_page:" · このページより新しい",
+    msg_helpers_autostart_on:"ヘルパー自動起動: オン",
+    msg_helpers_autostart_off:"ヘルパー自動起動: オフ",
+    msg_src_titles:"{n} タイトル",
+    msg_src_title_one:"1 タイトル",
+    msg_src_sources:"{n} ソース · 自動選択: {best}",
+    msg_src_source_one:"1 ソース · 自動選択: {best}",
+    msg_copy_the_pc:"PC",
+    msg_rest_could_not_stop:"停止できませんでした: {names}。レストモード中も動作し続け、クラッシュの原因になる可能性があります。",
+    msg_rest_all_stopped:"すべてのホームブリューを停止しました — レストモードにしても安全です。",
+    msg_set_cfg_unreadable:"PKG-MUTANT-SHOP.exe の隣の config.json を読み取れません ({err})。アプリは既定値で動作し、このファイルを上書きしません。修正または削除してからアプリを再起動してください - それまでここで入力した内容は保存できません。",
     msg_needs_pc_tip:"これは PC が行う操作で、いま応答している PC がありません。PC アプリからショップを開くか、PC が見つかるまでお待ちください。",
     msg_pc_seat_tip:"PC 本体にウィンドウを開きます。PC から使ってください。"},
   ar:{q_installing:"قيد التثبيت",q_working:"جارٍ",q_waiting:"بانتظار البدء",q_failed:"فشل",q_needslook:"تحتاج مراجعة",q_alldone:"اكتمل الكل",search:"ابحث في المكتبة…",all:"الكل",installed:"مثبَّت",updates:"تحديثات",notinstalled:"غير مثبَّت",
@@ -4656,6 +4792,25 @@ var I18N={
     msg_btn_rescan_short:"أعد الفحص",
     msg_q_console_decides_drive:"جهاز PS5 يحدد محرك الأقراص",
     msg_conn_companion_lost:"فُقد رفيق الحاسوب — جارٍ البحث عن واحد",
+    ui_cheats_drop_sep:"، ",
+    msg_eng_detail_ready:"جاهز - يمكن بدء التثبيت فوراً.",
+    msg_eng_detail_busy:"يجري الآن تسليم عملية تثبيت إلى الجهاز.",
+    msg_eng_detail_no_pldmgr:"Payload Manager لا يستجيب على :{port}، ومحركنا يحتاجه لبدء كل تثبيت. أعد تحميله على PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP لا يستجيب على PS5. حمّله من Payload Manager ثم أعد فتح هذه اللوحة.",
+    msg_eng_detail_no_console:"لم يتم إعداد أي PS5 بعد - أضف عنوانه أعلاه.",
+    msg_eng_how_spawn:"يبدأ مثبّت جديد مع كل عملية تثبيت وينتهي عندما يقبل الجهاز الحزمة. لا يبقى شيء قيد التشغيل، لذا لا شيء يمكن أن يتعطّل.",
+    msg_ver_older_than_page:" · أقدم من هذه الصفحة",
+    msg_ver_newer_than_page:" · أحدث من هذه الصفحة",
+    msg_helpers_autostart_on:"التشغيل التلقائي للمساعدات: مفعّل",
+    msg_helpers_autostart_off:"التشغيل التلقائي للمساعدات: معطّل",
+    msg_src_titles:"{n} عنوان",
+    msg_src_title_one:"1 عنوان",
+    msg_src_sources:"{n} مصادر · اختيار تلقائي: {best}",
+    msg_src_source_one:"مصدر واحد · اختيار تلقائي: {best}",
+    msg_copy_the_pc:"الحاسوب",
+    msg_rest_could_not_stop:"تعذّر الإيقاف: {names}. تبقى تعمل في وضع الراحة وهي السبب المرجّح للانهيار.",
+    msg_rest_all_stopped:"تم إيقاف كل الهومبرو — يمكن وضع الجهاز في وضع الراحة بأمان.",
+    msg_set_cfg_unreadable:"تعذّر قراءة config.json بجوار PKG-MUTANT-SHOP.exe ({err})، لذا يعمل التطبيق بإعداداته الافتراضية ولن يكتب فوق الملف. أصلحه أو احذفه ثم أعد تشغيل التطبيق - حتى ذلك الحين لا يمكن حفظ أي شيء تكتبه هنا.",
     msg_needs_pc_tip:"هذا يقوم به الحاسوب، ولا يوجد حاسوب يستجيب الآن. افتح المتجر من تطبيق الحاسوب، أو انتظر حتى يُعثر على واحد.",
     msg_pc_seat_tip:"هذا يفتح نافذة على الحاسوب نفسه. استخدمه من الحاسوب."}
 ,
@@ -4899,6 +5054,66 @@ var I18N={
     gp_dest_not_detected:"  （未检测到）",
     msg_q_console_decides_drive:"由 PS5 决定存储位置",
     msg_conn_companion_lost:"PC 伴侣已失联 — 正在寻找",
+    msg_copy_this_pc:"此电脑",
+    msg_dev_this_pc_fallback:"此电脑",
+    msg_dev_this_pc_label:"（此电脑）",
+    msg_dev_titles_suffix:" 个游戏",
+    msg_dev_no_ps5:"尚未设置 PS5",
+    ui_btn_find_pcs:"查找电脑",
+    msg_dev_no_peers:"尚未找到其他电脑。在本网络的另一台电脑上运行 PKG MUTANT SHOP，然后按“查找电脑”。",
+    msg_eng_asking_console:"正在询问主机…",
+    msg_eng_cannot_tell:"无法判断",
+    msg_eng_checking:"正在检查…",
+    msg_eng_could_not_ask:"无法向这台电脑询问主机状态。PKG MUTANT SHOP 是否仍在这台电脑上运行？",
+    msg_eng_demo:"演示",
+    msg_eng_not_answering:"无响应",
+    msg_eng_pld_answering:" · 有响应",
+    msg_eng_pld_no_answer:" · 无响应",
+    msg_eng_state_busy:"正在交接一个",
+    msg_eng_state_no:"否",
+    msg_eng_state_yes:"是",
+    msg_helpers_delay_option:"启动辅助程序：延迟 ",
+    msg_set_connected_to:"已连接到 ",
+    msg_set_consoles_none:"未配置",
+    msg_set_not_answering:"无响应",
+    msg_set_rest_note:"自制程序有效载荷不属于主机自身的睡眠与唤醒流程，因此主机半睡时它们仍可能在运行。先停止它们，是避免唤醒后崩溃的习惯。",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · 内置",
+    msg_svc_cannot_tell_from_pc:" · 无法从这台电脑判断",
+    msg_svc_not_available:"不可用",
+    msg_svc_not_reachable:"无法访问",
+    msg_svc_not_running:"未运行",
+    msg_svc_port_prefix:"端口 ",
+    msg_svc_running_suffix:" · 运行中",
+    ui_advanced_hint:"用于排查某些功能为何没有发生。使用应用不需要这里的任何内容。",
+    ui_back:"返回",
+    ui_btn_clear_state:"清除状态",
+    ui_chip_inbox:"收件箱",
+    ui_cheats_drop_pre:"将 ",
+    ui_cheats_drop_or:" 或 ",
+    ui_cheats_drop_mid:" 文件放入收件箱并按“重新扫描”。它们按内容归类，文件名无关紧要。插入的 U 盘上的 ",
+    ui_cheats_drop_end:" 文件夹也会被识别。",
+    ui_cheats_drop_sep:"、",
+    msg_eng_detail_ready:"就绪 - 可以立即开始安装。",
+    msg_eng_detail_busy:"正在将一个安装交给主机。",
+    msg_eng_detail_no_pldmgr:"Payload Manager 在 :{port} 上没有响应，而每次安装都需要它来启动。请在 PS5 上重新加载它。",
+    msg_eng_detail_shop_down:"PS5 上的 PKG MUTANT SHOP 没有响应。请从 Payload Manager 加载它，然后重新打开此面板。",
+    msg_eng_detail_no_console:"尚未设置 PS5 - 请在上方填写它的地址。",
+    msg_eng_how_spawn:"每次安装都会启动一个全新的安装器，主机接受软件包后它就退出。没有任何东西常驻运行，因此不会卡住。",
+    msg_ver_older_than_page:" · 比此页面旧",
+    msg_ver_newer_than_page:" · 比此页面新",
+    msg_helpers_autostart_on:"辅助程序自动启动：开",
+    msg_helpers_autostart_off:"辅助程序自动启动：关",
+    msg_src_titles:"{n} 个游戏",
+    msg_src_title_one:"1 个游戏",
+    msg_src_sources:"{n} 个来源 · 自动选择：{best}",
+    msg_src_source_one:"1 个来源 · 自动选择：{best}",
+    msg_copy_the_pc:"电脑",
+    msg_rest_could_not_stop:"无法停止：{names}。它们会在休眠模式中继续运行，很可能导致崩溃。",
+    msg_rest_all_stopped:"所有自制程序已停止 — 可以安全进入休眠。",
+    msg_set_cfg_unreadable:"无法读取 PKG-MUTANT-SHOP.exe 旁边的 config.json（{err}），应用正以默认值运行且不会覆盖该文件。请修复或删除它，然后重启应用 - 在此之前这里输入的内容都无法保存。",
+    msg_btn_looking:"正在查找…",
+    msg_btn_scanning:"正在扫描…",
     msg_needs_pc_tip:"这需要由 PC 来完成，但现在没有 PC 应答。请从 PC 应用打开商店，或等待找到 PC。",
     msg_pc_seat_tip:"这会在 PC 本机上打开一个窗口。请在 PC 上使用。",
     gp_addons_update_many:"{n} 个更新",
@@ -5191,6 +5406,66 @@ var I18N={
     gp_dest_not_detected:"  (पता नहीं चला)",
     msg_q_console_decides_drive:"ड्राइव PS5 तय करता है",
     msg_conn_companion_lost:"PC साथी से संपर्क टूटा — खोज जारी",
+    msg_copy_this_pc:"यह PC",
+    msg_dev_this_pc_fallback:"यह PC",
+    msg_dev_this_pc_label:"(यह PC)",
+    msg_dev_titles_suffix:" टाइटल",
+    msg_dev_no_ps5:"अभी कोई PS5 सेट नहीं",
+    ui_btn_find_pcs:"PC खोजें",
+    msg_dev_no_peers:"अभी कोई और PC नहीं मिला। इस नेटवर्क के किसी दूसरे कंप्यूटर पर PKG MUTANT SHOP चलाएँ और “PC खोजें” दबाएँ।",
+    msg_eng_asking_console:"कंसोल से पूछा जा रहा है…",
+    msg_eng_cannot_tell:"पता नहीं चल सका",
+    msg_eng_checking:"जाँच हो रही है…",
+    msg_eng_could_not_ask:"इस PC से कंसोल के बारे में पूछा नहीं जा सका। क्या PKG MUTANT SHOP अभी भी उस पर चल रहा है?",
+    msg_eng_demo:"डेमो",
+    msg_eng_not_answering:"जवाब नहीं",
+    msg_eng_pld_answering:" · जवाब दे रहा है",
+    msg_eng_pld_no_answer:" · कोई जवाब नहीं",
+    msg_eng_state_busy:"अभी एक सौंपा जा रहा है",
+    msg_eng_state_no:"नहीं",
+    msg_eng_state_yes:"हाँ",
+    msg_helpers_delay_option:"हेल्पर शुरू करें: ",
+    msg_set_connected_to:"इससे कनेक्ट: ",
+    msg_set_consoles_none:"कोई कॉन्फ़िगर नहीं",
+    msg_set_not_answering:"जवाब नहीं दे रहा",
+    msg_set_rest_note:"होमब्रू पेलोड कंसोल के अपने स्लीप और वेक चक्र का हिस्सा नहीं हैं, इसलिए कंसोल के आधे सोए होने पर भी वे चलते रह सकते हैं। पहले उन्हें रोकना ही वह आदत है जो जागने पर क्रैश से बचाती है।",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · बिल्ट-इन",
+    msg_svc_cannot_tell_from_pc:" · इस PC से पता नहीं चल सकता",
+    msg_svc_not_available:"उपलब्ध नहीं",
+    msg_svc_not_reachable:"पहुँच नहीं",
+    msg_svc_not_running:"चल नहीं रहा",
+    msg_svc_port_prefix:"पोर्ट ",
+    msg_svc_running_suffix:" · चल रहा है",
+    ui_advanced_hint:"यह पता लगाने के लिए कि कुछ क्यों नहीं हो रहा। ऐप इस्तेमाल करने के लिए यहाँ कुछ भी ज़रूरी नहीं है।",
+    ui_back:"वापस",
+    ui_btn_clear_state:"स्थिति साफ़ करें",
+    ui_chip_inbox:"इनबॉक्स",
+    ui_cheats_drop_pre:"",
+    ui_cheats_drop_or:" या ",
+    ui_cheats_drop_mid:" फ़ाइलें इनबॉक्स में डालें और “रीस्कैन” दबाएँ। इन्हें अंदर की सामग्री से छाँटा जाता है, इसलिए फ़ाइल का नाम मायने नहीं रखता। लगे हुए USB स्टिक पर ",
+    ui_cheats_drop_end:" फ़ोल्डर भी उठा लिया जाता है।",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"तैयार - इंस्टॉल तुरंत शुरू हो सकते हैं।",
+    msg_eng_detail_busy:"अभी एक इंस्टॉल कंसोल को सौंपा जा रहा है।",
+    msg_eng_detail_no_pldmgr:"Payload Manager :{port} पर जवाब नहीं दे रहा, और हमारे इंजन को हर इंस्टॉल शुरू करने के लिए इसकी ज़रूरत है। इसे PS5 पर फिर से लोड करें।",
+    msg_eng_detail_shop_down:"PS5 पर PKG MUTANT SHOP जवाब नहीं दे रहा। इसे Payload Manager से लोड करें, फिर यह पैनल दोबारा खोलें।",
+    msg_eng_detail_no_console:"अभी कोई PS5 सेट नहीं है - ऊपर उसका पता जोड़ें।",
+    msg_eng_how_spawn:"हर इंस्टॉल के लिए एक नया इंस्टॉलर शुरू होता है और कंसोल के पैकेज स्वीकार करते ही बंद हो जाता है। कुछ भी चलता नहीं रहता, इसलिए कुछ अटक नहीं सकता।",
+    msg_ver_older_than_page:" · इस पेज से पुराना",
+    msg_ver_newer_than_page:" · इस पेज से नया",
+    msg_helpers_autostart_on:"हेल्पर ऑटो-स्टार्ट: चालू",
+    msg_helpers_autostart_off:"हेल्पर ऑटो-स्टार्ट: बंद",
+    msg_src_titles:"{n} टाइटल",
+    msg_src_title_one:"1 टाइटल",
+    msg_src_sources:"{n} स्रोत · अपने आप चुना: {best}",
+    msg_src_source_one:"1 स्रोत · अपने आप चुना: {best}",
+    msg_copy_the_pc:"PC",
+    msg_rest_could_not_stop:"रोका नहीं जा सका: {names}। ये रेस्ट मोड में भी चलते रहते हैं और क्रैश की संभावित वजह हैं।",
+    msg_rest_all_stopped:"सारा होमब्रू रुक गया — रेस्ट मोड सुरक्षित है।",
+    msg_set_cfg_unreadable:"PKG-MUTANT-SHOP.exe के बगल वाली config.json पढ़ी नहीं जा सकी ({err}), इसलिए ऐप डिफ़ॉल्ट पर चल रहा है और फ़ाइल को ओवरराइट नहीं करेगा। इसे ठीक करें या हटाएँ, फिर ऐप दोबारा शुरू करें - तब तक यहाँ लिखा कुछ भी सेव नहीं होगा।",
+    msg_btn_looking:"खोज रहा है…",
+    msg_btn_scanning:"स्कैन हो रहा है…",
     msg_needs_pc_tip:"यह काम PC करता है, और अभी कोई PC जवाब नहीं दे रहा। शॉप को PC ऐप से खोलें, या PC मिलने का इंतज़ार करें।",
     msg_pc_seat_tip:"यह PC पर ही एक विंडो खोलता है। इसे PC से इस्तेमाल करें।",
     gp_addons_update_many:"{n} अपडेट",
@@ -5483,6 +5758,66 @@ var I18N={
     gp_dest_not_detected:"  (не обнаружен)",
     msg_q_console_decides_drive:"Диск выбирает PS5",
     msg_conn_companion_lost:"Связь с ПК потеряна — идёт поиск",
+    msg_copy_this_pc:"этот ПК",
+    msg_dev_this_pc_fallback:"этот ПК",
+    msg_dev_this_pc_label:"(этот ПК)",
+    msg_dev_titles_suffix:" игр",
+    msg_dev_no_ps5:"PS5 ещё не настроена",
+    ui_btn_find_pcs:"Найти ПК",
+    msg_dev_no_peers:"Других ПК пока не найдено. Запустите PKG MUTANT SHOP на другом компьютере в этой сети и нажмите «Найти ПК».",
+    msg_eng_asking_console:"Запрос к консоли…",
+    msg_eng_cannot_tell:"неизвестно",
+    msg_eng_checking:"проверка…",
+    msg_eng_could_not_ask:"Не удалось спросить этот ПК о консоли. PKG MUTANT SHOP всё ещё запущен на нём?",
+    msg_eng_demo:"демо",
+    msg_eng_not_answering:"не отвечает",
+    msg_eng_pld_answering:" · отвечает",
+    msg_eng_pld_no_answer:" · нет ответа",
+    msg_eng_state_busy:"сейчас передаётся установка",
+    msg_eng_state_no:"нет",
+    msg_eng_state_yes:"да",
+    msg_helpers_delay_option:"Запуск помощников: через ",
+    msg_set_connected_to:"Подключено к ",
+    msg_set_consoles_none:"не настроено",
+    msg_set_not_answering:"Не отвечает",
+    msg_set_rest_note:"Homebrew-пейлоады не входят в собственный цикл сна и пробуждения консоли, поэтому могут работать, пока она наполовину спит. Останавливать их заранее - привычка, которая уберегает от сбоя при пробуждении.",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · встроено",
+    msg_svc_cannot_tell_from_pc:" · с этого ПК не определить",
+    msg_svc_not_available:"недоступно",
+    msg_svc_not_reachable:"недоступен",
+    msg_svc_not_running:"не запущено",
+    msg_svc_port_prefix:"порт ",
+    msg_svc_running_suffix:" · работает",
+    ui_advanced_hint:"Чтобы разобраться, почему что-то не происходит. Для работы с приложением здесь ничего не требуется.",
+    ui_back:"Назад",
+    ui_btn_clear_state:"Сбросить состояние",
+    ui_chip_inbox:"Входящие",
+    ui_cheats_drop_pre:"Положите ",
+    ui_cheats_drop_or:" или ",
+    ui_cheats_drop_mid:" файлы в папку «Входящие» и нажмите «Пересканировать». Они сортируются по содержимому, поэтому имя файла не важно. Папка ",
+    ui_cheats_drop_end:" на подключённой USB-флешке тоже подхватывается.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Готово - установку можно начинать сразу.",
+    msg_eng_detail_busy:"Прямо сейчас установка передаётся консоли.",
+    msg_eng_detail_no_pldmgr:"Payload Manager не отвечает на :{port}, а нашему движку он нужен для запуска каждой установки. Перезагрузите его на PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP не отвечает на PS5. Загрузите его через Payload Manager и снова откройте эту панель.",
+    msg_eng_detail_no_console:"PS5 ещё не настроена - укажите её адрес выше.",
+    msg_eng_how_spawn:"Для каждой установки запускается новый установщик, который завершается, как только консоль приняла пакет. Ничего не остаётся запущенным, поэтому ничего не может зависнуть.",
+    msg_ver_older_than_page:" · старее этой страницы",
+    msg_ver_newer_than_page:" · новее этой страницы",
+    msg_helpers_autostart_on:"Автозапуск помощников: вкл",
+    msg_helpers_autostart_off:"Автозапуск помощников: выкл",
+    msg_src_titles:"Игр: {n}",
+    msg_src_title_one:"1 игра",
+    msg_src_sources:"Источников: {n} · выбран автоматически: {best}",
+    msg_src_source_one:"1 источник · выбран автоматически: {best}",
+    msg_copy_the_pc:"ПК",
+    msg_rest_could_not_stop:"Не удалось остановить: {names}. Они продолжают работать в режиме покоя и, скорее всего, вызовут сбой.",
+    msg_rest_all_stopped:"Весь homebrew остановлен — режим покоя безопасен.",
+    msg_set_cfg_unreadable:"Не удаётся прочитать config.json рядом с PKG-MUTANT-SHOP.exe ({err}), поэтому приложение работает с настройками по умолчанию и не перезапишет файл. Исправьте или удалите его и перезапустите приложение - до этого ничего введённое здесь сохранить нельзя.",
+    msg_btn_looking:"Поиск…",
+    msg_btn_scanning:"Сканирование…",
     msg_needs_pc_tip:"Это делает ПК, а сейчас ни один ПК не отвечает. Откройте магазин из приложения на ПК или дождитесь, пока он найдётся.",
     msg_pc_seat_tip:"Это открывает окно на самом ПК. Используйте с ПК.",
     gp_addons_update_many:"{n} обновлений",
@@ -5775,6 +6110,66 @@ var I18N={
     gp_dest_not_detected:"  (non rilevato)",
     msg_q_console_decides_drive:"Il disco lo sceglie la PS5",
     msg_conn_companion_lost:"PC companion perso — lo sto cercando",
+    msg_copy_this_pc:"questo PC",
+    msg_dev_this_pc_fallback:"questo PC",
+    msg_dev_this_pc_label:"(questo PC)",
+    msg_dev_titles_suffix:" titoli",
+    msg_dev_no_ps5:"nessuna PS5 configurata",
+    ui_btn_find_pcs:"Trova PC",
+    msg_dev_no_peers:"Nessun altro PC trovato per ora. Avvia PKG MUTANT SHOP su un altro computer di questa rete e premi Trova PC.",
+    msg_eng_asking_console:"Chiedo alla console…",
+    msg_eng_cannot_tell:"impossibile dirlo",
+    msg_eng_checking:"verifica…",
+    msg_eng_could_not_ask:"Non è stato possibile chiedere a questo PC della console. PKG MUTANT SHOP è ancora in esecuzione su di esso?",
+    msg_eng_demo:"demo",
+    msg_eng_not_answering:"non risponde",
+    msg_eng_pld_answering:" · risponde",
+    msg_eng_pld_no_answer:" · nessuna risposta",
+    msg_eng_state_busy:"ne sta consegnando una",
+    msg_eng_state_no:"no",
+    msg_eng_state_yes:"sì",
+    msg_helpers_delay_option:"Avvia helper: dopo ",
+    msg_set_connected_to:"Connesso a ",
+    msg_set_consoles_none:"nessuna configurata",
+    msg_set_not_answering:"Non risponde",
+    msg_set_rest_note:"I payload homebrew non fanno parte del ciclo di riposo e risveglio della console, quindi possono restare attivi mentre è mezza addormentata. Fermarli prima è l'abitudine che evita un blocco al risveglio.",
+    msg_set_the_ps5:"la PS5",
+    msg_svc_built_in_suffix:" · integrato",
+    msg_svc_cannot_tell_from_pc:" · non rilevabile da questo PC",
+    msg_svc_not_available:"non disponibile",
+    msg_svc_not_reachable:"non raggiungibile",
+    msg_svc_not_running:"non in esecuzione",
+    msg_svc_port_prefix:"porta ",
+    msg_svc_running_suffix:" · in esecuzione",
+    ui_advanced_hint:"Per capire perché qualcosa non accade. Nulla di qui serve per usare l'app.",
+    ui_back:"Indietro",
+    ui_btn_clear_state:"Azzera stato",
+    ui_chip_inbox:"In arrivo",
+    ui_cheats_drop_pre:"Trascina i file ",
+    ui_cheats_drop_or:" o ",
+    ui_cheats_drop_mid:" nella cartella In arrivo e premi Riscansiona. Vengono ordinati in base al contenuto, quindi il nome del file non conta. Anche una cartella ",
+    ui_cheats_drop_end:" su una chiavetta USB collegata viene letta anch'essa.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Pronto - le installazioni possono partire subito.",
+    msg_eng_detail_busy:"Un'installazione viene consegnata alla console proprio ora.",
+    msg_eng_detail_no_pldmgr:"Payload Manager non risponde su :{port}, e il nostro motore ne ha bisogno per avviare ogni installazione. Ricaricalo sulla PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP non risponde sulla PS5. Caricalo da Payload Manager, poi riapri questo pannello.",
+    msg_eng_detail_no_console:"Nessuna PS5 configurata - aggiungi il suo indirizzo qui sopra.",
+    msg_eng_how_spawn:"Per ogni installazione parte un installer nuovo, che termina quando la console ha accettato il pacchetto. Nulla resta in esecuzione, quindi nulla può incepparsi.",
+    msg_ver_older_than_page:" · più vecchia di questa pagina",
+    msg_ver_newer_than_page:" · più recente di questa pagina",
+    msg_helpers_autostart_on:"Avvio automatico helper: attivo",
+    msg_helpers_autostart_off:"Avvio automatico helper: disattivo",
+    msg_src_titles:"{n} titoli",
+    msg_src_title_one:"1 titolo",
+    msg_src_sources:"{n} sorgenti · scelta automaticamente: {best}",
+    msg_src_source_one:"1 sorgente · scelta automaticamente: {best}",
+    msg_copy_the_pc:"il PC",
+    msg_rest_could_not_stop:"Impossibile fermare: {names}. Restano attivi in modalità riposo e sono la causa probabile di un blocco.",
+    msg_rest_all_stopped:"Tutto l'homebrew è fermo — la modalità riposo è sicura.",
+    msg_set_cfg_unreadable:"Impossibile leggere config.json accanto a PKG-MUTANT-SHOP.exe ({err}): l'app usa i valori predefiniti e non sovrascriverà il file. Correggilo o eliminalo, poi riavvia l'app - fino ad allora nulla di quanto scritto qui può essere salvato.",
+    msg_btn_looking:"Ricerca…",
+    msg_btn_scanning:"Scansione…",
     msg_needs_pc_tip:"Questo lo fa il PC, e al momento nessun PC risponde. Apri lo shop dall'app sul PC, o aspetta che venga trovato.",
     msg_pc_seat_tip:"Questo apre una finestra sul PC stesso. Usalo dal PC.",
     gp_addons_update_many:"{n} aggiornamenti",
@@ -6067,6 +6462,66 @@ var I18N={
     gp_dest_not_detected:"  (감지되지 않음)",
     msg_q_console_decides_drive:"드라이브는 PS5가 정합니다",
     msg_conn_companion_lost:"PC 컴패니언 연결 끊김 — 찾는 중",
+    msg_copy_this_pc:"이 PC",
+    msg_dev_this_pc_fallback:"이 PC",
+    msg_dev_this_pc_label:"(이 PC)",
+    msg_dev_titles_suffix:"개 타이틀",
+    msg_dev_no_ps5:"설정된 PS5 없음",
+    ui_btn_find_pcs:"PC 찾기",
+    msg_dev_no_peers:"아직 다른 PC를 찾지 못했습니다. 이 네트워크의 다른 컴퓨터에서 PKG MUTANT SHOP을 실행하고 “PC 찾기”를 누르세요.",
+    msg_eng_asking_console:"콘솔에 확인 중…",
+    msg_eng_cannot_tell:"알 수 없음",
+    msg_eng_checking:"확인 중…",
+    msg_eng_could_not_ask:"이 PC에 콘솔 상태를 물어볼 수 없었습니다. PKG MUTANT SHOP이 아직 그 PC에서 실행 중인가요?",
+    msg_eng_demo:"데모",
+    msg_eng_not_answering:"응답 없음",
+    msg_eng_pld_answering:" · 응답 중",
+    msg_eng_pld_no_answer:" · 응답 없음",
+    msg_eng_state_busy:"지금 하나 넘기는 중",
+    msg_eng_state_no:"아니오",
+    msg_eng_state_yes:"예",
+    msg_helpers_delay_option:"도우미 시작: ",
+    msg_set_connected_to:"연결됨: ",
+    msg_set_consoles_none:"설정된 것 없음",
+    msg_set_not_answering:"응답 없음",
+    msg_set_rest_note:"홈브루 페이로드는 콘솔 자체의 절전·깨우기 과정에 포함되지 않아서, 콘솔이 반쯤 잠든 상태에서도 계속 실행될 수 있습니다. 먼저 중지하는 습관이 깨어날 때의 충돌을 막아 줍니다.",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · 내장",
+    msg_svc_cannot_tell_from_pc:" · 이 PC에서는 알 수 없음",
+    msg_svc_not_available:"사용 불가",
+    msg_svc_not_reachable:"연결 불가",
+    msg_svc_not_running:"실행 중 아님",
+    msg_svc_port_prefix:"포트 ",
+    msg_svc_running_suffix:" · 실행 중",
+    ui_advanced_hint:"무언가가 왜 되지 않는지 알아볼 때 쓰는 항목입니다. 앱을 쓰는 데는 여기 있는 것이 필요 없습니다.",
+    ui_back:"뒤로",
+    ui_btn_clear_state:"상태 지우기",
+    ui_chip_inbox:"받은 편지함",
+    ui_cheats_drop_pre:"",
+    ui_cheats_drop_or:" 또는 ",
+    ui_cheats_drop_mid:" 파일을 받은 편지함에 넣고 “다시 검색”을 누르세요. 내용에 따라 분류되므로 파일 이름은 상관없습니다. 꽂아 둔 USB 메모리의 ",
+    ui_cheats_drop_end:" 폴더도 함께 인식됩니다.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"준비됨 - 바로 설치를 시작할 수 있습니다.",
+    msg_eng_detail_busy:"지금 설치 하나를 콘솔에 넘기는 중입니다.",
+    msg_eng_detail_no_pldmgr:"Payload Manager가 :{port}에서 응답하지 않습니다. 엔진은 각 설치를 시작할 때 이것이 필요합니다. PS5에서 다시 불러오세요.",
+    msg_eng_detail_shop_down:"PS5에서 PKG MUTANT SHOP이 응답하지 않습니다. Payload Manager에서 불러온 뒤 이 패널을 다시 여세요.",
+    msg_eng_detail_no_console:"아직 설정된 PS5가 없습니다 - 위에 주소를 추가하세요.",
+    msg_eng_how_spawn:"설치할 때마다 새 설치 프로그램이 시작되고, 콘솔이 패키지를 받아들이면 종료됩니다. 아무것도 계속 실행되지 않으므로 멈출 것도 없습니다.",
+    msg_ver_older_than_page:" · 이 페이지보다 오래됨",
+    msg_ver_newer_than_page:" · 이 페이지보다 최신",
+    msg_helpers_autostart_on:"도우미 자동 시작: 켜짐",
+    msg_helpers_autostart_off:"도우미 자동 시작: 꺼짐",
+    msg_src_titles:"타이틀 {n}개",
+    msg_src_title_one:"타이틀 1개",
+    msg_src_sources:"소스 {n}개 · 자동 선택: {best}",
+    msg_src_source_one:"소스 1개 · 자동 선택: {best}",
+    msg_copy_the_pc:"PC",
+    msg_rest_could_not_stop:"중지하지 못함: {names}. 휴식 모드에서도 계속 실행되어 충돌의 원인이 될 수 있습니다.",
+    msg_rest_all_stopped:"모든 홈브루가 중지됨 — 휴식 모드로 전환해도 안전합니다.",
+    msg_set_cfg_unreadable:"PKG-MUTANT-SHOP.exe 옆의 config.json을 읽을 수 없습니다 ({err}). 앱은 기본값으로 실행되며 파일을 덮어쓰지 않습니다. 파일을 고치거나 삭제한 뒤 앱을 다시 시작하세요 - 그 전까지는 여기에 입력한 내용을 저장할 수 없습니다.",
+    msg_btn_looking:"찾는 중…",
+    msg_btn_scanning:"검사 중…",
     msg_needs_pc_tip:"이 작업은 PC가 하는데 지금 응답하는 PC가 없습니다. PC 앱에서 상점을 열거나, PC를 찾을 때까지 기다리세요.",
     msg_pc_seat_tip:"PC 자체에 창을 엽니다. PC에서 사용하세요.",
     gp_addons_update_many:"업데이트 {n}개",
@@ -6359,6 +6814,66 @@ var I18N={
     gp_dest_not_detected:"  (algılanmadı)",
     msg_q_console_decides_drive:"Sürücüye PS5 karar verir",
     msg_conn_companion_lost:"PC yardımcısı kayboldu — aranıyor",
+    msg_copy_this_pc:"bu PC",
+    msg_dev_this_pc_fallback:"bu PC",
+    msg_dev_this_pc_label:"(bu PC)",
+    msg_dev_titles_suffix:" oyun",
+    msg_dev_no_ps5:"henüz PS5 ayarlanmadı",
+    ui_btn_find_pcs:"PC Bul",
+    msg_dev_no_peers:"Henüz başka PC bulunamadı. Bu ağdaki başka bir bilgisayarda PKG MUTANT SHOP'u çalıştırın ve PC Bul'a basın.",
+    msg_eng_asking_console:"Konsola soruluyor…",
+    msg_eng_cannot_tell:"bilinmiyor",
+    msg_eng_checking:"kontrol ediliyor…",
+    msg_eng_could_not_ask:"Bu PC'ye konsol hakkında soru sorulamadı. PKG MUTANT SHOP hâlâ üzerinde çalışıyor mu?",
+    msg_eng_demo:"demo",
+    msg_eng_not_answering:"yanıt vermiyor",
+    msg_eng_pld_answering:" · yanıt veriyor",
+    msg_eng_pld_no_answer:" · yanıt yok",
+    msg_eng_state_busy:"şu anda biri aktarılıyor",
+    msg_eng_state_no:"hayır",
+    msg_eng_state_yes:"evet",
+    msg_helpers_delay_option:"Yardımcıları başlat: ",
+    msg_set_connected_to:"Bağlı: ",
+    msg_set_consoles_none:"yapılandırılmamış",
+    msg_set_not_answering:"Yanıt vermiyor",
+    msg_set_rest_note:"Homebrew payload'ları konsolun kendi uyku ve uyanma döngüsünün parçası değildir; bu yüzden konsol yarı uykudayken çalışmaya devam edebilirler. Önce onları durdurmak, uyanışta çökmeyi önleyen alışkanlıktır.",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · yerleşik",
+    msg_svc_cannot_tell_from_pc:" · bu PC'den anlaşılamıyor",
+    msg_svc_not_available:"kullanılamıyor",
+    msg_svc_not_reachable:"erişilemiyor",
+    msg_svc_not_running:"çalışmıyor",
+    msg_svc_port_prefix:"port ",
+    msg_svc_running_suffix:" · çalışıyor",
+    ui_advanced_hint:"Bir şeyin neden olmadığını anlamak için. Uygulamayı kullanmak için buradaki hiçbir şey gerekli değildir.",
+    ui_back:"Geri",
+    ui_btn_clear_state:"Durumu temizle",
+    ui_chip_inbox:"Gelen kutusu",
+    ui_cheats_drop_pre:"",
+    ui_cheats_drop_or:" veya ",
+    ui_cheats_drop_mid:" dosyalarını Gelen kutusu klasörüne bırakıp Yeniden tara'a basın. İçeriklerine göre sıralanırlar, dolayısıyla dosya adı önemli değildir. Takılı bir USB bellekteki ",
+    ui_cheats_drop_end:" klasörü de algılanır.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Hazır - kurulumlar hemen başlayabilir.",
+    msg_eng_detail_busy:"Şu anda bir kurulum konsola aktarılıyor.",
+    msg_eng_detail_no_pldmgr:"Payload Manager :{port} üzerinde yanıt vermiyor ve motorumuzun her kurulumu başlatmak için ona ihtiyacı var. PS5'te yeniden yükleyin.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP PS5'te yanıt vermiyor. Payload Manager'dan yükleyin, sonra bu paneli yeniden açın.",
+    msg_eng_detail_no_console:"Henüz bir PS5 ayarlanmadı - adresini yukarıya ekleyin.",
+    msg_eng_how_spawn:"Her kurulum için yeni bir yükleyici başlatılır ve konsol paketi kabul ettiğinde kapanır. Hiçbir şey çalışır durumda kalmaz, bu yüzden hiçbir şey takılamaz.",
+    msg_ver_older_than_page:" · bu sayfadan eski",
+    msg_ver_newer_than_page:" · bu sayfadan yeni",
+    msg_helpers_autostart_on:"Yardımcıları otomatik başlat: açık",
+    msg_helpers_autostart_off:"Yardımcıları otomatik başlat: kapalı",
+    msg_src_titles:"{n} oyun",
+    msg_src_title_one:"1 oyun",
+    msg_src_sources:"{n} kaynak · otomatik seçildi: {best}",
+    msg_src_source_one:"1 kaynak · otomatik seçildi: {best}",
+    msg_copy_the_pc:"PC",
+    msg_rest_could_not_stop:"Durdurulamadı: {names}. Dinlenme modunda çalışmaya devam eder ve büyük ihtimalle çökmeye yol açar.",
+    msg_rest_all_stopped:"Tüm homebrew durduruldu — dinlenme moduna geçmek güvenli.",
+    msg_set_cfg_unreadable:"PKG-MUTANT-SHOP.exe yanındaki config.json okunamıyor ({err}); uygulama varsayılanlarla çalışıyor ve dosyanın üzerine yazmayacak. Düzeltin ya da silin, sonra uygulamayı yeniden başlatın - o zamana kadar burada yazılan hiçbir şey kaydedilemez.",
+    msg_btn_looking:"Aranıyor…",
+    msg_btn_scanning:"Taranıyor…",
     msg_needs_pc_tip:"Bunu PC yapar ve şu anda yanıt veren bir PC yok. Mağazayı PC uygulamasından açın ya da PC bulunana kadar bekleyin.",
     msg_pc_seat_tip:"Bu, PC'nin kendisinde bir pencere açar. PC'den kullanın.",
     gp_addons_update_many:"{n} güncelleme",
@@ -6651,6 +7166,66 @@ var I18N={
     gp_dest_not_detected:"  (nie wykryto)",
     msg_q_console_decides_drive:"O dysku decyduje PS5",
     msg_conn_companion_lost:"Utracono aplikację na PC — szukam",
+    msg_copy_this_pc:"ten komputer",
+    msg_dev_this_pc_fallback:"ten komputer",
+    msg_dev_this_pc_label:"(ten komputer)",
+    msg_dev_titles_suffix:" tytułów",
+    msg_dev_no_ps5:"nie skonfigurowano jeszcze PS5",
+    ui_btn_find_pcs:"Znajdź komputery",
+    msg_dev_no_peers:"Nie znaleziono jeszcze innych komputerów. Uruchom PKG MUTANT SHOP na innym komputerze w tej sieci i naciśnij Znajdź komputery.",
+    msg_eng_asking_console:"Pytam konsolę…",
+    msg_eng_cannot_tell:"nie wiadomo",
+    msg_eng_checking:"sprawdzam…",
+    msg_eng_could_not_ask:"Nie udało się zapytać tego komputera o konsolę. Czy PKG MUTANT SHOP nadal na nim działa?",
+    msg_eng_demo:"demo",
+    msg_eng_not_answering:"nie odpowiada",
+    msg_eng_pld_answering:" · odpowiada",
+    msg_eng_pld_no_answer:" · brak odpowiedzi",
+    msg_eng_state_busy:"właśnie jedna jest przekazywana",
+    msg_eng_state_no:"nie",
+    msg_eng_state_yes:"tak",
+    msg_helpers_delay_option:"Uruchom pomocników: po ",
+    msg_set_connected_to:"Połączono z ",
+    msg_set_consoles_none:"nie skonfigurowano",
+    msg_set_not_answering:"Nie odpowiada",
+    msg_set_rest_note:"Payloady homebrew nie są częścią własnego cyklu uśpienia i wybudzania konsoli, więc mogą działać, gdy jest ona w półuśpieniu. Zatrzymanie ich najpierw to nawyk, który chroni przed awarią po wybudzeniu.",
+    msg_set_the_ps5:"PS5",
+    msg_svc_built_in_suffix:" · wbudowane",
+    msg_svc_cannot_tell_from_pc:" · nie do stwierdzenia z tego komputera",
+    msg_svc_not_available:"niedostępne",
+    msg_svc_not_reachable:"nieosiągalne",
+    msg_svc_not_running:"nie działa",
+    msg_svc_port_prefix:"port ",
+    msg_svc_running_suffix:" · działa",
+    ui_advanced_hint:"Do ustalenia, dlaczego coś się nie dzieje. Nic tutaj nie jest potrzebne do korzystania z aplikacji.",
+    ui_back:"Wstecz",
+    ui_btn_clear_state:"Wyczyść stan",
+    ui_chip_inbox:"Skrzynka",
+    ui_cheats_drop_pre:"Wrzuć pliki ",
+    ui_cheats_drop_or:" lub ",
+    ui_cheats_drop_mid:" do folderu Skrzynka i naciśnij Skanuj ponownie. Są sortowane według zawartości, więc nazwa pliku nie ma znaczenia. Folder ",
+    ui_cheats_drop_end:" na podłączonym pendrivie też jest wykrywany.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Gotowe - instalacje mogą ruszyć od razu.",
+    msg_eng_detail_busy:"Właśnie trwa przekazywanie instalacji do konsoli.",
+    msg_eng_detail_no_pldmgr:"Payload Manager nie odpowiada na :{port}, a nasz silnik potrzebuje go do uruchomienia każdej instalacji. Wczytaj go ponownie na PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP nie odpowiada na PS5. Wczytaj go z Payload Manager, a potem otwórz ten panel ponownie.",
+    msg_eng_detail_no_console:"Nie skonfigurowano jeszcze PS5 - wpisz jej adres powyżej.",
+    msg_eng_how_spawn:"Do każdej instalacji uruchamiany jest nowy instalator, który kończy pracę, gdy konsola przyjmie pakiet. Nic nie działa w tle, więc nic nie może się zaciąć.",
+    msg_ver_older_than_page:" · starsza niż ta strona",
+    msg_ver_newer_than_page:" · nowsza niż ta strona",
+    msg_helpers_autostart_on:"Autostart pomocników: włączony",
+    msg_helpers_autostart_off:"Autostart pomocników: wyłączony",
+    msg_src_titles:"Tytułów: {n}",
+    msg_src_title_one:"1 tytuł",
+    msg_src_sources:"Źródeł: {n} · wybrano automatycznie: {best}",
+    msg_src_source_one:"1 źródło · wybrano automatycznie: {best}",
+    msg_copy_the_pc:"komputer",
+    msg_rest_could_not_stop:"Nie udało się zatrzymać: {names}. Działają dalej w trybie spoczynku i są prawdopodobną przyczyną awarii.",
+    msg_rest_all_stopped:"Cały homebrew zatrzymany — tryb spoczynku jest bezpieczny.",
+    msg_set_cfg_unreadable:"Nie można odczytać config.json obok PKG-MUTANT-SHOP.exe ({err}); aplikacja działa na ustawieniach domyślnych i nie nadpisze pliku. Napraw go lub usuń, a potem uruchom aplikację ponownie - do tego czasu nic wpisanego tutaj nie da się zapisać.",
+    msg_btn_looking:"Szukam…",
+    msg_btn_scanning:"Skanuję…",
     msg_needs_pc_tip:"To robi PC, a w tej chwili żaden PC nie odpowiada. Otwórz sklep z aplikacji na PC albo poczekaj, aż zostanie znaleziony.",
     msg_pc_seat_tip:"To otwiera okno na samym PC. Użyj tego z PC.",
     gp_addons_update_many:"{n} aktualizacji",
@@ -6943,6 +7518,66 @@ var I18N={
     gp_dest_not_detected:"  (niet gevonden)",
     msg_q_console_decides_drive:"De PS5 kiest de schijf",
     msg_conn_companion_lost:"Pc-companion kwijt — aan het zoeken",
+    msg_copy_this_pc:"deze pc",
+    msg_dev_this_pc_fallback:"deze pc",
+    msg_dev_this_pc_label:"(deze pc)",
+    msg_dev_titles_suffix:" titels",
+    msg_dev_no_ps5:"nog geen PS5 ingesteld",
+    ui_btn_find_pcs:"Pc's zoeken",
+    msg_dev_no_peers:"Nog geen andere pc's gevonden. Start PKG MUTANT SHOP op een andere computer in dit netwerk en druk op Pc's zoeken.",
+    msg_eng_asking_console:"Console wordt gevraagd…",
+    msg_eng_cannot_tell:"onbekend",
+    msg_eng_checking:"controleren…",
+    msg_eng_could_not_ask:"Deze pc kon niet naar de console worden gevraagd. Draait PKG MUTANT SHOP er nog op?",
+    msg_eng_demo:"demo",
+    msg_eng_not_answering:"antwoordt niet",
+    msg_eng_pld_answering:" · antwoordt",
+    msg_eng_pld_no_answer:" · geen antwoord",
+    msg_eng_state_busy:"er wordt er nu een overgedragen",
+    msg_eng_state_no:"nee",
+    msg_eng_state_yes:"ja",
+    msg_helpers_delay_option:"Helpers starten: na ",
+    msg_set_connected_to:"Verbonden met ",
+    msg_set_consoles_none:"geen ingesteld",
+    msg_set_not_answering:"Antwoordt niet",
+    msg_set_rest_note:"Homebrew-payloads maken geen deel uit van de eigen slaap- en wekcyclus van de console, dus ze kunnen doordraaien terwijl die half slaapt. Ze eerst stoppen is de gewoonte die een crash bij het wekken voorkomt.",
+    msg_set_the_ps5:"de PS5",
+    msg_svc_built_in_suffix:" · ingebouwd",
+    msg_svc_cannot_tell_from_pc:" · niet vast te stellen vanaf deze pc",
+    msg_svc_not_available:"niet beschikbaar",
+    msg_svc_not_reachable:"niet bereikbaar",
+    msg_svc_not_running:"draait niet",
+    msg_svc_port_prefix:"poort ",
+    msg_svc_running_suffix:" · actief",
+    ui_advanced_hint:"Om uit te zoeken waarom iets niet gebeurt. Niets hiervan is nodig om de app te gebruiken.",
+    ui_back:"Terug",
+    ui_btn_clear_state:"Status wissen",
+    ui_chip_inbox:"Postvak",
+    ui_cheats_drop_pre:"Zet ",
+    ui_cheats_drop_or:" of ",
+    ui_cheats_drop_mid:"-bestanden in Postvak en druk op Opnieuw scannen. Ze worden gesorteerd op inhoud, dus de bestandsnaam maakt niet uit. Een map ",
+    ui_cheats_drop_end:" op een aangesloten usb-stick wordt ook opgepikt.",
+    ui_cheats_drop_sep:", ",
+    msg_eng_detail_ready:"Klaar - installaties kunnen meteen beginnen.",
+    msg_eng_detail_busy:"Er wordt nu een installatie aan de console overgedragen.",
+    msg_eng_detail_no_pldmgr:"Payload Manager antwoordt niet op :{port}, en onze engine heeft het nodig om elke installatie te starten. Laad het opnieuw op de PS5.",
+    msg_eng_detail_shop_down:"PKG MUTANT SHOP antwoordt niet op de PS5. Laad het via Payload Manager en open dit paneel opnieuw.",
+    msg_eng_detail_no_console:"Er is nog geen PS5 ingesteld - vul hierboven het adres in.",
+    msg_eng_how_spawn:"Voor elke installatie start een nieuwe installer, die stopt zodra de console het pakket heeft aangenomen. Er blijft niets draaien, dus er kan niets vastlopen.",
+    msg_ver_older_than_page:" · ouder dan deze pagina",
+    msg_ver_newer_than_page:" · nieuwer dan deze pagina",
+    msg_helpers_autostart_on:"Helpers automatisch starten: aan",
+    msg_helpers_autostart_off:"Helpers automatisch starten: uit",
+    msg_src_titles:"{n} titels",
+    msg_src_title_one:"1 titel",
+    msg_src_sources:"{n} bronnen · automatisch gekozen: {best}",
+    msg_src_source_one:"1 bron · automatisch gekozen: {best}",
+    msg_copy_the_pc:"de pc",
+    msg_rest_could_not_stop:"Kon niet stoppen: {names}. Ze blijven in de rustmodus draaien en zijn de waarschijnlijke oorzaak van een crash.",
+    msg_rest_all_stopped:"Alle homebrew gestopt — rustmodus is veilig.",
+    msg_set_cfg_unreadable:"config.json naast PKG-MUTANT-SHOP.exe kan niet worden gelezen ({err}); de app draait op standaardwaarden en overschrijft het bestand niet. Herstel of verwijder het en start de app opnieuw - tot dan kan hier niets worden opgeslagen.",
+    msg_btn_looking:"Zoeken…",
+    msg_btn_scanning:"Scannen…",
     msg_needs_pc_tip:"Dit doet de pc, en op dit moment antwoordt er geen pc. Open de shop vanuit de pc-app, of wacht tot er een gevonden is.",
     msg_pc_seat_tip:"Dit opent een venster op de pc zelf. Gebruik het vanaf de pc.",
     gp_addons_update_many:"{n} updates",
@@ -8132,6 +8767,50 @@ function fillDriveSel(g,st,isMount,keep){
     ds.disabled=true;ds.classList.add("tip");
     ds.setAttribute("data-tip",t("gp_dest_default_tip"));
   }
+  syncDriveMarquee();
+}
+/* THE PICKER'S TEXT, WHEN IT DOES NOT FIT. The chosen option is copied into an overlay that
+   scrolls it from end to end and starts again, for as long as the panel is open - a translation
+   can be half as long again as the English and the control no longer grows to hold it (see
+   .selwrap). Measured, not assumed: the overlay is shown hidden for one layout pass so its width
+   can be read; if the text fits, nothing changes and the select paints its own text. The speed
+   follows the length so every message reads at the same pace. Reduced motion keeps the select's
+   own ellipsis instead. Re-run on every rebuild, on change, and on resize. */
+function syncDriveMarquee(){
+  var ds=$("#driveSel"); if(!ds) return;
+  var wrap=ds.parentNode, mq=wrap&&wrap.querySelector?wrap.querySelector(".selmarq"):null;
+  if(!wrap||!mq||!wrap.classList||!wrap.classList.contains("selwrap")) return;
+  var span=mq.firstChild; if(!span){span=el("span");mq.appendChild(span);}
+  var opt=ds.options&&ds.options[ds.selectedIndex];
+  var text=opt?String(opt.textContent||""):"";
+  wrap.classList.remove("marq"); span.style.animationDuration=""; span.textContent=text;
+  if(!text) return;
+  var reduced=false;
+  try{ reduced=!!(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches); }catch(e){}
+  if(reduced) return;
+  var cs=null; try{ cs=window.getComputedStyle(ds); }catch(e){}
+  if(cs){
+    mq.style.fontSize=cs.fontSize; mq.style.fontFamily=cs.fontFamily; mq.style.fontWeight=cs.fontWeight;
+    mq.style.letterSpacing=cs.letterSpacing;
+    var pl=(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.borderLeftWidth)||0);
+    var pr=(parseFloat(cs.paddingRight)||0)+(parseFloat(cs.borderRightWidth)||0);
+    if(document.documentElement.dir==="rtl"){ mq.style.right=pl+"px"; mq.style.left=(pr+22)+"px"; }
+    else { mq.style.left=pl+"px"; mq.style.right=(pr+22)+"px"; }
+  }
+  mq.classList.add("measure");
+  var need=span.offsetWidth, room=mq.clientWidth;
+  mq.classList.remove("measure");
+  if(!need||!room||need<=room) return;
+  var gap="\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0";
+  span.textContent=text+gap+text;
+  span.style.animationDuration=Math.max(8,Math.round((need+40)/28))+"s";   /* ~28 px per second */
+  wrap.classList.add("marq");
+}
+if(!window._mqWired){
+  window._mqWired=true;
+  var _mqSel=$("#driveSel");
+  if(_mqSel) _mqSel.addEventListener("change",function(){syncDriveMarquee();});
+  window.addEventListener("resize",function(){ if(state&&state.current) syncDriveMarquee(); });
 }
 /* A PS5 backup runs from whichever drive it sits on, so "installing" one really means
    putting it on the drive you want it to live on. Copy first, verify, then remove the
@@ -9155,10 +9834,10 @@ function paintServices(h,selfIp){
      null means "cannot tell from here", and painting that as a red "not running" is how a working
      service got reported as down six seconds after this panel opened. */
   if(h.shadowmount===null||h.shadowmount===undefined){
-    setTxt("setSmp","port "+(h.shadowmount_port||10101)+" · cannot tell from this PC");
+    setTxt("setSmp",t("msg_svc_port_prefix")+(h.shadowmount_port||10101)+t("msg_svc_cannot_tell_from_pc"));
     setLed("ledSmp","warn");
   }else{
-    setTxt("setSmp", h.shadowmount?("port "+(h.shadowmount_port||10101)+" · running"):"not running");
+    setTxt("setSmp", h.shadowmount?(t("msg_svc_port_prefix")+(h.shadowmount_port||10101)+t("msg_svc_running_suffix")):t("msg_svc_not_running"));
     setLed("ledSmp", h.shadowmount?"on":"off");
   }
   /* FILE TRANSFER, not "Console FTP". Files go over our own HTTP file API on the shop's port -
@@ -9173,10 +9852,10 @@ function paintServices(h,selfIp){
        "it is there" while the LED said the opposite, which is the kind of small contradiction
        that makes someone stop trusting the whole panel. */
     var fok=!!(h.on_console||h.engine_ready||h.connected);
-    setTxt("setFiles", fok?((ip?ip+":"+shopPort:"")+" · built in"):"not reachable");
+    setTxt("setFiles", fok?((ip?ip+":"+shopPort:"")+t("msg_svc_built_in_suffix")):t("msg_svc_not_reachable"));
     setLed("ledFiles", fok?"on":"off");
   }else{
-    setTxt("setFiles", h.ftp_online?(ip+":"+(h.ftp_port||2121)+" · FTP"):"not available");
+    setTxt("setFiles", h.ftp_online?(ip+":"+(h.ftp_port||2121)+" · FTP"):t("msg_svc_not_available"));
     setLed("ledFiles", h.ftp_online?"on":"off");
   }
   /* Health carries this and nothing displayed it, so a companion that could not parse its own
@@ -9185,9 +9864,7 @@ function paintServices(h,selfIp){
   if(cw){
     if(h.config_unreadable){
       cw.style.display="";
-      if(ct) ct.textContent="config.json next to PKG-MUTANT-SHOP.exe cannot be read ("+
-        h.config_unreadable+"), so the app is running on its defaults and will not overwrite the "+
-        "file. Fix or delete it, then restart the app - nothing typed here can be saved until then.";
+      if(ct) ct.textContent=tsub("msg_set_cfg_unreadable",{err:h.config_unreadable});
     }else cw.style.display="none";
   }
 }
@@ -9385,14 +10062,18 @@ function updateSrcBar(){
   if(API===null)return;
   api("/api/sources").then(function(s){
     var bar=$("#srcbar");bar.style.display="flex";
-    var paths=(s.local_paths||[]).join(", ")||"(none configured)";
+    var paths=(s.local_paths||[]).join(", ")||("("+t("msg_set_consoles_none")+")");
     var nsrc=(s.sources||[]).length, best=s.best||"companion-lan";
     /* "companion-lan" is the server's own name for its local library - an internal token, not a
        place a person knows. It is the PC, by name once Settings has asked for it. */
-    if(best==="companion-lan") best=state.pcName||(PROFILE.onConsole?"the PC":"this PC");
-    bar.innerHTML='<span>🎮 <b style="color:var(--text)">'+state.games.length+'</b> title'+(state.games.length===1?'':'s')+'</span>'+
+    if(best==="companion-lan") best=state.pcName||t(PROFILE.onConsole?"msg_copy_the_pc":"msg_copy_this_pc");
+    /* The counts are dictionary sentences with the number substituted in - the bold tag rides in
+       with the number, which is why the value is not escaped; everything a server sent is. */
+    var ng=state.games.length, nB='<b style="color:var(--text)">'+ng+'</b>';
+    bar.innerHTML='<span>🎮 '+(ng===1?t("msg_src_title_one").replace("1",nB):tsub("msg_src_titles",{n:nB}))+'</span>'+
                   '<span>📂 <b style="color:var(--text)">'+esc(paths)+'</b></span>'+
-                  '<span>🔀 '+nsrc+' source'+(nsrc==1?'':'s')+' · auto-picked <b style="color:var(--accent)">'+esc(best)+'</b></span>';
+                  '<span>🔀 '+(nsrc==1?tsub("msg_src_source_one",{best:'<b style="color:var(--accent)">'+esc(best)+'</b>'})
+                                     :tsub("msg_src_sources",{n:nsrc,best:'<b style="color:var(--accent)">'+esc(best)+'</b>'}))+'</span>';
   }).catch(function(){});
 }
 
@@ -9424,7 +10105,7 @@ function refreshAutostart(){
     b.style.display="";
     /* It is a switch, and "Helpers: auto-start" read as a status line. Naming the setting and
        its position is what a switch says; the tooltip says what pressing it does. */
-    b.textContent="Helpers auto-start: "+(on?"on":"off");
+    b.textContent=t(on?"msg_helpers_autostart_on":"msg_helpers_autostart_off");
     b.dataset.on=on?"1":"0";
     /* The delay only means anything while the helpers do start themselves. */
     var d=$("#helperDelay");
@@ -9433,7 +10114,7 @@ function refreshAutostart(){
       if(r.delay!=null){
         var want=String(r.delay), has=false;
         for(var i=0;i<d.options.length;i++) if(d.options[i].value===want) has=true;
-        if(!has){ var o=el("option"); o.value=want; o.textContent="Start helpers: after "+want+"s"; d.appendChild(o); }
+        if(!has){ var o=el("option"); o.value=want; o.textContent=t("msg_helpers_delay_option")+want+"s"; d.appendChild(o); }
         d.value=want;
       }
     }
@@ -9479,13 +10160,13 @@ function stopAllHomebrew(btn){
     if(failed.length){
       var fn=failed.map(function(x){return x.name;}).join(", ");
       toast("Still running: "+fn+" — do NOT rest yet","err");
-      if(rn) rn.textContent="Could not stop: "+fn+". These survive into rest mode and are the likely cause of a crash.";
+      if(rn) rn.textContent=tsub("msg_rest_could_not_stop",{names:fn});
       return;
     }
     var names=stopped.map(function(x){return x.name;}).join(", ");
     toast(stopped.length ? ("Stopped "+stopped.length+": "+names+" — safe to rest the console")
                          : "Nothing left to stop — safe to rest the console","ok");
-    if(rn) rn.textContent="All homebrew stopped — safe to rest.";
+    if(rn) rn.textContent=t("msg_rest_all_stopped");
   }).catch(function(){
     // The console exits as its last step ONLY when everything really stopped, so a dropped reply
     // means success - BUT ONLY WHEN THIS PAGE TALKS TO THE CONSOLE DIRECTLY. Through the PC the
@@ -9518,7 +10199,7 @@ if(_ds) _ds.onclick=function(){
      whatever the language selector had written. */
   if(_ds.disabled) return;
   var _dsWas=_ds.textContent;
-  _ds.disabled=true;_ds.textContent="Looking…";
+  _ds.disabled=true;_ds.textContent=t("msg_btn_looking");
   api("/api/network/scan",undefined,60000).then(function(r){
     toast(r&&r.ok?((r.found||0)+" PC"+(r.found===1?"":"s")+" found")
                  :errText(r,"The network could not be scanned — is the app still running on the PC?"),
@@ -9532,7 +10213,7 @@ var _cr=$("#cheatRescan");
 if(_cr) _cr.onclick=function(){
   if(_cr.disabled) return;
   var _crWas=_cr.textContent;                 /* restored as it was, in whatever language it was */
-  _cr.disabled=true;_cr.textContent="Scanning…";
+  _cr.disabled=true;_cr.textContent=t("msg_btn_scanning");
   api("/api/cheats/rescan",{method:"GET"},60000).then(function(r){
     if(r&&r.ok) toast(r.filed?("Filed "+r.filed+" new cheat file"+(r.filed===1?"":"s")):"No new files found","ok");
     else toast(errText(r,"The console could not sort the cheat files"),"err");
@@ -9561,17 +10242,25 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape")dismissPanel
 
 /* The install-engine block. One request, and it answers the only question this panel exists to
    answer: could an install start right now, and if not, what is missing. */
+/* The server's engine sentences are English. The page keys the same five states to its own
+   dictionary and only falls back to the server's words for a state it does not know. */
+function engineDetailText(e){
+  var st=e&&e.state, k=st==="ready"?"msg_eng_detail_ready":st==="busy"?"msg_eng_detail_busy"
+        :st==="no-pldmgr"?"msg_eng_detail_no_pldmgr":st==="shop-down"?"msg_eng_detail_shop_down"
+        :st==="no-console"?"msg_eng_detail_no_console":"";
+  return k?tsub(k,{port:(e&&e.pldmgr_port)||8084}):((e&&e.detail)||"");
+}
 function refreshEngine(){
   var box=$("#engState"); if(!box) return Promise.resolve(null);
-  if(API===null){ setTxt("engState","demo"); return Promise.resolve(null); }
+  if(API===null){ setTxt("engState",t("msg_eng_demo")); return Promise.resolve(null); }
   /* Say we are asking. With the console off this call waits out its TCP timeouts - measured at
      ~9 seconds - and the rows sat blank for all of it, which reads as broken rather than busy.
      Every message in this app is supposed to be true at the moment it is on screen; "checking"
      is the true thing to say while we are checking. */
-  setTxt("engState","checking…");
+  setTxt("engState",t("msg_eng_checking"));
   setLed("ledEngine","warn");
   var _d=$("#engDetail");
-  if(_d){ _d.style.color=""; _d.textContent="Asking the console…"; }
+  if(_d){ _d.style.color=""; _d.textContent=t("msg_eng_asking_console"); }
   return api("/api/engine/state").then(function(e){
     /* The console has no /api/engine/state and answers unknown /api/ paths with a bare {}.
        {} is truthy and e.ok is undefined - not false - so the old guard let it through and this
@@ -9579,24 +10268,26 @@ function refreshEngine(){
        real answer always carries. The .catch below already paints the honest "cannot tell". */
     if(!e||e.ok===false||e.state===undefined) throw new Error("no answer");
     state.engine=e;
-    setTxt("engHow", e.how||"");
-    setTxt("engState", e.state==="ready"?"yes":e.state==="busy"?"handing one over now":"no");
+    /* The server describes the lane in English. This page knows the lane by its mode code and
+       says the same thing in its own language; an unknown mode is printed as the server sent it. */
+    setTxt("engHow", e.mode==="spawn"?t("msg_eng_how_spawn"):(e.how||""));
+    setTxt("engState", e.state==="ready"?t("msg_eng_state_yes"):e.state==="busy"?t("msg_eng_state_busy"):t("msg_eng_state_no"));
     setLed("ledEngine", e.state==="ready"?"on":e.state==="busy"?"warn":"off");
     setTxt("engShop", e.shop_ok?((e.console_ip||"")+":"+(e.shop_port||8710)+
                                  (e.shop_version?(" · v"+e.shop_version):""))
-                              :"not answering");
+                              :t("msg_eng_not_answering"));
     setLed("ledShop", e.shop_ok?"on":"off");
-    setTxt("engPld", e.ready?("port "+(e.pldmgr_port||8084)+" · answering")
-                            :("port "+(e.pldmgr_port||8084)+" · no answer"));
+    setTxt("engPld", e.ready?(t("msg_svc_port_prefix")+(e.pldmgr_port||8084)+t("msg_eng_pld_answering"))
+                            :(t("msg_svc_port_prefix")+(e.pldmgr_port||8084)+t("msg_eng_pld_no_answer")));
     setLed("ledPld", e.ready?"on":"off");
     var d=$("#engDetail");
     if(d){
-      d.textContent=e.detail||"";
+      d.textContent=engineDetailText(e);
       d.style.color=(e.state==="ready")?"":"var(--warn)";
     }
     /* A version gap between this page and the console's build is worth naming here as well as in
        the header: Settings is where someone comes to work out why something is not behaving. */
-    setTxt("aboutConsoleVer", e.shop_version?("v"+e.shop_version):"not answering");
+    setTxt("aboutConsoleVer", e.shop_version?("v"+e.shop_version):t("msg_eng_not_answering"));
     /* A console running a different build from this page is the pldmgr basename trap: a fresh
        upload can silently run an old ELF. Say so on the row, in amber, instead of leaving two
        numbers on two rows for someone to compare. */
@@ -9604,20 +10295,19 @@ function refreshEngine(){
     if(acv){
       var vgap=!!(e.shop_version&&String(e.shop_version)!==APP_VERSION);
       acv.style.color=vgap?"var(--warn)":"";
-      if(vgap) acv.textContent="v"+e.shop_version+(verNewer(APP_VERSION,e.shop_version)?" · older than this page":" · newer than this page");
+      if(vgap) acv.textContent="v"+e.shop_version+t(verNewer(APP_VERSION,e.shop_version)?"msg_ver_older_than_page":"msg_ver_newer_than_page");
     }
     setTxt("aboutEngine", t("msg_eng_our_own_engine"));
     var lb=$("#engLog");
     if(lb) lb.disabled=!e.shop_ok;
     return e;
   }).catch(function(){
-    setTxt("engState","cannot tell");
+    setTxt("engState",t("msg_eng_cannot_tell"));
     setLed("ledEngine","off"); setLed("ledShop","off"); setLed("ledPld","off");
     setTxt("engShop","-"); setTxt("engPld","-");
     var d=$("#engDetail");
     if(d){ d.style.color="var(--warn)";
-           d.textContent="This PC could not be asked about the console. Is PKG MUTANT SHOP still "+
-                         "running on it?"; }
+           d.textContent=t("msg_eng_could_not_ask"); }
     return null;
   });
 }
@@ -9650,7 +10340,7 @@ function openSettings(){
      and work it out. */
   var _con=!!(h.connected||h.on_console);
   setLed("ledCon", _con?"on":"off");
-  setTxt("conState", _con?("Connected to "+(h.ps5_ip||"the PS5")):"Not answering");
+  setTxt("conState", _con?(t("msg_set_connected_to")+(h.ps5_ip||t("msg_set_the_ps5"))):t("msg_set_not_answering"));
   paintPcOnly();
   setTxt("aboutCompanion",h.lan_ip?(h.lan_ip+":"+(h.companion_port||"8710")):"—");
   refreshEngine();
@@ -9679,9 +10369,7 @@ function openSettings(){
     api("/api/network").then(function(d){ renderDevices(d); }).catch(function(){});
     refreshAutostart();
     var rn=$("#restNote");
-    if(rn) rn.textContent="Homebrew payloads are not part of the console's own sleep and wake "+
-      "cycle, so they can be running while it is half asleep. Stopping them first is the habit "+
-      "that keeps a wake from crashing.";
+    if(rn) rn.textContent=t("msg_set_rest_note");
     api("/api/cheats/paths").then(function(r){
       /* The FOLDERS are chips now, and a chip shows the format - a full Windows path stretched
          across the card was unreadable and told you nothing you wanted at a glance. The path moves
@@ -9714,9 +10402,9 @@ function renderDevices(d){
   var sf=$("#devSelf");
   if(sf){
     var mc=me.counts||{};
-    sf.innerHTML=led(true)+" <b>"+esc(me.name||"this PC")+"</b>"+
-      ' <span style="color:var(--muted2)">(this PC)</span>'+
-      ' <span style="color:var(--muted2)">'+((mc.total!=null?mc.total:0))+" titles"+
+    sf.innerHTML=led(true)+" <b>"+esc(me.name||t("msg_dev_this_pc_fallback"))+"</b>"+
+      ' <span style="color:var(--muted2)">'+esc(t("msg_dev_this_pc_label"))+'</span>'+
+      ' <span style="color:var(--muted2)">'+((mc.total!=null?mc.total:0))+esc(t("msg_dev_titles_suffix"))+
       (mc.ps4!=null?(" · PS4 "+mc.ps4+" / PS5 "+mc.ps5):"")+
       (me.os?(" · "+esc(me.os)):"")+"</span>";
   }
@@ -9729,13 +10417,12 @@ function renderDevices(d){
     var pport=(state.engine&&state.engine.shop_port)||8710;
     /* No trailing "/": the row's start-ellipsis (direction:rtl) drew it at the front, so the
        address read "/http://10.0.0.99:8710". A browser adds the slash on its own. */
-    setTxt("devPs5",pip?("http://"+pip+":"+pport):"no PS5 set up yet");
+    setTxt("devPs5",pip?("http://"+pip+":"+pport):t("msg_dev_no_ps5"));
   }
   var el2=$("#devPeers"); if(!el2) return;
   var peers=d.peers||[];
   if(!peers.length){
-    el2.innerHTML='<span style="color:var(--muted2)">No other PCs found yet. Run PKG MUTANT SHOP '+
-                  'on another computer on this network and press Find PCs.</span>';
+    el2.innerHTML='<span style="color:var(--muted2)">'+esc(t("msg_dev_no_peers"))+'</span>';
     return;
   }
   el2.innerHTML=peers.map(function(p){
@@ -9744,7 +10431,7 @@ function renderDevices(d){
        thing to know - it is the storage tiles on the main page that should not carry one. */
     return led(p.online)+" <b>"+esc(p.name||"?")+"</b>"+
            (p.lan_ip?' <span style="color:var(--muted2)">'+esc(p.lan_ip)+"</span>":"")+
-           ' <span style="color:var(--muted2)">'+((c.total!=null?c.total:p.count)||0)+" titles"+
+           ' <span style="color:var(--muted2)">'+((c.total!=null?c.total:p.count)||0)+esc(t("msg_dev_titles_suffix"))+
            (c.ps4!=null?(" · PS4 "+c.ps4+" / PS5 "+c.ps5):"")+
            (p.os?(" · "+esc(p.os)):"")+"</span>";
   }).join("<br>");

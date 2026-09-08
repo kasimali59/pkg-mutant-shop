@@ -15,3 +15,7 @@ ps5-app/tile-pkg/build/
 ps5-app/onconsole/web_bundle.h
 ps5-app/onconsole/cheat_bundle.h
 ps5-app/onconsole/cheats.pack
+
+# PyInstaller outputs when run from the repo root
+/dist/
+/build/
