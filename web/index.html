@@ -10042,7 +10042,24 @@ function loadConsoles(){
       var o=el("option");o.value=c.id;o.textContent="🎮 "+c.name+(c.online?" ●":" ○");sel.appendChild(o);
     });
     if(state.consoles.length>1){var oa=el("option");oa.value="all";oa.textContent="🎮 All consoles";sel.appendChild(oa);}
-    if(!state.console||(!state.consoleById[state.console]&&state.console!=="all"))state.console=state.consoles[0].id;
+    /* WHICH CONSOLE THIS PAGE MEANS - and it is NOT "the first one in the list".
+       This read state.consoles[0].id, and the list is in config order, so on a setup with a PS5
+       and a PS4 every install pressed ON THE PS4 was sent to the PS5. With the PS5 switched off
+       the queue then held every job with "PS5 is not reachable - nothing was installed", which
+       reads as "installing is broken" rather than "you aimed at the wrong console". state.console
+       is not remembered between page loads, so it happened on every single visit.
+       The page is SERVED BY the console it is being read on - /api/open points the console's
+       browser at http://<its own lan ip>:8710 - so location.hostname identifies it exactly, with
+       no guessing and no new API. Failing that, one console awake and the rest asleep is not
+       ambiguous either. Only when neither of those settles it does the first entry win.
+       A deliberate choice in the picker still stands: this branch only runs when nothing is
+       chosen yet, or when what was chosen is no longer a console we know. */
+    if(!state.console||(!state.consoleById[state.console]&&state.console!=="all")){
+      var host=location.hostname||"";
+      var mine=state.consoles.filter(function(c){return c.ip&&c.ip===host;})[0];
+      var awake=state.consoles.filter(function(c){return c.online;});
+      state.console=(mine||(awake.length===1?awake[0]:state.consoles[0])).id;
+    }
     sel.value=state.console;
     // With a single console the picker is a dropdown with one entry — pure noise next to the status
     // pill, which already names the console. state.console is still set above, so every install

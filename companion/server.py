@@ -7605,12 +7605,57 @@ class Handler(BaseHTTPRequestHandler):
                        human_size(roomiest.get("free")), roomiest.get("label") or roomiest.get("id")))
         return None
 
+    def _console_for_request(self, all_ids):
+        """The console an install means when the caller named none.
+
+        NOT "the first one configured", which is what this used to be. The list is in config order,
+        so on a machine with a PS5 and a PS4 an install with no target went to the PS5 - and with
+        the PS5 switched off the queue held every job saying "PS5 is not reachable", which reads as
+        a broken installer rather than a misaimed one.
+
+        Three signals, cheapest and most certain first:
+
+          1. THE REQUEST CAME FROM A CONSOLE. The page is served by the console it is read on, so
+             an install pressed there arrives from that console's own address. Nothing to guess.
+          2. There is only one console.
+          3. Exactly one console is actually able to install right now. One awake and one asleep is
+             not an ambiguous question. This costs one parallel probe of every console, already
+             bounded to two seconds by Fleet.status().
+
+        Only if none of those settles it does the first entry win, which is the old behaviour and
+        the only case where a guess is unavoidable. The queue's "not reachable" message names the
+        console it chose, so even the guess is legible."""
+        srv = self.server
+        if not all_ids:
+            return []
+        try:
+            peer = (self.client_address or ("",))[0] or ""
+        except Exception:
+            peer = ""
+        if peer:
+            for cid in all_ids:
+                b = srv.fleet.bridge(cid)
+                if b is not None and getattr(b, "ip", "") == peer:
+                    return [cid]
+        if len(all_ids) == 1:
+            return list(all_ids[:1])
+        try:
+            awake = [c["id"] for c in srv.fleet.status()
+                     if c.get("online") and c.get("id") in all_ids]
+        except Exception:
+            awake = []
+        if len(awake) == 1:
+            return awake
+        return list(all_ids[:1])
+
     def _install(self, body):
         srv = self.server
         url, key = body.get("url"), body.get("install_key")
         target = body.get("console", "")
         all_ids = srv.fleet.ids()
-        targets = all_ids if target == "all" else [target] if target in all_ids else (all_ids[:1] or ["ps5-0"])
+        targets = (all_ids if target == "all"
+                   else [target] if target in all_ids
+                   else (self._console_for_request(all_ids) or ["ps5-0"]))
 
         # (Legacy "Send to PS5" FTP + on-console engine install removed — every game now installs
         #  through the single install-host path below: serve over LAN -> hand off the URL.)
