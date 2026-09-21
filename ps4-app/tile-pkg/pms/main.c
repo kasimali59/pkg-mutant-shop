@@ -14,26 +14,29 @@
  * else at run time, which is the shape of the toolchain's own hello_world - the one sample known to
  * launch on this console family.
  *
- * CE-32930-7 IS NOW MEASURED, AND NOTHING IN THIS FILE CAUSES IT. Captured on the console
- * (research/klog-ce32930-7-app0-mount-2026-09-21.txt):
+ * CE-32930-7 WAS NEVER THIS FILE'S FAULT, AND IT IS NOW SOLVED ELSEWHERE.
  *
- *     [SceLncService] launchApp(PKGM00001)  category={gd}  appVer={01.03}
- *     PrepareProcessLaunchPkg() ret = 80990019
- *     lnc_mount_root.cpp(425) mountApp0Dir:      LNC_ISOK::0x80990019
- *     lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
+ * The console refused to start this app because BGFT had no *task* for the title:
  *
- * The console fails to mount /app0 out of the installed package. **No process is ever created, so
- * this code never runs** - not main(), not a single symbol lookup. And the control test settles
- * whose fault it is: Riptide GP2 (CUSA02365), a fake-signed retail game with nothing to do with
- * this build, fails at the identical line with the identical code. Every flag field in our PKG
- * header matches the installed retail-derived packages exactly.
+ *     [BGFT] ERROR: [3568] task not found. (PKGM00001)
+ *     sceBgftNotifyGameWillStart() ret = 80990019
  *
- * So: do not "fix" this file to chase CE-32930-7. Two earlier attempts to explain that error from
- * this side were both wrong - first the SCE_NEEDED_MODULE list, then narrowing the link to
- * libkernel as a free shot in the dark. Linking libkernel alone stays because it is the shape of
- * the one toolchain sample known to launch and it costs nothing, NOT because it fixes anything.
- * What IS worth keeping either way: a symbol that is not there becomes a sentence on screen
- * instead of an app that will not open.
+ * The package's PFS images mounted fine; ShellCore unmounted them and gave up. The real cause was
+ * ps4-app/onconsole/server_ps4.c handing its finished BGFT task back after every install - see
+ * bgft_sweep_ours() there. With one task left registered, this app launches and runs.
+ *
+ * TWO EXPLANATIONS BLAMING THIS FILE WERE BOTH WRONG - first the SCE_NEEDED_MODULE list, then
+ * narrowing the link line to libkernel alone. Do not add a third. If the icon ever stops opening
+ * again, look at the BGFT task table before looking here.
+ *
+ * WHAT IS ACTUALLY WRONG IN HERE, measured on the first successful launch:
+ *   - sceKernelLoadStartModule("/system/common/lib/...") fails for every library, because inside an
+ *     application sandbox they are mapped at /vm2LJNGVpN/common/lib/. So browser, user_init and
+ *     notify all resolved to 0 and the direct browser call was dead.
+ *   - Asking the payload instead (GET /api/open) worked first time. The payload is not sandboxed.
+ *     That fallback is the only reason anything reached the television.
+ *   - Returning from main() raises SIGSYS - a system call this sandbox does not permit, from the
+ *     toolchain's own exit path - which is the error dialog the user has to dismiss.
  */
 #include <stdio.h>
 #include <stdlib.h>

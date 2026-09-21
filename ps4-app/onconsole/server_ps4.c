@@ -732,6 +732,33 @@ static int bgft_task_is_ours(const char *dir) {
     return ours;
 }
 
+/* The title id a task names, read out of the content id inside its own record. "" if not found.
+
+   A content id is fixed-shape - six characters, '-', a nine-character title id, '_', two digits,
+   '-' - so it can be recognised in a binary record by its punctuation without knowing the format.
+   This walks bytes rather than using strstr, for the same reason bgft_task_is_ours does: the
+   record is full of NULs. */
+static void bgft_task_title(const char *dir, char *out, size_t outsz) {
+    out[0] = 0;
+    char p[320];
+    snprintf(p, sizeof(p), "%s/%s/d0.pdb", BGFT_TASK_ROOT, dir);
+    long n = 0;
+    char *b = slurp(p, &n);
+    if (!b) return;
+    for (long i = 0; i + 20 <= n; i++) {
+        if (b[i + 6] != '-' || b[i + 16] != '_' || b[i + 19] != '-') continue;
+        int ok = 1;
+        for (int k = 0; k < 19 && ok; k++) {
+            unsigned char c = (unsigned char)b[i + k];
+            if (c < '!' || c > '~') ok = 0;
+        }
+        if (!ok) continue;
+        snprintf(out, outsz, "%.9s", b + i + 7);
+        break;
+    }
+    free(b);
+}
+
 /* Stop and unregister one task. Stop first: unregistering a task that is still transferring is
    how you get a half-written package left on the drive. Both codes are ignored on purpose - a
    task that is already stopped answers non-zero and that is a success for our purposes. */
@@ -741,13 +768,45 @@ static void bgft_release(OrbisBgftTaskId task) {
     if (bgft_unreg_fn) bgft_unreg_fn(task);
 }
 
-/* Free every stranded task of ours. `keep` is the live job's task, or BGFT_INVALID_TASK_ID.
-   Returns how many were released. */
-static int bgft_sweep_ours(OrbisBgftTaskId keep) {
+/* Free stranded tasks of ours. `keep` is the live job's task, or BGFT_INVALID_TASK_ID.
+   Returns how many were released.
+ *
+ * A FINISHED TASK IS THE TITLE'S LAUNCH TICKET. THIS IS THE WHOLE REASON THE ICON NEVER OPENED.
+ *
+ * Measured on 13.52. Pressing an installed title made ShellCore call sceBgftNotifyGameWillStart,
+ * BGFT answered `[BGFT] ERROR: [3568] task not found. (PKGM00001)`, that call returned 0x80990019,
+ * and ShellCore unmounted the package it had ALREADY MOUNTED SUCCESSFULLY and refused to start it -
+ * CE-32930-7 on screen. Leaving one task registered for the title and pressing again:
+ *
+ *     [BGFT] [606] GameWillStart(PKGM00001, 2) start
+ *     [BGFT] [576] task(00000075) PKGM00001            <- found instead of "task not found"
+ *     [Syscore App] createApp PKGM00001
+ *     EXEC /app0/eboot.bin [user]
+ *
+ * It launched. So this sweep - written to stop the table filling up, which is a real measured
+ * problem - was also quietly making every title it had installed unlaunchable, games included.
+ *
+ * The rule now: a task whose title actually has an app.pkg on disk is KEPT. Only tasks whose title
+ * installed nothing (failed, abandoned, orphaned by a payload reload) is released on sight.
+ *
+ * `reclaim` is how many launch tickets this pass is allowed to give up, and it is 0 everywhere
+ * except one place: when register answers 0x80990086 the table really is full, and
+ * bgft_install_url asks for ONE at a time and retries. One at a time matters - a console with
+ * several of our titles installed should not have every icon stop working so that one new install
+ * can start. Oldest task id first, because that is the closest thing to least-recently-installed
+ * that the table offers. Every reclaim is written to the install log, so a title that stops opening
+ * has a recorded reason instead of being a mystery. */
+static int bgft_sweep_ours(OrbisBgftTaskId keep, int reclaim) {
     if (!bgft_unreg_fn) return 0;
     DIR *d = opendir(BGFT_TASK_ROOT);
     if (!d) return 0;
-    int freed = 0;
+
+    /* Collected rather than released as we go: reclaiming wants the OLDEST first, which cannot be
+       known until the whole directory has been read. 64 is far above the ~12 slots the console
+       actually has. */
+    enum { CAND_MAX = 64 };
+    long cand[CAND_MAX];
+    int  ncand = 0, kept = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
@@ -758,11 +817,42 @@ static int bgft_sweep_ours(OrbisBgftTaskId keep) {
         if (!end || *end || id < 0 || id > 0x7fffffff) continue;
         if ((OrbisBgftTaskId)id == keep) continue;
         if (!bgft_task_is_ours(e->d_name)) continue;
-        bgft_release((OrbisBgftTaskId)id);
-        freed++;
+        char tid[16];
+        bgft_task_title(e->d_name, tid, sizeof(tid));
+        int is_ticket = tid[0] && installed_app_pkg(tid) > 0;
+        if (is_ticket && reclaim <= 0) { kept++; continue; }
+        if (ncand < CAND_MAX) cand[ncand++] = id;
     }
     closedir(d);
-    if (freed) ilog("install: released %d finished task%s of ours", freed, freed == 1 ? "" : "s");
+
+    /* insertion sort, ascending - ncand is at most a couple of dozen */
+    for (int i = 1; i < ncand; i++) {
+        long v = cand[i];
+        int j = i - 1;
+        while (j >= 0 && cand[j] > v) { cand[j + 1] = cand[j]; j--; }
+        cand[j + 1] = v;
+    }
+
+    int freed = 0, tickets = 0;
+    for (int i = 0; i < ncand; i++) {
+        char dir[16];
+        snprintf(dir, sizeof(dir), "%08lx", cand[i]);
+        char tid[16];
+        bgft_task_title(dir, tid, sizeof(tid));
+        int is_ticket = tid[0] && installed_app_pkg(tid) > 0;
+        if (is_ticket) {
+            if (tickets >= reclaim) continue;
+            tickets++;
+            ilog("install: no free task slots - giving up %s's place on the home screen so this "
+                 "install can start. Reinstall it to get the icon working again", tid);
+        }
+        bgft_release((OrbisBgftTaskId)cand[i]);
+        freed++;
+    }
+    if (freed - tickets > 0)
+        ilog("install: released %d task%s of ours that installed nothing%s",
+             freed - tickets, (freed - tickets) == 1 ? "" : "s",
+             kept ? " (kept the ones their titles need to open)" : "");
     return freed;
 }
 
@@ -786,10 +876,11 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
     char fallback[16] = {0};
     if (!cid || !*cid) pkg_content_id_from_url_name(label && *label ? label : uri, fallback, sizeof(fallback));
 
-    /* Always before registering, never after a failure. The table fills up silently and the code
-       it answers with when it is full (0x80990086 here) is not something to pattern-match on - a
-       sweep is cheap, idempotent, and means the shop cannot be stopped by its own history. */
-    bgft_sweep_ours(BGFT_INVALID_TASK_ID);
+    /* Always before registering, never after a failure. The table fills up silently and a sweep is
+       cheap and idempotent, so the shop cannot be stopped by its own history. This pass only takes
+       back tasks that installed nothing; the ones their titles need in order to open are kept, and
+       are only reclaimed below if the console actually runs out of room. */
+    bgft_sweep_ours(BGFT_INVALID_TASK_ID, 0);
 
     OrbisBgftDownloadParam p;
     memset(&p, 0, sizeof(p));
@@ -807,6 +898,16 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
 
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
     int rc = bgft_register_fn(&p, &task);
+    /* THE TABLE IS FULL, AND ONLY NOW IS IT WORTH GIVING UP LAUNCH TICKETS - one at a time, and
+       only as many as it takes. Most slots on a real console belong to the console itself (measured
+       here: 9 of 11, eight for one title plus a system update) and none of those are ours to touch,
+       so there may be nothing left to give and this loop simply ends. An install that cannot start
+       is worse than an icon that will not open, but only just, so it is paid for a ticket at a
+       time rather than by clearing the board. */
+    for (int give = 1; give <= 4 && (unsigned)rc == 0x80990086u; give++) {
+        if (bgft_sweep_ours(BGFT_INVALID_TASK_ID, 1) <= 0) break;
+        rc = bgft_register_fn(&p, &task);
+    }
     if (rc != 0) {
         /* NO CODE IN THE SENTENCE. It is on screen, often on a television, and it means nothing
            to the person reading it; the install log below keeps every one of them. */
@@ -899,10 +1000,14 @@ static void job_refresh(void) {
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
     }
-    /* The job is over either way: give the task back now rather than at the next install, so a
-       console left alone after a finished download does not keep a slot reserved forever. */
-    int over = strcmp(g_job.state, "downloading") != 0;
-    OrbisBgftTaskId spent = (over && !g_job.released) ? g_job.task : BGFT_INVALID_TASK_ID;
+    /* THE VERDICT IS REACHED ONCE - but only a FAILED job gives its task back.
+       A task that installed something is what lets that title open from the home screen at all
+       (see bgft_sweep_ours), so handing it back here is how this shop used to install a game and
+       silently make it unlaunchable. A failed job installed nothing, so its task is pure waste and
+       goes immediately. `released` now means "the verdict is in, stop re-reading it". */
+    int over   = strcmp(g_job.state, "downloading") != 0;
+    int failed = !strcmp(g_job.state, "error");
+    OrbisBgftTaskId spent = (over && failed && !g_job.released) ? g_job.task : BGFT_INVALID_TASK_ID;
     if (over) g_job.released = 1;
     pthread_mutex_unlock(&g_job_lock);
     if (spent != BGFT_INVALID_TASK_ID) bgft_release(spent);
@@ -2334,7 +2439,7 @@ static void handle_get(int fd, const char *rawpath) {
         pthread_mutex_unlock(&g_job_lock);
         /* The companion calls this between installs. Sweeping here is what clears tasks left by a
            payload reload or a crash, which no longer have a job to finish them. */
-        int freed = bgft_sweep_ours(live);
+        int freed = bgft_sweep_ours(live, 0);
         char out[96];
         snprintf(out, sizeof(out), "{\"ok\":true,\"cleaned\":true,\"freed\":%d}", freed);
         send_json(fd, out);

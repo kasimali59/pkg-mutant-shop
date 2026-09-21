@@ -362,60 +362,111 @@ releases a task only when that task's own record contains a plain-http URL on `/
 match, and **nothing in this project starts, resumes or cancels a task that is not ours.** Store tasks
 stranded in that table can only be cleared from the console's own download list, by its owner.
 
-### CE-32930-7 measured: the console cannot mount `/app0` for ANY fake-signed package
+### CE-32930-7 solved — and the cause was this shop, not the jailbreak
 
-The dashboard icon installs, shows, self-updates — and will not open. Pressing it gives
-`CE-32930-7`. That error now has a measured cause, captured live on port 3232 and kept at
-`research/klog-ce32930-7-app0-mount-2026-09-21.txt`:
+The dashboard icon installed, showed, self-updated, and would not open: `CE-32930-7`. It now opens.
+The cause was **our own install engine giving back the BGFT task that a title needs in order to
+launch**, and getting there took two wrong answers first — both recorded here, because the wrong
+turns are the useful part.
+
+**What the console actually does.** Captured on port 3232
+(`research/klog-ce32930-7-app0-mount-2026-09-21.txt`):
 
 ```
-[SceLncService] launchApp(PKGM00001)  category={gd}  appType={SCE_LNC_APP_TYPE_BIG_APP}  appVer={01.03}
-[SceLncService] PrepareProcessLaunchDir()
+[BGFT] [606] GameWillStart(PKGM00001, 2) start
+[BGFT] ERROR: [3568] task not found. (PKGM00001)
+[BGFT] [608] GameWillStart(PKGM00001, 2) end
 [PS]Error: process_starter\process_mount.cpp at 3577
-[PS]Error: process_starter\process_mount.cpp at 4442
+sceBgftNotifyGameWillStart() ret = 80990019
+[PFS] umount[0x…6fda] finished 0
+[PFS] umount[0x…0efc] finished 0
 PrepareProcessLaunchPkg() ret = 80990019
-[SceLncService] lnc_mount_root.cpp(425)  mountApp0Dir:      LNC_ISOK::0x80990019
-[SceLncService] lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
-[SceLncService] lnc_manager.cpp(439)     launchApp:         LNC_ISOK::0x80990019
+lnc_mount_root.cpp(425)  mountApp0Dir:      LNC_ISOK::0x80990019
 ```
 
-`CE-32930-7` is **`0x80990019` returned by `PrepareProcessLaunchPkg`**, surfacing as a failure to
-mount `/app0` from the installed package. **No process is ever created** — the eboot is never
-reached, so nothing in `ps4-app/tile-pkg/pms/` runs, and nothing in it can be the cause.
+The package's two PFS images **mount successfully** a few lines earlier. Then ShellCore calls
+`sceBgftNotifyGameWillStart`, BGFT answers **`task not found`**, that returns `0x80990019`, and
+ShellCore unmounts what it had just mounted and refuses to start the process. `PrepareProcessLaunchPkg`,
+`mountApp0Dir` and `initializeApp0Dir` all report that same code; none of them is where it came from.
 
-**The control test settles whose fault it is.** Riptide GP2 (`CUSA02365`) — a fake-signed *retail*
-game, nothing to do with this project — was pressed on the same console minutes later and failed at
-the **identical line with the identical code**. Alongside that, every flag field of our PKG header,
-read off the console and compared against the retail-derived packages installed beside it, matches:
+**Two wrong answers, both from reading a filtered log.** The first blamed the eboot's
+`SCE_NEEDED_MODULE` list. The second — written into this changelog — said the console could not mount
+`/app0` for any fake-signed package and put the blame in the jailbreak layer. Both were wrong for the
+same reason: a grep keyed on the `<118>` log prefix, which silently dropped the two lines that matter.
+`[PFS] mount … finished` and `sceBgftNotifyGameWillStart() ret = 80990019` carry no such prefix, so
+the first surviving line — `PrepareProcessLaunchPkg` — got read as the origin. **Check the instrument
+before believing the diagnosis.**
 
-| field | ours (`PKGM00001`) | `CUSA02365` / `CUSA11740` |
-| --- | --- | --- |
-| `pkg_type` @0x04 | 1 | 1 |
-| `drm_type` @0x70 | 15 | 15 |
-| `content_type` @0x74 | 26 | 26 |
-| `content_flags` @0x78 | `0x0A000000` | `0x0A000000` |
-| `pfs_flags` @0x408 | `0x80000000000003CC` | `0x80000000000003CC` |
-| `ekc_version` @0x9C | 1 | 1 |
-| `entry_count` @0x10 | 14 | 27 / 24 |
-| `pfs_image_size` @0x418 | 6,094,848 | 97,320,960 / 523,304,960 |
+The Riptide GP2 control test was also over-read. It failed identically, which felt conclusive, but
+Riptide was installed by *this shop's own lane* too — so "fake-signed" and "installed by us" were
+perfectly confounded and it never distinguished the two. It ruled out our package bytes and our
+eboot. It did not rule out our engine.
 
-Only sizes and entry counts differ, as they must for a smaller application.
+**The proof.** One BGFT task was left registered for the title, deliberately not released, and the
+icon pressed again:
 
-So **this console launches no fake-signed package from its dashboard at all.** Mounting an installed
-package as `/app0` is `SceShellCore`'s job, which places the block outside this repository — in the
-jailbreak layer, on a firmware (13.52) newer than the GoldHEN build running beside it. That last
-sentence is the reasonable reading of the evidence and is deliberately labelled as such: two earlier
-explanations of this error, both blaming our eboot, were confidently wrong and were withdrawn.
+```
+[BGFT] [606] GameWillStart(PKGM00001, 2) start
+[BGFT] [576] task(00000075) PKGM00001          ← found, instead of "task not found"
+[Syscore App] createApp PKGM00001
+   processParam: elfPath = /app0/eboot.bin
+EXEC /app0/eboot.bin [user], vm#1, dmem#1
+[PMS] PKG MUTANT SHOP app starting
+```
 
-**Nothing here changes how the shop is used.** The PS4 shop has never depended on the icon: the
-payload serves the UI on `:8710` and installs through the console's own Debug Package Installer
-service. The icon was convenience, and it is the only thing blocked.
+It launched, and our own code ran for the first time.
 
-**What this project does not do, and never did:** mount anything itself. There is no mount lane in
-the PS4 payload — `grep` finds no mount call, only comments saying so. Every install, games and our
-own dashboard app alike, goes through one function into
-`sceBgftServiceIntDebugDownloadRegisterPkg` + `sceBgftServiceIntDownloadStartTask`; the console
-pulls the bytes over HTTP from us and its own installer promotes them.
+**So a finished BGFT task is the title's launch ticket, and this shop was throwing it away.**
+`bgft_release()` handed the task back the moment a job reached a terminal state, and
+`bgft_sweep_ours()` cleared every finished task of ours before each register. Both exist for a
+measured reason — without them the console's ~12-slot table fills and every register answers
+`0x80990086` — but between them they quietly made **every title this shop installed unlaunchable,
+games included.** Riptide GP2 and METAL SLUG XX were in exactly that state.
+
+Fixed by changing what gets reclaimed and when:
+
+* **`bgft_task_title()`** reads the title id out of a task's own record, recognising a content id by
+  its fixed punctuation (`......-<9 chars>_NN-`) in a binary blob full of NULs.
+* **The sweep keeps a task whose title actually has an `app.pkg` on disk.** Only tasks whose title
+  installed nothing — failed, abandoned, orphaned by a payload reload — are released on sight.
+* **Reclaim happens only under real pressure.** When register answers `0x80990086`, and only then,
+  the sweep runs again with `reclaim=1` and takes our tickets back, then retries once: an install
+  that cannot start is worse than an icon that will not open. That trade is written to the install
+  log when it happens, so a title that stops opening has a recorded reason.
+* **A successful job no longer releases its task at all** — only a failed one does, because a failed
+  job installed nothing and its task is pure waste.
+
+Most of that table is not ours to manage, which is what makes the policy affordable: measured here,
+**9 of 11 slots belonged to the console itself** (eight for one title, plus a system update task).
+
+### What the app found once it finally ran
+
+The launch also produced the first real evidence about the eboot, and it is not flattering:
+
+```
+[PMS] load /system/common/lib/libSceSystemService.sprx -> handle=-2147352574 res=0x00000000
+[PMS] resolved: browser=0 user_init=0 notify=0
+[PMS] the shop is answering - opening it
+[PMS] the shop answered /api/open: HTTP/1.1 200 OK
+[SL] AppFocusChanged [PKGM00001] -> [NPXS20001]
+# A user thread receives a fatal signal
+# signal: 12 (SIGSYS)   thread name: eboot.bin   rip: 00000008000028bc
+```
+
+* **Every module load failed**, so every symbol was null and the app's own browser call was dead.
+  The crash dump says why: inside the sandbox the system libraries are mapped at
+  `/vm2LJNGVpN/common/lib/`, not `/system/common/lib`. Loading them by that absolute path cannot work
+  from an application.
+* **The `/api/open` fallback is the only reason anything appeared on the television.** Asking the
+  unsandboxed payload to open the browser worked first time — the one design decision in that file
+  that has earned its place.
+* **Then the app died with `SIGSYS`** on the way out of `main()`, which is the error dialog that has
+  to be dismissed after the shop opens. Bad system call, `rip` inside libkernel, reached from our own
+  text: the toolchain's exit path is making a call an application sandbox does not allow.
+
+The module paths and the exit are being fixed properly rather than guessed at; this release records
+what was measured. The shop itself is unaffected either way — it has never needed the icon.
+
 
 ### Verified on hardware
 

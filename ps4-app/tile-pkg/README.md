@@ -24,53 +24,51 @@ bash ps4-app/tile-pkg/build-wsl.sh     # WSL; fetches its toolchain on first run
 | the ELF **updates** it | **yes**, verified — `01.00` → `01.01` → `01.02` → `01.03` on the hardware |
 | the installed bytes are ours | **yes**, verified — read back over FTP and hashed: `01.03` = `5968c773…fb`, identical to the build |
 | the icon is on the home screen | **yes** — listed by the console as *PKG MUTANT SHOP* |
-| **the eboot has been run** | **no** — and it cannot be. The console fails to mount `/app0` before any process exists: `PrepareProcessLaunchPkg() ret = 80990019` |
-| is that our package's fault | **no.** A fake-signed *retail* game on the same console fails at the identical line with the identical code |
+| **the eboot has been run** | **yes** — as of 2026-09-21. It launches, runs, and opens the shop in the browser |
+| why it used to fail | **our own install engine** released the BGFT task the title needs to launch. Fixed |
+| what still needs work in the eboot | it cannot load system modules from inside the sandbox, and it exits with `SIGSYS` |
 
-Everything about the *file*, the *install* and the *update* is measured on a real PS4 at 13.52.
-**The app still cannot be launched from the home screen, and that is now understood well enough to
-say it is not this package's doing.**
+**The icon opens the shop.** It took two wrong diagnoses to get there, and both are worth knowing
+about before touching anything in this folder.
 
-Captured on the console — `research/klog-ce32930-7-app0-mount-2026-09-21.txt`:
+`CE-32930-7` is `0x80990019` — and it comes from **`sceBgftNotifyGameWillStart`**, not from the mount:
 
 ```
-[SceLncService] launchApp(PKGM00001)  category={gd}  appType={SCE_LNC_APP_TYPE_BIG_APP}  appVer={01.03}
-[SceLncService] PrepareProcessLaunchDir()
-[PS]Error: process_starter\process_mount.cpp at 3577
-[PS]Error: process_starter\process_mount.cpp at 4442
-PrepareProcessLaunchPkg() ret = 80990019
-[SceLncService] lnc_mount_root.cpp(425)  mountApp0Dir:      LNC_ISOK::0x80990019
-[SceLncService] lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
-[SceLncService] lnc_manager.cpp(439)     launchApp:         LNC_ISOK::0x80990019
+[BGFT] [606] GameWillStart(PKGM00001, 2) start
+[BGFT] ERROR: [3568] task not found. (PKGM00001)
+sceBgftNotifyGameWillStart() ret = 80990019
+[PFS] umount[…] finished 0                      ← rollback of a mount that SUCCEEDED
+PrepareProcessLaunchPkg() ret = 80990019        ← only relaying it
+mountApp0Dir: LNC_ISOK::0x80990019              ← only relaying it
 ```
 
-`CE-32930-7` is `0x80990019` out of `PrepareProcessLaunchPkg`, surfacing as a failure to mount
-`/app0`. **No process is ever created** — the eboot is never reached, so nothing in `pms/` can be
-the cause and nothing in `pms/` can fix it.
+The package's PFS images mount fine. ShellCore then asks BGFT to note that the game is starting,
+BGFT has no **task** for the title, and ShellCore unmounts and gives up.
 
-**The control test was run, and it is the whole answer.** Riptide GP2 (`CUSA02365`) — a fake-signed
-*retail* game, nothing to do with this build — was pressed on the same console minutes later and
-failed at the **identical line with the identical code**. On top of that, every flag field in our
-PKG header matches the installed retail-derived packages read off that same console:
+**The cause was `ps4-app/onconsole/server_ps4.c`, not this folder.** A finished BGFT task is the
+title's launch ticket, and the shop's task housekeeping was handing it back after every install —
+making every title it installed unlaunchable, games included. Leaving one task registered and
+pressing the icon produced `[BGFT] [576] task(00000075) PKGM00001`, then `EXEC /app0/eboot.bin`, and
+the app ran. The engine now keeps a task whose title has an `app.pkg` on disk and only reclaims one
+when the console genuinely has no free slot.
 
-| field | ours | CUSA02365 / CUSA11740 |
-| --- | --- | --- |
-| `pkg_type` @0x04 | 1 | 1 |
-| `drm_type` @0x70 | 15 | 15 |
-| `content_type` @0x74 | 26 | 26 |
-| `content_flags` @0x78 | `0x0A000000` | `0x0A000000` |
-| `pfs_flags` @0x408 | `0x80000000000003CC` | `0x80000000000003CC` |
-| `ekc_version` @0x9C | 1 | 1 |
+**Two earlier explanations were confidently wrong**, and the reason is the same both times: a grep
+keyed on the `<118>` klog prefix dropped the `[PFS] mount` and `sceBgftNotifyGameWillStart` lines, so
+the first surviving line got read as the cause. The Riptide GP2 control test was over-read too — it
+was installed by the same lane, so it never separated "fake-signed" from "installed by us". Verify
+the instrument before believing the diagnosis.
 
-Only sizes and entry counts differ, as they must for a smaller application.
+**What is genuinely still wrong in here**, measured on the first successful launch:
 
-**So: this console cannot launch any fake-signed package from the dashboard.** Mounting an installed
-package as `/app0` happens in `SceShellCore`, not in our code and not in the package — which puts it
-in the jailbreak layer, on a firmware (13.52) newer than the GoldHEN build being used with it. That
-last step is the reasonable reading of the evidence rather than a measured fact, and it is labelled
-as such deliberately: two earlier explanations for this error were confidently wrong.
+* `sceKernelLoadStartModule("/system/common/lib/…")` fails for every library — inside the sandbox
+  they are mapped at `/vm2LJNGVpN/common/lib/`. So `browser=0 user_init=0 notify=0`: the app's own
+  browser call, splash hide and notifications are all dead.
+* The app still opens the shop because it **asks the payload** (`GET /api/open` on `127.0.0.1:8710`,
+  answered `200`) — the payload is not sandboxed, and this is the path that works.
+* Returning from `main()` dies with **`SIGSYS`** (signal 12, `rip` inside libkernel), which is the
+  error the user has to dismiss after the shop opens.
 
-Do not read "installed and verified" as "launchable". The build, the install and the self-update are
+
 proven. The launch is blocked outside this repository.
 
 ## What it is
