@@ -3315,7 +3315,18 @@ class Ps5Bridge:
             # The SCE code travels in `rc` and in pms.log (the verdict line in _run prints this
             # whole dict); it is not appended to the sentence any more, because that sentence is
             # the queue row on a television, where a raw hex code is house-style banned.
-            return False, {"error": install_error_text(r.get("rc")),
+            # THE CONSOLE'S OWN SENTENCE WINS WHEN IT HAS ONE.
+            #
+            # install_error_text is a table of PS5 codes. A PS4 answers with codes that are not in
+            # it and must not be - 0x80990004 there means something entirely different from
+            # anything on that list - so running a PS4 failure through the table produced a PS5
+            # sentence about a PS5 problem. Its payload already words the one case worth explaining
+            # (a title the Store has a newer version of), and those are the words to show.
+            #
+            # A no-op for the PS5: its verdict file carries ok / rc / init_rc / via / content_id /
+            # pid / uri / token and has never had a `msg`, so the table stays the answer there.
+            return False, {"error": (str(r.get("msg") or "").strip()
+                                     or install_error_text(r.get("rc"))),
                            "host": "pms-spawn", "rc": r.get("rc"), "queued": False}
         # NO `queued` KEY. Its absence is load-bearing: `queued is False` is the re-drive gate in
         # Queue._run, and re-driving after a timeout is how one package became several BGFT jobs.
