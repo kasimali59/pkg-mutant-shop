@@ -106,8 +106,18 @@ console the payload reads them out of the file itself.
 
 BGFT keeps one directory per registered task under `/user/bgft/task` and the table is **not**
 unlimited. A task only disappears when something unregisters it, so after a handful of failed test
-installs every new one was refused with `0x80990086` while the dead tasks sat there. Two halves fix
-it: a finished job releases its own task, and a sweep recovers tasks stranded by a reload or a crash.
+installs every new one was refused with `0x80990086` while the dead tasks sat there.
+
+**That was read as "the table is full", and it is not.** klog prints the name beside the code:
+`0x80990086` is `SCE_BGFT_ERROR_CONTENT_ALREADY_DOWNLOADING`, and `0x80990088` is
+`SCE_BGFT_ERROR_SAME_APPLICATION_ALREADY_INSTALLED`. **The conflict is per content id.** Releasing
+tasks only ever looked like making room because the task released was the one holding that title's
+id. Measured since: registering works fine with thirteen directories in `/user/bgft/task`.
+
+So `bgft_release_title()` releases the tasks of the title about to be installed, and nothing else —
+every other title keeps its task, because that task is what lets it launch (see **what proves an
+install**). If the refusal survives that release, the task in the way belongs to the console itself
+and is not ours to remove; the shop says so instead of deleting it.
 
 A task counts as ours only when its record (`d0.pdb`, plain text) carries a **plain-http URL on one
 of the two routes we own** — `/library/` on a companion, or `/pkgfile/` on this console itself — and

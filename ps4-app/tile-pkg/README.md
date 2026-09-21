@@ -58,15 +58,25 @@ the first surviving line got read as the cause. The Riptide GP2 control test was
 was installed by the same lane, so it never separated "fake-signed" from "installed by us". Verify
 the instrument before believing the diagnosis.
 
-**What is genuinely still wrong in here**, measured on the first successful launch:
+**What the first successful launch exposed, and what 01.04 does about it:**
 
-* `sceKernelLoadStartModule("/system/common/lib/…")` fails for every library — inside the sandbox
-  they are mapped at `/vm2LJNGVpN/common/lib/`. So `browser=0 user_init=0 notify=0`: the app's own
-  browser call, splash hide and notifications are all dead.
-* The app still opens the shop because it **asks the payload** (`GET /api/open` on `127.0.0.1:8710`,
-  answered `200`) — the payload is not sandboxed, and this is the path that works.
-* Returning from `main()` dies with **`SIGSYS`** (signal 12, `rip` inside libkernel), which is the
-  error the user has to dismiss after the shop opens.
+* `sceKernelLoadStartModule("/system/common/lib/…")` failed for every library — `-2147352574` is
+  `ENOENT`, and inside the sandbox they are mapped at `/vm2LJNGVpN/common/lib/`, a per-sandbox random
+  prefix. So `browser=0 user_init=0 notify=0`, and `HideSplashScreen` had never once run. **Fixed by
+  linking**: `-lSceSystemService` makes `HideSplashScreen` and `LoadExec` real calls, and
+  `sceKernelSendNotificationRequest` needed nothing at all — it is a libkernel export that `-lkernel`
+  already provided.
+* Returning from `main()` died with **`SIGSYS`** — the CRT's exit path reaching libkernel's `_exit`,
+  a syscall a sandboxed application may not make. **Fixed structurally**: `_Exit` is defined in
+  `main.c`, so libc's `_exit.lo` is never linked. `nm -u` has no `_exit`; `objdump -d -j .plt` has no
+  `_exit@plt`. `main()` now ends with `sceSystemServiceLoadExec("exit", NULL)` and parks if refused.
+* The app opens the shop by **asking the payload** (`GET /api/open` on `127.0.0.1:8710`, answered
+  `200`). The payload is not sandboxed and this is the measured path. The app's own browser call is
+  **deleted**: the toolchain declares `void sceSystemServiceLaunchWebBrowser();` — no url, no return —
+  so the four-argument call it used to make was a guess.
+
+**Not yet verified on hardware:** that pressing the icon now produces no dialog at all, and whether
+`LoadExec("exit")` closes the app cleanly or it falls back to parking. That needs the icon pressed.
 
 
 proven. The launch is blocked outside this repository.

@@ -686,7 +686,8 @@ static int pkg_content_id_from_url_name(const char *name, char *out, size_t outs
  *
  * BGFT keeps one directory per registered task under /user/bgft/task and that table is NOT
  * unlimited. After a handful of test installs on this console every new register started coming
- * back 0x80990086 while the directories of those dead tasks were still sitting there: a task only
+ * back 0x80990086 while the directories of those dead tasks were still sitting there - which was
+ * read as a full table and is not (see bgft_sweep_ours): a task only
  * disappears when somebody unregisters it, so a shop that does not clean up after itself ends up
  * unable to install anything at all - including the packages it installed fine an hour earlier.
  *

@@ -419,9 +419,9 @@ It launched, and our own code ran for the first time.
 **So a finished BGFT task is the title's launch ticket, and this shop was throwing it away.**
 `bgft_release()` handed the task back the moment a job reached a terminal state, and
 `bgft_sweep_ours()` cleared every finished task of ours before each register. Both exist for a
-measured reason — without them the console's ~12-slot table fills and every register answers
-`0x80990086` — but between them they quietly made **every title this shop installed unlaunchable,
-games included.** Riptide GP2 and METAL SLUG XX were in exactly that state.
+measured reason — a stranded task makes the next register fail — but between them they quietly made
+**every title this shop installed unlaunchable, games included.** Riptide GP2 and METAL SLUG XX were
+in exactly that state.
 
 Fixed by changing what gets reclaimed and when:
 
@@ -429,15 +429,72 @@ Fixed by changing what gets reclaimed and when:
   its fixed punctuation (`......-<9 chars>_NN-`) in a binary blob full of NULs.
 * **The sweep keeps a task whose title actually has an `app.pkg` on disk.** Only tasks whose title
   installed nothing — failed, abandoned, orphaned by a payload reload — are released on sight.
-* **Reclaim happens only under real pressure.** When register answers `0x80990086`, and only then,
-  the sweep runs again with `reclaim=1` and takes our tickets back, then retries once: an install
-  that cannot start is worse than an icon that will not open. That trade is written to the install
-  log when it happens, so a title that stops opening has a recorded reason.
+* **Only the title being installed gives up its task** (`bgft_release_title`), because it is about
+  to be replaced anyway. No other title is touched, so nothing loses its place on the home screen
+  so that something else can install.
 * **A successful job no longer releases its task at all** — only a failed one does, because a failed
   job installed nothing and its task is pure waste.
 
-Most of that table is not ours to manage, which is what makes the policy affordable: measured here,
-**9 of 11 slots belonged to the console itself** (eight for one title, plus a system update task).
+**And the "~12-slot table" this port believed in does not exist.** klog prints the names beside the
+codes: `0x80990086` is `SCE_BGFT_ERROR_CONTENT_ALREADY_DOWNLOADING`, `0x80990088` is
+`SCE_BGFT_ERROR_SAME_APPLICATION_ALREADY_INSTALLED`. **The conflict is per content id.** Releasing
+tasks always looked like "making room" because the one released held that title's id. Measured since:
+registering works fine with thirteen directories in the table. Most of those are not ours anyway —
+**9 of 11 belonged to the console itself** when audited (eight for one title, plus a system update).
+
+### App 01.04 — the crash on exit, removed from the binary rather than avoided
+
+Launching the icon worked but left an error to dismiss every time (`CE-34878-0`), after the shop had
+already opened. The crash dump named the chain precisely:
+
+```
+# signal: 12 (SIGSYS)   thread name: eboot.bin
+# rip: 00000008000028bc   BrF: 0000000000406c20   BrT: 00000008000028b0
+```
+
+`SIGSYS` is a system call the process may not make. `BrF` sits in this eboot's own PLT, `BrT` in
+libkernel, and the fault is twelve bytes further in — so: `return` from `main()` → the toolchain's
+`exit` → `_Exit` → `_exit@plt` → libkernel's `_exit` → its syscall, refused to a sandboxed
+application.
+
+**`_Exit` is now defined in `pms/main.c`.** The toolchain's libc keeps `_Exit`, `exit` and `_exit` in
+three separate archive members (`ar t libc.a` → `_Exit.lo`, `exit.lo`, `_exit.lo`), so ours satisfies
+`exit`'s reference and `_exit.lo` is never linked at all. Checked on the built binary: `nm -u` lists
+no `_exit`, and `objdump -d -j .plt` has no `_exit@plt`. The faulting instruction is not merely
+unreachable — it is absent, so no stray `exit()`, `abort()` or `return` can find it again.
+
+`main()` now ends with `sceSystemServiceLoadExec("exit", NULL)`, the documented way for a title to
+close itself, and parks if that is refused. Parking is not lovely — the app sits suspended showing
+nothing and has to be closed with the PS button — but it is silent, and an error dialog after every
+single launch is not. The return code is logged so the next reader knows which happened.
+
+### What the first successful launch exposed in the app
+
+```
+[PMS] load /system/common/lib/libSceSystemService.sprx -> handle=-2147352574 res=0x00000000
+[PMS] resolved: browser=0 user_init=0 notify=0
+[PMS] the shop answered /api/open: HTTP/1.1 200 OK
+```
+
+* **Run-time resolution by absolute path cannot work from an application.** `-2147352574` is
+  `0x80020002`, `ORBIS_KERNEL_ERROR_ENOENT`, and the crash dump says why: this process had its system
+  libraries mapped at `/vm2LJNGVpN/common/lib/` — a per-sandbox random prefix — so
+  `/system/common/lib` is not a path it can see. Every pointer was `NULL`, which means
+  `sceSystemServiceHideSplashScreen` had **never once run** despite the comment claiming it fixed the
+  blank loading screen. Linking is how a sandboxed app reaches these, so the app now links
+  `-lSceSystemService` and calls them directly.
+* **Notifications never needed any of it.** `sceKernelSendNotificationRequest` is a libkernel export
+  declared in `orbis/libkernel.h`, and `-lkernel` was on the link line the whole time. It was being
+  looked up through a handle that could never open.
+* **The direct browser call is deleted.** The toolchain declares
+  `void sceSystemServiceLaunchWebBrowser();` — no url, no return — so the four-argument call site was
+  a guess with a confident comment attached to it. `/api/open` to the unsandboxed payload is measured
+  working on this console and is now the only route. One route that works beats two where one is
+  invented.
+
+Also gone with it: the hand-copied notification struct, `load_module`, `sym_of`,
+`resolve_everything`, and the `-lSceUserService` / `-lSceSysmodule` that existed only to serve the
+deleted call.
 
 ### What the app found once it finally ran
 
