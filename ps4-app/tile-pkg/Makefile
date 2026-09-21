@@ -9,14 +9,17 @@
 # prefix homebrew uses.
 
 TITLE       := PKG MUTANT SHOP
-VERSION     := 1.00
+VERSION     := 01.01
 TITLE_ID    := PKGM00001
 CONTENT_ID  := IV0000-PKGM00001_00-PKGMUTANTSHOP001
 
-# ONLY WHAT THE TOOLCHAIN'S OWN WORKING SAMPLE LINKS. Every extra -lSce... puts another entry in
-# the eboot's SCE_NEEDED_MODULE list, and an application whose module list the console cannot
-# satisfy is refused at launch - which is what CE-32930-7 looks like. hello_world, which launches,
-# needs libkernel alone. Everything else is resolved at run time in main.c.
+# ONLY WHAT THE TOOLCHAIN'S OWN WORKING SAMPLE LINKS. hello_world, the one sample known to launch
+# on this console family, needs libkernel alone; everything else is resolved at run time in main.c.
+#
+# THIS IS NOT A DIAGNOSIS OF CE-32930-7. An earlier version of this comment said the extra
+# SCE_NEEDED_MODULE entries were the cause; that does not survive checking - the modules named are
+# resident on the console and the toolchain ships working samples with the same shape. Matching the
+# known-good reference is free and cannot hurt, which is the whole argument for it.
 LIBS        := -lc -lkernel
 
 ASSETS      := $(wildcard assets/**/*)

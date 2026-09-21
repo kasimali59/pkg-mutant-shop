@@ -1725,7 +1725,13 @@ static void install_local_path(int fd, const char *local) {
  * /data/pkg-mutant-shop, and the install goes down our own BGFT lane - the same one a game from
  * the PC uses, serving the file to the console from this very process.
  */
-#define PS4_TILE_VER   "01.00"       /* bump when ps4-app/tile-pkg changes; compared numerically */
+/* THE VERSION THE ELF CARRIES. It must be HIGHER than what the console already has or the check
+   below decides there is nothing to do - and "01.00" here against the package's "1.00" normalises
+   to the same number, so every fix shipped in the package would have been invisible for ever.
+   ps4-app/onconsole/build-wsl.sh now refuses to build when these two disagree. Bump BOTH whenever
+   ps4-app/tile-pkg changes. Zero-padded NN.NN, which is the form every other title on the console
+   uses. */
+#define PS4_TILE_VER   "01.01"
 #define TILE_PKG_DISK  SHOP_DATA_DIR "/pms-tile.pkg"
 
 /* "01.02" -> 102, "1.00" -> 100. Format-tolerant on purpose: the console stores whatever the

@@ -10,14 +10,16 @@
  * The PS4 has no such field. A PS4 icon is a real application with a real eboot, so this program
  * exists to do by hand what the PS5 gets from one line of metadata.
  *
- * NOTHING IS LINKED THAT DOES NOT HAVE TO BE, and that is not tidiness - it is the fix for an app
- * that would not start at all. Linking the system-service libraries put libSceSystemService and
- * libSceUserService in the eboot's SCE_NEEDED_MODULE list; the toolchain's own hello_world, which
- * launches, needs only libkernel. An application whose module list cannot be satisfied does not
- * fail politely - the console refuses to start it, which is what CE-32930-7 looks like from the
- * sofa. So this links libkernel alone and resolves everything else at run time, exactly the way the
- * shop's payload resolves the install service: a symbol that is not there becomes a sentence on
- * screen instead of an app that will not open.
+ * NOTHING IS LINKED THAT DOES NOT HAVE TO BE. This links libkernel alone and resolves everything
+ * else at run time, which is the shape of the toolchain's own hello_world - the one sample known to
+ * launch on this console family.
+ *
+ * BE CLEAR ABOUT WHY: **CE-32930-7 IS NOT DIAGNOSED.** An earlier version of this comment claimed
+ * the extra SCE_NEEDED_MODULE entries were the cause. That does not survive checking - the modules
+ * named are all resident at /system/common/lib, and the toolchain ships samples with the same shape
+ * that work. Narrowing to the known-good reference is a shot in the dark taken because it is free
+ * and cannot hurt, not a fix for an understood fault. What IS worth keeping either way: a symbol
+ * that is not there becomes a sentence on screen instead of an app that will not open.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +38,7 @@
 /* ---------------------------------------------------------------- run-time symbols */
 
 static int  (*p_launch_browser)(const char *, int, int, int);
+static int  (*p_hide_splash)(void);
 static int  (*p_user_init)(void *);
 static int  (*p_user_term)(void);
 static int  (*p_notify)(int, void *, size_t, int);
@@ -75,6 +78,7 @@ static void resolve_everything(void) {
                        sym_of(ss, "sceSystemServiceLaunchWebBrowser");
     p_user_init = (int (*)(void *))sym_of(us, "sceUserServiceInitialize");
     p_user_term = (int (*)(void))sym_of(us, "sceUserServiceTerminate");
+    p_hide_splash = (int (*)(void))sym_of(ss, "sceSystemServiceHideSplashScreen");
     p_notify = (int (*)(int, void *, size_t, int))
                sym_of(lk, "sceKernelSendNotificationRequest");
     printf("[PMS] resolved: browser=%p user_init=%p notify=%p\n",
@@ -110,6 +114,44 @@ static int shop_is_up(void) {
     int rc = connect(s, (struct sockaddr *)&a, sizeof(a));
     close(s);
     return rc == 0;
+}
+
+static int write_all(int fd, const char *buf, size_t len);   /* defined with the loader below */
+
+/* ASK THE SHOP TO OPEN IT, when the shop is up.
+ *
+ * The payload already has /api/open, and it runs in an UNSANDBOXED process where this project has
+ * measured the browser call working. This program is an application in a sandbox, and whether
+ * /system/common/lib is even visible from there is not established - if those module handles come
+ * back empty, a browser call from here does nothing and the icon looks dead.
+ *
+ * So when the shop is answering, hand it the job: one socket, no system module needed, and the same
+ * code path the phone and the PC already use to open the shop on the television. The direct call
+ * below stays as the fallback for when there is no shop to ask. */
+static int ask_shop_to_open(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    struct timeval tv;
+    tv.tv_sec = 15; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(SHOP_PORT);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) { close(s); return -1; }
+    const char *req = "GET /api/open HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Connection: close\r\n\r\n";
+    if (write_all(s, req, strlen(req)) != 0) { close(s); return -1; }
+    char rep[512] = {0};
+    ssize_t n = read(s, rep, sizeof(rep) - 1);
+    close(s);
+    if (n <= 0) return -1;
+    printf("[PMS] the shop answered /api/open: %.120s\n", rep);
+    /* "launched":true is the shop saying the console took it. Anything else and we try ourselves. */
+    return strstr(rep, "\"launched\":true") ? 0 : -1;
 }
 
 /* Opening the browser needs the user service first - the browser sample in the payload SDK treats
@@ -204,6 +246,10 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[PMS] PKG MUTANT SHOP app starting\n");
     resolve_everything();
+    /* WITHOUT THIS THE CONSOLE SHOWS THE LOADING SCREEN AND NOTHING ELSE, which from the sofa is
+       indistinguishable from an app that does not work. The toolchain's own samples call it first
+       thing; ours never did. */
+    if (p_hide_splash) p_hide_splash();
 
     int up = 0;
     for (int i = 0; i < 3 && !up; i++) {
@@ -214,7 +260,8 @@ int main(void) {
     if (up) {
         printf("[PMS] the shop is answering - opening it\n");
         notify("Opening PKG MUTANT SHOP");
-        if (open_browser(SHOP_URL) != 0)
+        /* the shop first (it is not sandboxed), ourselves second */
+        if (ask_shop_to_open() != 0 && open_browser(SHOP_URL) != 0)
             notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
         return 0;
     }
@@ -233,7 +280,7 @@ int main(void) {
             if (shop_is_up()) {
                 printf("[PMS] the shop came up after %d second(s)\n", i + 1);
                 notify("Opening PKG MUTANT SHOP");
-                if (open_browser(SHOP_URL) != 0)
+                if (ask_shop_to_open() != 0 && open_browser(SHOP_URL) != 0)
                     notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
                 return 0;
             }

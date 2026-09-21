@@ -85,6 +85,22 @@ else
   fi
 fi
 
+# THE TWO VERSIONS MUST NOT AGREE, and that is not a typo. The ELF only installs the package when
+# what it carries is NEWER than what the console has, and both numbers are normalised to digits -
+# so "01.00" here and "1.00" there are the SAME number and the install silently never happens.
+# That shipped once. Never again: this refuses to build when they compare equal or backwards.
+if [ "$LITE" = "0" ]; then
+  TV=$(grep -m1 "define PS4_TILE_VER" "$HERE/server_ps4.c" | grep -o '"[0-9.]*"' | tr -d '"')
+  MV=$(grep -m1 "^VERSION" "$HERE/../tile-pkg/Makefile" | grep -o '[0-9][0-9.]*')
+  norm() { echo "$1" | tr -cd '0-9' | sed 's/^0*//;s/^$/0/'; }
+  if [ "$(norm "$TV")" != "$(norm "$MV")" ]; then
+    echo "ABORT: PS4_TILE_VER ($TV) and the package's VERSION ($MV) must be the same version." >&2
+    echo "       They are what the console compares; bump BOTH together." >&2
+    exit 1
+  fi
+  echo "== dashboard app version: $TV (package $MV)"
+fi
+
 echo "== syntax check"
 "$SDK/bin/orbis-clang" -Wall -DPORT="$PORT" $EXTRA -fsyntax-only -Werror=implicit-function-declaration \
   "$HERE/server_ps4.c" || { echo "ABORT: server_ps4.c does not compile." >&2; exit 1; }

@@ -77,5 +77,30 @@ if [ ! -f "$PKG" ]; then
   echo "ABORT: no package was produced." >&2
   exit 1
 fi
+# PROVE THE PAYLOAD IS ACTUALLY IN THERE. The package is a fixed 6,619,136 bytes whether it holds
+# the payload or not - the filesystem pads - so size tells you nothing, and an app whose package
+# lost its payload cannot start the shop however well its code is written. Extract the finished
+# package and look.
+echo "== checking the package really carries the payload"
+CHK=$(mktemp -d)
+"$OO_PS4_TOOLCHAIN/bin/linux/PkgTool.Core" pkg_extract "$PKG" "$CHK" >/dev/null 2>&1 || true
+GOT="$CHK/uroot/pms-payload.elf"
+WANT=$(stat -c%s pms-payload.elf)
+if [ ! -f "$GOT" ]; then
+  echo "ABORT: the built package does not contain pms-payload.elf." >&2
+  rm -rf "$CHK"; exit 1
+fi
+HAVE=$(stat -c%s "$GOT")
+if [ "$HAVE" != "$WANT" ]; then
+  echo "ABORT: the payload inside the package is $HAVE bytes, expected $WANT." >&2
+  rm -rf "$CHK"; exit 1
+fi
+if [ "$(sha256sum "$GOT" | cut -d" " -f1)" != "$(sha256sum pms-payload.elf | cut -d" " -f1)" ]; then
+  echo "ABORT: the payload inside the package is not the one we put in." >&2
+  rm -rf "$CHK"; exit 1
+fi
+echo "   payload inside: $HAVE bytes, sha256 matches"
+rm -rf "$CHK"
+
 echo "BUILT: $HERE/$PKG"
 ls -l "$PKG"
