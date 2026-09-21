@@ -1,4 +1,4 @@
-# PKG MUTANT SHOP 3.60.0 - setup and runbook
+# PKG MUTANT SHOP 3.62.0 - setup and runbook
 
 This is the one current document for installing, running, updating and triaging the app. Every
 sentence in it was read out of the code as it is today (`companion/server.py`,
@@ -117,6 +117,28 @@ what spawns our installer for every install. `kstuff_lite` and `shadowmountplus`
 autoloader's list as well; the ELF starts ShadowMountPlus itself if it is not already up.
 
 Nothing else needs to be, or should be, running: no DPI host, no install daemon, nothing on 12800.
+
+### 2.1b If the console is a PS4
+
+A PS4 on 13.52 needs its own payload, `PKG-MUTANT-SHOP-PS4.elf` - the PS5 one will not run there,
+and the jailbreak's loader accepts it and then does nothing, which looks like a crash but is simply
+the wrong machine. Post it to the loader the jailbreak provides:
+
+```
+curl -X POST --data-binary @PKG-MUTANT-SHOP-PS4.elf http://<ps4>:9090/
+```
+
+Wait about twelve seconds, then `http://<ps4>:8710/api/health` should answer with
+`"platform":"ps4"`. Put that address in **Settings -> Your consoles -> PS4 address** and the console
+joins the picker. Reloading over a running copy is fine: the old one hands the port over.
+
+**A PS4 loses its payload loader in rest mode.** After a suspend and resume the jailbreak's FTP and
+klog come back and the loader on 9090 does not, so the exploit has to be re-run before another ELF
+can be pushed - and the shop has to be loaded again too. `/api/rest/prepare` says so rather than
+pretending there is something to stop.
+
+There is no `deploy.py` for the PS4: that script drives Payload Manager, which is a PS5 tool, and
+this app does not reach into the PS4's jailbreak.
 
 ### 2.2 Loading the shop
 

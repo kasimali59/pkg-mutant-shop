@@ -1,15 +1,21 @@
 # PKG MUTANT SHOP
 
-A homebrew **package manager + store front-end** for a jailbroken PlayStation 5 (FW 12.70, Y2JB).
-Browse a library, see a game's updates / DLC / cheats / patches, and install directly - from the
-console itself, from a PC, or from a phone. Version **3.60.0**. Licence: **GPL-3.0** (`LICENSE`,
+A homebrew **package manager + store front-end** for a jailbroken **PlayStation 5** (FW 12.70,
+Y2JB) and **PlayStation 4** (FW 13.52) - both at once, from one app. Browse a library, see a game's
+updates / DLC / cheats / patches, and install directly - from the console itself, from a PC, or from
+a phone. Version **3.62.0**. Licence: **GPL-3.0** (`LICENSE`,
 `THIRD-PARTY-NOTICES.md`).
 
 **Start here: [SETUP.md](SETUP.md)** - the one current runbook (PC side, console side, how an
 install flows, how to update, triage). Then `MUTANT PKG ENGINE.md` section 0 for the install engine.
 
-> Colors: black · light matte yellow · gray. One HTML page for every device (PS5 WebKit, PC browser,
-> phone). Fifteen languages.
+> Colors: black · light matte yellow · gray. One HTML page for every device (PS5 and PS4 WebKit, PC
+> browser, phone). Fifteen languages.
+
+> **Two consoles, one app.** A PS5 payload and a PS4 payload - one binary cannot run on both, which
+> was measured, not assumed - behind one UI, one companion, one queue and one set of build gates.
+> What the PS4 does not do yet: cheats and mods (its jailbreak gives a payload no kernel access) and
+> a dashboard tile. See [ps4-app/onconsole/README.md](ps4-app/onconsole/README.md).
 
 ---
 
@@ -120,7 +126,7 @@ has to change - see SETUP.md section 5. Build the ELF in WSL with `bash ps5-app/
 
 ---
 
-## What it does (3.60.0)
+## What it does (3.62.0)
 
 - Library from `param.sfo` metadata and real `icon0.png` art; base / update / DLC grouped by title id;
   install state read from the console (`bgft.db`, `app.pkg` presence) - never from `app.db` alone
