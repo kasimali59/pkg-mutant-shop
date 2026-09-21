@@ -1253,7 +1253,36 @@ static int fs_recv_write(int cl, const char *rawpath, const char *req, int heade
 
 /* --------------------------------------------------------------- the library */
 
-static char *build_library_json(void) {
+/* THESE THREE SCANS SHARE ONE BUFFER AND THIS SERVER IS THREADED.
+ *
+ * The PS5 payload keeps its scan buffer in a static safely because it answers on a single accept
+ * loop. This one gives every connection its own thread, and a 512-entry title array is far too
+ * large to put on a thread stack - so the buffers stay static and one lock covers every reader of
+ * them. It is needed: the companion, the page on the television and a phone all poll /api/library,
+ * and two of them landing together would have had one thread filling the array while another read
+ * it. Not a hot path - the companion caches the answer for thirty seconds.
+ */
+static pthread_mutex_t g_scan_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The USB scan, remembered briefly. Every /api/library used to walk eight mount points and read
+   the header of every package on them; the companion alone asks twice a minute, and the page asks
+   too. A stick plugged in shows up within twenty seconds, which nobody notices - the console does.
+   Guarded by g_scan_lock, like everything else that touches these buffers. */
+static usbpkg_t g_usb[USBPKG_MAX];
+static int g_usb_n = 0;
+static long long g_usb_at = 0;
+#define USB_SCAN_TTL_MS 20000
+
+static int usb_scan_cached(void) {
+    long long now = now_ms();
+    if (!g_usb_at || now - g_usb_at > USB_SCAN_TTL_MS) {
+        g_usb_n = usb_scan(g_usb, USBPKG_MAX);
+        g_usb_at = now;
+    }
+    return g_usb_n;
+}
+
+static char *build_library_json_locked(void) {
     static ps4_title_t rows[MAX_TITLES];
     int n = read_console_titles(rows, MAX_TITLES);
 
@@ -1290,8 +1319,8 @@ static char *build_library_json(void) {
        how PS4 owners actually keep their library. `install_key` is "local:<path>", exactly the form
        the PS5 build's /api/install already takes, so one shape covers both consoles. */
     {
-        static usbpkg_t usb[USBPKG_MAX];
-        int un = usb_scan(usb, USBPKG_MAX);
+        usbpkg_t *usb = g_usb;
+        int un = usb_scan_cached();
         for (int i = 0; i < un; i++) {
             char tid[16];
             tid_from_cid(usb[i].cid, tid, sizeof(tid));
@@ -1324,7 +1353,7 @@ static char *build_library_json(void) {
     return buf;
 }
 
-static char *build_installed_json(void) {
+static char *build_installed_json_locked(void) {
     static ps4_title_t rows[MAX_TITLES];
     int n = read_console_titles(rows, MAX_TITLES);
     size_t cap = 32 * 1024, len = 0;
@@ -1384,7 +1413,22 @@ static void send_devices(int fd) {
     send_json(fd, out);
 }
 
-static void send_storage(int fd) {
+/* The three wrappers. Every caller goes through these; nothing takes the lock twice. */
+static char *build_library_json(void) {
+    pthread_mutex_lock(&g_scan_lock);
+    char *r = build_library_json_locked();
+    pthread_mutex_unlock(&g_scan_lock);
+    return r;
+}
+
+static char *build_installed_json(void) {
+    pthread_mutex_lock(&g_scan_lock);
+    char *r = build_installed_json_locked();
+    pthread_mutex_unlock(&g_scan_lock);
+    return r;
+}
+
+static void storage_json(char *out, size_t outsz) {
     static ps4_title_t rows[MAX_TITLES];
     int n = read_console_titles(rows, MAX_TITLES);
     long long games = 0;
@@ -1397,12 +1441,20 @@ static void send_storage(int fd) {
         freeb = (long long)vfs.f_bavail * (long long)vfs.f_frsize;
         total = (long long)vfs.f_blocks * (long long)vfs.f_frsize;
     }
-    char out[600];
-    snprintf(out, sizeof(out),
+    snprintf(out, outsz,
              "{\"ok\":true,\"reachable\":true,\"drives\":[{\"id\":\"internal\","
              "\"label\":\"Internal HDD\",\"used\":%lld,\"games_bytes\":%lld,\"free\":%lld,"
              "\"total\":%lld,\"count\":%d,\"kind\":\"console\"}]}",
              total - freeb, games, freeb, total, count);
+}
+
+static void send_storage(int fd) {
+    /* Built under the lock, sent outside it: a socket write can block on a peer that has stopped
+       reading, and holding the scan lock through that would stall every other request. */
+    char out[600];
+    pthread_mutex_lock(&g_scan_lock);
+    storage_json(out, sizeof(out));
+    pthread_mutex_unlock(&g_scan_lock);
     send_json(fd, out);
 }
 
@@ -1745,6 +1797,70 @@ static void handle_get(int fd, const char *rawpath) {
        It goes through exactly the same installer as a package from the PC: the file is registered,
        served back to the console over loopback, and that URL is handed to BGFT. No separate lane, no
        second verdict path, and nothing that writes a title without its data behind it. */
+    /* ROUTES THE PS5 ANSWERS AND THIS CONSOLE CANNOT, answered in words.
+     *
+     * Unknown /api/ paths fall through to a bare {} so an older page keeps working, and that is
+     * exactly what makes a missing route dangerous: the caller reads {} as "nothing to report"
+     * rather than "this console does not do that". Each of these is a real button somewhere, so
+     * each says what is true instead of going quiet. The POST side of cheats and mods already did
+     * this; the GET side did not, which is how /api/cheat/paths answered {} to the settings panel.
+     */
+    if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
+        !strncmp(path, "/api/patch", 10)) {
+        send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
+                      "\"error\":\"Mods and cheats are not available on the PS4 yet\"}");
+        return;
+    }
+    if (!strcmp(path, "/api/move") || !strcmp(path, "/api/move/status") ||
+        !strcmp(path, "/api/game/delete-backup") || !strcmp(path, "/api/game/delete")) {
+        /* These act on a mounted backup container, which is a PS5 arrangement. A PS4 game is
+           installed or it is not there, so there is nothing here to move or unmount. */
+        send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
+                      "\"error\":\"Game backups are a PS5 feature - a PS4 game is installed "
+                      "or it is not there\"}");
+        return;
+    }
+    if (!strcmp(path, "/api/payloads/autostart")) {
+        send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
+                      "\"error\":\"Starting homebrew automatically is a PS5 feature\"}");
+        return;
+    }
+    if (!strcmp(path, "/api/rest/prepare")) {
+        /* On the PS5 this stops the payloads that crash the console on wake. The PS4 shop starts
+           nothing and manages nothing, so there is genuinely nothing to stop - but the second
+           sentence is worth saying, because it was measured: after a suspend and resume this
+           console came back with the shop gone. */
+        send_json(fd, "{\"ok\":true,\"platform\":\"ps4\",\"stopped\":[],\"survived\":[],"
+                      "\"message\":\"Nothing of ours has to be stopped on the PS4 before rest "
+                      "mode. The shop has to be loaded again after the console wakes.\"}");
+        return;
+    }
+    if (!strcmp(path, "/api/install/status")) {
+        /* THE SAME SHAPE THE PS5 ANSWERS, because the companion's console-local lane polls this and
+           nothing else. Without it that lane would have handed the package over, polled a route
+           that does not exist, read {} as "not finished yet" and sat there for its full hour before
+           reporting that the console never said anything - with the game installed the whole time.
+           A route that exists on one payload and not the other is a silent dead button.
+
+           `accepted_only` is false on purpose: unlike the PS5's path, this verdict is not "the
+           installer took it", it is app.pkg on disk at the expected size, which is the proof the
+           companion would otherwise go and gather for itself. */
+        job_refresh();
+        pthread_mutex_lock(&g_job_lock);
+        int done = g_job.active && (!strcmp(g_job.state, "installed") || !strcmp(g_job.state, "error"));
+        int act  = g_job.active && !strcmp(g_job.state, "downloading");
+        int okf  = g_job.active && !strcmp(g_job.state, "installed");
+        char en[400], em[500], o[1100];
+        json_escape(g_job.name, en, sizeof(en));
+        json_escape(g_job.msg, em, sizeof(em));
+        pthread_mutex_unlock(&g_job_lock);
+        snprintf(o, sizeof(o),
+                 "{\"active\":%s,\"done\":%s,\"ok\":%s,\"accepted_only\":false,"
+                 "\"name\":\"%s\",\"message\":\"%s\"}",
+                 act ? "true" : "false", done ? "true" : "false", okf ? "true" : "false", en, em);
+        send_json(fd, o);
+        return;
+    }
     if (!strcmp(path, "/api/engine/install-local")) {
         char lp[1024] = {0};
         if (!qparam(rawpath, "path", lp, sizeof(lp)) || lp[0] != '/') {

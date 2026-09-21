@@ -168,6 +168,21 @@ re-run. It is not worth guessing at.
 What exists instead: **`/api/open`** launches the console's own browser at the shop, so one tap in
 the app (or on a phone) puts it on the television. The URL is also shown in Settings.
 
+## Routes the PS5 has and this console does not
+
+Unknown `/api/` paths fall through to a bare `{}` so an older page keeps working - which is exactly
+what makes a missing route dangerous, because the caller reads `{}` as "nothing to report" rather
+than "this console does not do that". Every route the companion actually calls was checked against
+this payload, and each one the PS4 cannot do now answers in words: cheats, mods and patches (GET as
+well as POST - the GET side was answering `{}` to the settings panel), backup move and delete, and
+payload autostart. `/api/rest/prepare` answers that there is nothing of ours to stop, and that the
+shop has to be loaded again after the console wakes, which was measured rather than assumed.
+
+The one deliberate exception is **`/api/helpers`**. On the PS5 it reports ShadowMount, which binds
+loopback-only so only the console can see it. A PS4 has no ShadowMount and its FTP belongs to the
+jailbreak, not to us - so the honest answer is silence: the companion only overlays a helper state
+when the console replies `ok: true`, and otherwise paints "unknown" instead of a red "not running".
+
 ## Ports and tools on the console
 
 | port | what |
