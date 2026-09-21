@@ -71,6 +71,9 @@
 #define INSTALL_LOG    SHOP_DATA_DIR "/install.log"
 #define APP_DB_PATH    "/system_data/priv/mms/app.db"
 #define APPMETA_ROOT   "/user/appmeta"
+/* The shop's own dashboard app. Same title id as the PS5 tile on purpose - one app, one identity,
+   whichever console it is on - and it cannot collide with a game, which is CUSA or NPXS. */
+#define PS4_TILE_TID   "PKGM00001"
 
 /* Where an installed PS4 game's data actually lands. app.pkg WITH BYTES here is the only honest
    proof a title is installed - /user/appmeta survives an uninstall and would lie (the PS5 side
@@ -1842,6 +1845,25 @@ static void handle_get(int fd, const char *rawpath) {
         send_json(fd, "{\"ok\":true,\"platform\":\"ps4\",\"stopped\":[],\"survived\":[],"
                       "\"message\":\"Nothing of ours has to be stopped on the PS4 before rest "
                       "mode. The shop has to be loaded again after the console wakes.\"}");
+        return;
+    }
+    if (!strcmp(path, "/api/tile/status")) {
+        /* Is the shop on the console's home screen? The PS5 build answers the same question, and
+           the page and the companion both ask it - a PS4 that could not answer would simply look
+           like a console with no app, which is the very thing this is here to report.
+
+           Proof is the app's own app.pkg, exactly as for a game: a title can be registered in
+           app.db and have nothing behind it, and that is the state that reads as "installed" while
+           being unlaunchable. THE PACKAGE IS NOT INSTALLED FROM HERE: it carries this payload, so a
+           payload that carried it would contain a copy of itself and grow with every build. The PC
+           installs it, down the ordinary install lane. */
+        long long onDisk = installed_app_pkg(PS4_TILE_TID);
+        char out[220];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"title_id\":\"%s\",\"registered\":%s,"
+                 "\"bytes\":%lld,\"installed_by\":\"companion\"}",
+                 PS4_TILE_TID, onDisk > 0 ? "true" : "false", onDisk);
+        send_json(fd, out);
         return;
     }
     if (!strcmp(path, "/api/install/status")) {

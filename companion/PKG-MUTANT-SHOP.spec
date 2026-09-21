@@ -50,7 +50,13 @@ a = Analysis(
     ['server.py'],
     pathex=[],
     binaries=[],
-    datas=[('..\\web', 'web')],
+    # The PS4 dashboard app travels with the exe: a PS4 has no other way to get the shop onto
+    # its home screen, and the companion installs it the first time it sees a PS4 without it.
+    # Absent at build time is not fatal - the app simply has nothing to offer.
+    # Forward slashes on purpose: PyInstaller accepts them and a backslash before 't' in
+    # 'tile-pkg' is a tab in any string that is not raw.
+    datas=[('../web', 'web'),
+           ('../ps4-app/tile-pkg/IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg', 'ps4-tile')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

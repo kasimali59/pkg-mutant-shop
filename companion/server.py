@@ -53,6 +53,20 @@ else:
 # the frozen build CHEATS_DIR does not exist and the sync below has nothing to push - by design.
 # From source, assets/cheats is the repo copy and the FTP/HTTP sync is a repair path for a console
 # whose /data was wiped.
+# THE PS4 DASHBOARD APP. A real PS4 application package (PKGM00001) that puts the shop on the
+# console's home screen; built by ps4-app/tile-pkg/build-wsl.sh and shipped inside the exe, because
+# a PS4 whose only copy of the shop is a payload has nothing to press once a rest cycle takes the
+# jailbreak's loader away. Installed through the ordinary install lane - it IS an ordinary package.
+if getattr(sys, "frozen", False):
+    PS4_TILE_PKG = os.path.join(sys._MEIPASS, "ps4-tile",
+                                "IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg")
+else:
+    PS4_TILE_PKG = os.path.normpath(os.path.join(
+        HERE, "..", "ps4-app", "tile-pkg", "IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg"))
+PS4_TILE_KEY = "PKG-MUTANT-SHOP-PS4-APP.pkg"
+PS4_TILE_TID = "PKGM00001"
+PS4_TILE_CID = "IV0000-PKGM00001_00-PKGMUTANTSHOP001"
+
 if getattr(sys, "frozen", False):
     CHEATS_DIR = os.path.join(sys._MEIPASS, "cheats")
 else:
@@ -2262,6 +2276,17 @@ class Library:
                           "updates": [], "dlc": [], "cheats": []})
         games += load_sources(self.cfg)
         # atomic swap: registry / sizes / games all become visible together [B4]
+        # THE PS4 APP RIDES THE SAME ROUTE AS EVERY OTHER PACKAGE. Registering it here means it is
+        # served by /library/<key> - which already answers HEAD, 200 and 206 properly, which the
+        # console's installer requires - instead of needing a second file server that would have to
+        # get byte ranges right all over again. It is not a library title: build_library never sees
+        # it, so it cannot appear as a game on anyone's shelf.
+        if os.path.isfile(PS4_TILE_PKG):
+            reg[PS4_TILE_KEY] = PS4_TILE_PKG
+            try:
+                sizes[PS4_TILE_KEY] = os.path.getsize(PS4_TILE_PKG)
+            except OSError:
+                pass
         self.file_registry, self.file_sizes = reg, sizes
         # str(... or ""): a sources.json entry with no name (or name: null) raised inside this
         # sort, at boot, before the log banner - the frozen exe simply closed.
@@ -4240,6 +4265,39 @@ class Ps5Bridge:
         # The USB-stick listing is cached too now (console_usb_packages); a stick's package that
         # just installed should stop being offered as installable on the next library read.
         self._usbpkg_memo = None
+
+    # ------------------------------------------------ the PS4's dashboard app
+    #
+    # A PS5 gets its tile from the ELF, which installs the package it carries. The PS4 cannot work
+    # that way: its tile package CARRIES the payload (so that pressing the icon can start the shop
+    # with this PC switched off), and a payload that also carried the tile would contain a copy of
+    # itself - every rebuild bigger than the last. So the PC installs it, through the ordinary
+    # install lane, which is the same lane the tile would have used anyway.
+    def ps4_tile_installed(self, force=False):
+        """True / False / None (could not ask). Proof is the app's own app.pkg, as for any title."""
+        if not self.is_ps4():
+            return None
+        try:
+            return bool(self.installed_app_pkg(PS4_TILE_TID))
+        except Exception:
+            return None
+
+    def install_ps4_tile(self, force=False):
+        """Install the dashboard app on this PS4. Returns (ok, info)."""
+        if not self.is_ps4():
+            return False, {"error": "That console is not a PS4"}
+        if not os.path.isfile(PS4_TILE_PKG):
+            return False, {"error": "This copy of the app does not carry the PS4 dashboard app"}
+        if not force and self.ps4_tile_installed():
+            return True, {"already": True, "title_id": PS4_TILE_TID}
+        url = "http://%s:%d/library/%s" % (companion_ip_for(self.ip),
+                                           self.cfg["companion"]["port"], PS4_TILE_KEY)
+        try:
+            size = os.path.getsize(PS4_TILE_PKG)
+        except OSError:
+            size = 0
+        return self.install_spawn(url, "PKG MUTANT SHOP", force=True,
+                                  pkg={"content_id": PS4_TILE_CID, "size": size, "kind": "base"})
 
     def _reachable_fast(self, budget=0.35):
         """Is ANY transport to this console accepting connections right now?
@@ -6431,6 +6489,21 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     _ps4_on = bool(_b4.up() and _b4.engine_available())
                     srv._ps4_probe = (time.monotonic(), _ps4_on)
+            if _ps4_on and not getattr(srv, "_ps4_tile_tried", False):
+                # ONCE PER PROCESS, ON A THREAD. Health is polled every six seconds and this is an
+                # install; it must never be on that path. It is also never retried in a loop - a
+                # console that refuses the app should say so once, not every six seconds forever.
+                srv._ps4_tile_tried = True
+                def _tile():
+                    try:
+                        if _b4.ps4_tile_installed():
+                            return
+                        print("[ps4] the dashboard app is not installed - installing it")
+                        ok, info = _b4.install_ps4_tile()
+                        print("[ps4] dashboard app: ok=%s %s" % (ok, str(info)[:160]))
+                    except Exception as e:
+                        print("[ps4] dashboard app install skipped: %r" % e)
+                threading.Thread(target=_tile, daemon=True).start()
             # PROBE MEMO. This endpoint is polled every 6 s by the console's UI, again by this
             # PC's own UI if it is open, and again by peers - and each call opened fresh TCP
             # connections to the console for ping() and ftp_ok(). On the console those connections
@@ -7189,6 +7262,20 @@ class Handler(BaseHTTPRequestHandler):
             srv.fleet.reload()
             srv.engine.set_sources(assemble_sources(srv.cfg))
             return self._json({"ok": True})
+        if path == "/api/ps4/tile":
+            # Install (or reinstall, with force) the PS4 dashboard app on the chosen console.
+            cid = body.get("console") or ""
+            b = srv.fleet.bridge(cid) if cid else None
+            if b is None:
+                b = next((srv.fleet.bridge(c["id"]) for c in srv.fleet.consoles
+                          if str(c.get("platform") or "").lower() == "ps4"), None)
+            if b is None:
+                return self._json({"ok": False, "error": "No PS4 is set up"}, 400)
+            ok, info = b.install_ps4_tile(force=bool(body.get("force")))
+            out = {"ok": bool(ok), "title_id": PS4_TILE_TID}
+            if isinstance(info, dict):
+                out.update({k: v for k, v in info.items() if k in ("error", "already", "busy", "rc")})
+            return self._json(out, 200 if ok else 502)
         if path == "/api/rescan":
             srv.library.scan()
             return self._json({"ok": True, "count": len(srv.library.games), "empty": srv.library.is_empty,
