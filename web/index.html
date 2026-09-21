@@ -1241,6 +1241,11 @@ html{scroll-behavior:smooth}
             <input id="setIp4" class="short" placeholder="192.168.1.60" aria-label="PS4 address"
                    autocomplete="off" spellcheck="false">
           </div>
+          <!-- THE PS4'S ICON. A PS5 gets its tile from the ELF; a PS4 cannot work that way,
+               because its package carries the payload and a payload carrying the package would
+               contain a copy of itself. So the PC installs it - automatically the first time it
+               sees a PS4 without it, and from this button whenever someone wants it back. -->
+          <div class="svc"><span class="k tip" data-tip="Put PKG MUTANT SHOP on the PS4's home screen, so the shop opens from an icon with this PC switched off." data-i18n-tip="ui_tip_ps4_app" data-i18n="ui_ps4_app">PS4 home screen app</span><span class="v"><span id="ps4AppState">-</span> <button class="btn ghost sm needspc" id="ps4AppInstall" data-i18n="ui_ps4_app_install">Install it</button></span></div>
           <div class="svc"><span class="k"><span class="led" id="ledCon"></span><span data-i18n="ui_connection">Connection</span></span><span class="v" id="conState">-</span></div>
           <div class="svc"><span class="k" data-i18n="ui_open_on_tv">Open it on the TV</span><span class="v mono ell" id="devPs5">-</span></div>
           <!-- The fleet list said "PS5 - 10.0.0.99", which is what the Connection row directly
@@ -1475,7 +1480,7 @@ var I18N={
     ui_tip_test_console:"Ask the console right now whether the shop is answering and whether an install could start.",
     ui_btn_open_on_ps5:"Open on PS5",
     ui_tip_open_ps5:"Open the shop on the PS5's own screen. The app must already be loaded there.",
-    ui_console_address:"PS5 address",ui_ps4_address:"PS4 address",
+    ui_console_address:"PS5 address",ui_ps4_address:"PS4 address",ui_ps4_app:"PS4 home screen app",ui_ps4_app_yes:"installed",ui_ps4_app_no:"not installed",ui_ps4_app_install:"Install it",ui_tip_ps4_app:"Put PKG MUTANT SHOP on the PS4's home screen, so the shop opens from an icon with this PC switched off.",
     ui_aria_ps5_address:"PS5 address",
     ui_connection:"Connection",
     ui_open_on_tv:"Open it on the TV",
@@ -1961,7 +1966,7 @@ var I18N={
     ui_tip_test_console:"Pregunta a la consola ahora mismo si la tienda responde y si se podría iniciar una instalación.",
     ui_btn_open_on_ps5:"Abrir en la PS5",
     ui_tip_open_ps5:"Abre la tienda en la pantalla de la propia PS5. La app ya tiene que estar cargada ahí.",
-    ui_console_address:"Dirección de la PS5",ui_ps4_address:"Dirección de la PS4",
+    ui_console_address:"Dirección de la PS5",ui_ps4_address:"Dirección de la PS4",ui_ps4_app:"App en el menú de la PS4",ui_ps4_app_yes:"instalada",ui_ps4_app_no:"no instalada",ui_ps4_app_install:"Instalar",ui_tip_ps4_app:"Pon PKG MUTANT SHOP en el menú de la PS4, para abrir la tienda desde un icono con este PC apagado.",
     ui_aria_ps5_address:"Dirección de la PS5",
     ui_connection:"Conexión",
     ui_open_on_tv:"Ábrela en la TV",
@@ -2447,7 +2452,7 @@ var I18N={
     ui_tip_test_console:"Pergunta à consola agora mesmo se a loja está a responder e se uma instalação poderia começar.",
     ui_btn_open_on_ps5:"Abrir na PS5",
     ui_tip_open_ps5:"Abre a loja no ecrã da própria PS5. A aplicação já tem de estar carregada lá.",
-    ui_console_address:"Endereço da PS5",ui_ps4_address:"Endereço da PS4",
+    ui_console_address:"Endereço da PS5",ui_ps4_address:"Endereço da PS4",ui_ps4_app:"App no menu da PS4",ui_ps4_app_yes:"instalada",ui_ps4_app_no:"não instalada",ui_ps4_app_install:"Instalar",ui_tip_ps4_app:"Coloca o PKG MUTANT SHOP no menu da PS4, para abrir a loja a partir de um ícone com este PC desligado.",
     ui_aria_ps5_address:"Endereço da PS5",
     ui_connection:"Ligação",
     ui_open_on_tv:"Abrir na TV",
@@ -2933,7 +2938,7 @@ var I18N={
     ui_tip_test_console:"Demande tout de suite à la console si la boutique répond et si une installation peut démarrer.",
     ui_btn_open_on_ps5:"Ouvrir sur la PS5",
     ui_tip_open_ps5:"Ouvre la boutique sur l'écran de la PS5. L'application doit déjà y être chargée.",
-    ui_console_address:"Adresse de la PS5",ui_ps4_address:"Adresse de la PS4",
+    ui_console_address:"Adresse de la PS5",ui_ps4_address:"Adresse de la PS4",ui_ps4_app:"Application sur l'accueil PS4",ui_ps4_app_yes:"installée",ui_ps4_app_no:"non installée",ui_ps4_app_install:"Installer",ui_tip_ps4_app:"Place PKG MUTANT SHOP sur l'accueil de la PS4, pour ouvrir la boutique depuis une icône avec ce PC éteint.",
     ui_aria_ps5_address:"Adresse de la PS5",
     ui_connection:"Connexion",
     ui_open_on_tv:"Ouvrir sur la TV",
@@ -3419,7 +3424,7 @@ var I18N={
     ui_tip_test_console:"Fragt die Konsole sofort, ob der Shop antwortet und ob eine Installation starten könnte.",
     ui_btn_open_on_ps5:"Auf der PS5 öffnen",
     ui_tip_open_ps5:"Öffnet den Shop auf dem Bildschirm der PS5. Die App muss dort schon geladen sein.",
-    ui_console_address:"PS5-Adresse",ui_ps4_address:"PS4-Adresse",
+    ui_console_address:"PS5-Adresse",ui_ps4_address:"PS4-Adresse",ui_ps4_app:"PS4-Startbildschirm-App",ui_ps4_app_yes:"installiert",ui_ps4_app_no:"nicht installiert",ui_ps4_app_install:"Installieren",ui_tip_ps4_app:"Legt PKG MUTANT SHOP auf den PS4-Startbildschirm, damit der Shop über ein Symbol startet - auch bei ausgeschaltetem PC.",
     ui_aria_ps5_address:"PS5-Adresse",
     ui_connection:"Verbindung",
     ui_open_on_tv:"Am Fernseher öffnen",
@@ -3905,7 +3910,7 @@ var I18N={
     ui_tip_test_console:"ショップが応答しているか、インストールを開始できるかを、今すぐ本体に確認します。",
     ui_btn_open_on_ps5:"PS5 で開く",
     ui_tip_open_ps5:"PS5 の画面でショップを開きます。アプリが本体で読み込まれている必要があります。",
-    ui_console_address:"PS5 のアドレス",ui_ps4_address:"PS4 のアドレス",
+    ui_console_address:"PS5 のアドレス",ui_ps4_address:"PS4 のアドレス",ui_ps4_app:"PS4 のホーム画面アプリ",ui_ps4_app_yes:"インストール済み",ui_ps4_app_no:"未インストール",ui_ps4_app_install:"インストール",ui_tip_ps4_app:"PKG MUTANT SHOP を PS4 のホーム画面に追加します。PC の電源が入っていなくてもアイコンから開けます。",
     ui_aria_ps5_address:"PS5 のアドレス",
     ui_connection:"接続",
     ui_open_on_tv:"テレビで開く",
@@ -4391,7 +4396,7 @@ var I18N={
     ui_tip_test_console:"اسأل الجهاز الآن إن كان المتجر يستجيب وإن كان بالإمكان بدء تثبيت.",
     ui_btn_open_on_ps5:"افتح على PS5",
     ui_tip_open_ps5:"افتح المتجر على شاشة PS5 نفسه. يجب أن يكون التطبيق محمّلًا هناك.",
-    ui_console_address:"عنوان PS5",ui_ps4_address:"عنوان PS4",
+    ui_console_address:"عنوان PS5",ui_ps4_address:"عنوان PS4",ui_ps4_app:"تطبيق الشاشة الرئيسية لـ PS4",ui_ps4_app_yes:"مثبَّت",ui_ps4_app_no:"غير مثبَّت",ui_ps4_app_install:"تثبيت",ui_tip_ps4_app:"يضع PKG MUTANT SHOP على الشاشة الرئيسية لجهاز PS4، ليفتح المتجر من أيقونة حتى مع إيقاف هذا الكمبيوتر.",
     ui_aria_ps5_address:"عنوان PS5",
     ui_connection:"الاتصال",
     ui_open_on_tv:"افتحه على التلفاز",
@@ -4987,7 +4992,7 @@ var I18N={
     ui_cfg_warn_title:"无法读取你的设置文件",
     ui_check_file_first:"先检查文件",
     ui_chip_patches:"补丁",
-    ui_console_address:"PS5 地址",ui_ps4_address:"PS4 地址",
+    ui_console_address:"PS5 地址",ui_ps4_address:"PS4 地址",ui_ps4_app:"PS4 主屏幕应用",ui_ps4_app_yes:"已安装",ui_ps4_app_no:"未安装",ui_ps4_app_install:"安装",ui_tip_ps4_app:"把 PKG MUTANT SHOP 放到 PS4 主屏幕，即使这台电脑关机也能从图标打开商店。",
     ui_console_note_title:"这里只能查看",
     ui_filter_addons:"附加内容",
     ui_games_folder:"游戏文件夹",
@@ -5340,7 +5345,7 @@ var I18N={
     ui_cfg_warn_title:"आपकी सेटिंग्स फ़ाइल पढ़ी नहीं जा सकी",
     ui_check_file_first:"पहले फ़ाइल जाँचें",
     ui_chip_patches:"पैच",
-    ui_console_address:"PS5 का पता",ui_ps4_address:"PS4 का पता",
+    ui_console_address:"PS5 का पता",ui_ps4_address:"PS4 का पता",ui_ps4_app:"PS4 होम स्क्रीन ऐप",ui_ps4_app_yes:"इंस्टॉल है",ui_ps4_app_no:"इंस्टॉल नहीं है",ui_ps4_app_install:"इंस्टॉल करें",ui_tip_ps4_app:"PKG MUTANT SHOP को PS4 की होम स्क्रीन पर रखें, ताकि यह PC बंद होने पर भी आइकन से स्टोर खुले।",
     ui_console_note_title:"यहाँ केवल पढ़ने के लिए",
     ui_filter_addons:"ऐड-ऑन",
     ui_games_folder:"गेम फ़ोल्डर",
@@ -5693,7 +5698,7 @@ var I18N={
     ui_cfg_warn_title:"Не удалось прочитать файл настроек",
     ui_check_file_first:"Сначала проверять файл",
     ui_chip_patches:"Патчи",
-    ui_console_address:"Адрес PS5",ui_ps4_address:"Адрес PS4",
+    ui_console_address:"Адрес PS5",ui_ps4_address:"Адрес PS4",ui_ps4_app:"Приложение на главном экране PS4",ui_ps4_app_yes:"установлено",ui_ps4_app_no:"не установлено",ui_ps4_app_install:"Установить",ui_tip_ps4_app:"Поместить PKG MUTANT SHOP на главный экран PS4, чтобы магазин открывался значком даже при выключенном ПК.",
     ui_console_note_title:"Здесь только чтение",
     ui_filter_addons:"Дополнения",
     ui_games_folder:"Папка с играми",
@@ -6046,7 +6051,7 @@ var I18N={
     ui_cfg_warn_title:"Impossibile leggere il file delle impostazioni",
     ui_check_file_first:"Controlla prima il file",
     ui_chip_patches:"Patch",
-    ui_console_address:"Indirizzo della PS5",ui_ps4_address:"Indirizzo della PS4",
+    ui_console_address:"Indirizzo della PS5",ui_ps4_address:"Indirizzo della PS4",ui_ps4_app:"App nella schermata PS4",ui_ps4_app_yes:"installata",ui_ps4_app_no:"non installata",ui_ps4_app_install:"Installa",ui_tip_ps4_app:"Mette PKG MUTANT SHOP nella schermata della PS4, così il negozio si apre da un'icona anche con questo PC spento.",
     ui_console_note_title:"Qui è in sola lettura",
     ui_filter_addons:"Aggiuntivi",
     ui_games_folder:"Cartella dei giochi",
@@ -6399,7 +6404,7 @@ var I18N={
     ui_cfg_warn_title:"설정 파일을 읽을 수 없습니다",
     ui_check_file_first:"먼저 파일 검사",
     ui_chip_patches:"패치",
-    ui_console_address:"PS5 주소",ui_ps4_address:"PS4 주소",
+    ui_console_address:"PS5 주소",ui_ps4_address:"PS4 주소",ui_ps4_app:"PS4 홈 화면 앱",ui_ps4_app_yes:"설치됨",ui_ps4_app_no:"설치되지 않음",ui_ps4_app_install:"설치",ui_tip_ps4_app:"PKG MUTANT SHOP을 PS4 홈 화면에 올립니다. 이 PC가 꺼져 있어도 아이콘으로 열립니다.",
     ui_console_note_title:"여기서는 읽기 전용",
     ui_filter_addons:"추가 콘텐츠",
     ui_games_folder:"게임 폴더",
@@ -6752,7 +6757,7 @@ var I18N={
     ui_cfg_warn_title:"Ayar dosyanız okunamadı",
     ui_check_file_first:"Önce dosyayı kontrol et",
     ui_chip_patches:"Yamalar",
-    ui_console_address:"PS5 adresi",ui_ps4_address:"PS4 adresi",
+    ui_console_address:"PS5 adresi",ui_ps4_address:"PS4 adresi",ui_ps4_app:"PS4 ana ekran uygulaması",ui_ps4_app_yes:"kurulu",ui_ps4_app_no:"kurulu değil",ui_ps4_app_install:"Kur",ui_tip_ps4_app:"PKG MUTANT SHOP'u PS4 ana ekranına koyar; bu bilgisayar kapalıyken bile mağaza bir simgeden açılır.",
     ui_console_note_title:"Burada salt okunur",
     ui_filter_addons:"Ek içerikler",
     ui_games_folder:"Oyunlar klasörü",
@@ -7105,7 +7110,7 @@ var I18N={
     ui_cfg_warn_title:"Nie udało się odczytać pliku ustawień",
     ui_check_file_first:"Najpierw sprawdź plik",
     ui_chip_patches:"Łatki",
-    ui_console_address:"Adres PS5",ui_ps4_address:"Adres PS4",
+    ui_console_address:"Adres PS5",ui_ps4_address:"Adres PS4",ui_ps4_app:"Aplikacja na ekranie PS4",ui_ps4_app_yes:"zainstalowana",ui_ps4_app_no:"niezainstalowana",ui_ps4_app_install:"Zainstaluj",ui_tip_ps4_app:"Umieszcza PKG MUTANT SHOP na ekranie głównym PS4, aby sklep otwierał się ikoną także przy wyłączonym komputerze.",
     ui_console_note_title:"Tutaj tylko do odczytu",
     ui_filter_addons:"Dodatki",
     ui_games_folder:"Folder z grami",
@@ -7458,7 +7463,7 @@ var I18N={
     ui_cfg_warn_title:"Je instellingenbestand kon niet worden gelezen",
     ui_check_file_first:"Bestand eerst controleren",
     ui_chip_patches:"Patches",
-    ui_console_address:"PS5-adres",ui_ps4_address:"PS4-adres",
+    ui_console_address:"PS5-adres",ui_ps4_address:"PS4-adres",ui_ps4_app:"PS4-startschermapp",ui_ps4_app_yes:"geïnstalleerd",ui_ps4_app_no:"niet geïnstalleerd",ui_ps4_app_install:"Installeren",ui_tip_ps4_app:"Zet PKG MUTANT SHOP op het startscherm van de PS4, zodat de winkel met een pictogram opent terwijl deze pc uit staat.",
     ui_console_note_title:"Hier alleen-lezen",
     ui_filter_addons:"Add-ons",
     ui_games_folder:"Gamesmap",
@@ -9997,6 +10002,31 @@ function companionLost(){
   toast("The PC companion stopped answering — showing the console's own library while it looks for one","err");
   loadLibrary();loadDevices();loadStorage();loadConsoles();pollQueue();
 }
+/* The PS4's home-screen app: its state, and the button that puts it there. Hidden entirely when
+   there is no PS4 set up, so a PS5-only machine never sees a control that means nothing to it. */
+function refreshPs4App(){
+  var row=$("#ps4AppState"), btn=$("#ps4AppInstall");
+  if(!row||API===null) return;
+  api("/api/ps4/tile").then(function(r){
+    var host=row.parentNode&&row.parentNode.parentNode;
+    if(!r||!r.console){ if(host) host.style.display="none"; return; }
+    if(host) host.style.display="";
+    if(r.installed===true){ row.textContent=t("ui_ps4_app_yes"); btn.style.display="none"; }
+    else if(r.installed===false){ row.textContent=t("ui_ps4_app_no"); btn.style.display=r.available?"":"none"; }
+    else { row.textContent="—"; btn.style.display="none"; }   /* console not answering: say nothing */
+  }).catch(function(){});
+}
+if($("#ps4AppInstall")) $("#ps4AppInstall").onclick=function(){
+  var btn=this; btn.disabled=true;
+  api("/api/ps4/tile",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})
+    .then(function(r){
+      toast(r&&r.ok?t("ui_ps4_app_yes"):((r&&r.error)||t("ui_ps4_app_no")), r&&r.ok?"ok":"warn");
+      setTimeout(refreshPs4App,4000);
+    })
+    .catch(function(){ toast(t("ui_ps4_app_no"),"warn"); })
+    .then(function(){ btn.disabled=false; });
+};
+
 function setConn(cls,text){
   var p=$("#conn");p.className="pill "+cls;$("#connText").textContent=text;
 }
@@ -10375,6 +10405,7 @@ function openSettings(){
      default address behind it, so falling back reads as "configured"; ps4_ip has none, and showing
      a guess there would invite saving an address nobody has. */
   var _i4=$("#setIp4"); if(_i4) _i4.value=(c.ps4_ip)||"";
+  refreshPs4App();
   /* THE PORT BOX USED TO BE dpi.port_v2 - 12800 - which is the port of a daemon this app no longer
      ships, starts or talks to. Typing in it changed nothing and saving it wrote a dead setting.
      It is the shop's own port on the console now, which is the port everything actually uses. */

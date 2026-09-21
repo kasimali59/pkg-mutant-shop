@@ -4274,11 +4274,20 @@ class Ps5Bridge:
     # itself - every rebuild bigger than the last. So the PC installs it, through the ordinary
     # install lane, which is the same lane the tile would have used anyway.
     def ps4_tile_installed(self, force=False):
-        """True / False / None (could not ask). Proof is the app's own app.pkg, as for any title."""
+        """True / False / None (could not ask). Proof is the app's own app.pkg, as for any title.
+
+        NONE IS NOT FALSE. installed_app_pkg answers None both for "the console says it is not
+        there" and for "the console did not answer", and collapsing those to False made a console
+        that was merely switched off report the app as missing - which the settings panel would
+        then offer to install, and the install would fail. Ask whether the console is there first;
+        only a console that can answer gets to say no."""
         if not self.is_ps4():
             return None
         try:
-            return bool(self.installed_app_pkg(PS4_TILE_TID))
+            if not self._reachable_fast():
+                return None
+            got = self.installed_app_pkg(PS4_TILE_TID)
+            return bool(got) if got is not None else None
         except Exception:
             return None
 
@@ -6716,6 +6725,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"log": list(PS5_LOG)})
         if path == "/api/config":
             return self._json({k: v for k, v in srv.cfg.items() if not k.startswith("_")})
+        if path == "/api/ps4/tile":
+            # What the settings panel shows for the PS4's dashboard app: does this copy of the app
+            # even carry it, and is it on the console yet. Never installs - that is the POST.
+            b = next((srv.fleet.bridge(c["id"]) for c in srv.fleet.consoles
+                      if str(c.get("platform") or "").lower() == "ps4"), None)
+            out = {"ok": True, "title_id": PS4_TILE_TID,
+                   "available": os.path.isfile(PS4_TILE_PKG),
+                   "console": bool(b), "installed": None}
+            if b is not None:
+                try:
+                    out["installed"] = b.ps4_tile_installed()
+                except Exception:
+                    out["installed"] = None
+            return self._json(out)
         if path == "/api/consoles":
             return self._json({"consoles": srv.fleet.status()})
         if path == "/api/library":
