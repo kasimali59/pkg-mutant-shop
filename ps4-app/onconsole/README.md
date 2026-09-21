@@ -101,10 +101,12 @@ unlimited. A task only disappears when something unregisters it, so after a hand
 installs every new one was refused with `0x80990086` while the dead tasks sat there. Two halves fix
 it: a finished job releases its own task, and a sweep recovers tasks stranded by a reload or a crash.
 
-A task counts as ours only when its record (`d0.pdb`, plain text) carries a **plain-http URL on the
-`/library/` route** — a store task is https on a Sony host. Both halves must match. The seven tasks
-this console already had from the user's own Store and firmware downloads were left untouched, and
-one of those was plain http, which is exactly why one test is not enough.
+A task counts as ours only when its record (`d0.pdb`, plain text) carries a **plain-http URL on one
+of the two routes we own** — `/library/` on a companion, or `/pkgfile/` on this console itself — and
+a store task is https on a Sony host. Both halves must match. The seven tasks this console already
+had from the user's own Store and firmware downloads were left untouched, and one of those was plain
+http, which is exactly why one test is not enough. Matching only `/library/` (as the first version
+did) left every task from a local install invisible to the sweep — the exact leak it exists to fix.
 
 ### The one thing BGFT will not do: a title the Store has an update for
 

@@ -651,11 +651,18 @@ static int pkg_content_id_from_url_name(const char *name, char *out, size_t outs
  *     have to be recovered from the console rather than from memory.
  *
  * WHICH TASKS ARE OURS. BGFT writes the task record as plain text inside d0.pdb, download url and
- * all. Every install we start is a companion url - plain http, on the /library/ route - and a real
- * PlayStation Store task is https on a Sony host. Both halves must match before we touch anything,
- * so the tasks this PS4 already had from the user's own store downloads are left exactly as they
- * are. We never sweep the job we are currently following either; the install route refuses to
- * start a second job while one is live, so at sweep time ours is the only one that can be running.
+ * all. Every install we start is plain http on one of two routes we own - /library/ on a companion,
+ * or /pkgfile/ on this console itself - and a real PlayStation Store task is https on a Sony host.
+ * Both halves must match before we touch anything, so the tasks this PS4 already had from the
+ * user's own store downloads are left exactly as they are. Requiring http alone would not be
+ * enough: this console's own firmware-update task is plain http too, and carries neither route.
+ *
+ * BOTH ROUTES, NOT JUST /library/. The first version of this matched only the companion route, so a
+ * task left behind by an install from the console's own storage was invisible to the sweep and sat
+ * in the table forever - the exact leak this function exists to clear.
+ *
+ * We never sweep the job we are currently following either; the install route refuses to start a
+ * second job while one is live, so at sweep time ours is the only one that can be running.
  */
 #define BGFT_TASK_ROOT "/user/bgft/task"
 
@@ -670,8 +677,10 @@ static int bgft_task_is_ours(const char *dir) {
     int ours = 0;
     for (long i = 0; i + 7 <= n && !ours; i++) {
         if (memcmp(b + i, "http://", 7)) continue;
-        for (long j = i + 7; j + 9 <= n && b[j]; j++)
-            if (!memcmp(b + j, "/library/", 9)) { ours = 1; break; }
+        for (long j = i + 7; j < n && b[j]; j++) {
+            if (j + 9 <= n && !memcmp(b + j, "/library/", 9)) { ours = 1; break; }
+            if (j + 9 <= n && !memcmp(b + j, "/pkgfile/", 9)) { ours = 1; break; }
+        }
     }
     free(b);
     return ours;
