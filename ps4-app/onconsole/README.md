@@ -168,17 +168,26 @@ That rule was learned on the PS5, where trusting metadata produced 53 phantom in
 `/user/bgft` here is directories (task, trash, pushlist, userlist), not the PS5's `bgft.db`, so the
 PS5's "bgft row 1026/1036" confirmation has no equivalent — the app.pkg check is the proof.
 
-## There is no dashboard tile yet
+## The dashboard app
 
-The PS5 ships one: `ps5-app/onconsole/tile/pms-tile.pkg`, a fake-signed PS5 package embedded in the
-ELF and installed on boot. A PS4 tile is a **different container** (`\x7FCNT`, not `\x7FFIH`) and a
-different problem: a PS4 tile is a real application with a signed `eboot.bin`, so it needs an fpkg
-build tool and an fself signer, neither of which is in this repo — and the PS5 experience is that a
-wrong app registration leaves a tile that crashes the console hard enough to need the jailbreak
-re-run. It is not worth guessing at.
+There is one: **`ps4-app/tile-pkg/`** builds `IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg`, a real
+fake-signed PS4 application that puts the shop on the home screen. Read that folder's README for
+how it is built and why it is shaped the way it is.
 
-What exists instead: **`/api/open`** launches the console's own browser at the shop, so one tap in
-the app (or on a phone) puts it on the television. The URL is also shown in Settings.
+Two things about it matter here:
+
+* **It carries this payload**, so pressing the icon can start the shop with every PC switched off.
+  It hands the payload to the jailbreak's binary loader on `:9090` and then opens the browser.
+* **This payload does NOT carry it**, and must not: a package that contains the payload, embedded
+  in the payload, is a payload containing a copy of itself, growing with every build. The companion
+  installs it instead - down the ordinary install lane, because it is an ordinary package. This
+  payload only reports on it, at `/api/tile/status`, proved by `app.pkg` on disk rather than an
+  `app.db` row.
+
+`/api/open` remains, and is what the app uses once the shop is up: it launches the console's own
+browser at the shop, so one tap from anywhere puts it on the television. The URL is also shown in
+Settings.
+
 
 ## Routes the PS5 has and this console does not
 
