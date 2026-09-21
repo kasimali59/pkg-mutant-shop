@@ -60,6 +60,15 @@ python3 "$HERE/../../ps5-app/onconsole/gen_web_bundle.py" "$WEB" "$HERE/web_bund
 python3 "$TOOLS/ps4_sync_sqmini.py" --check \
   || { echo "ABORT: sqmini.h has drifted from ps5-app/onconsole/server.c - re-run tools/ps4_sync_sqmini.py" >&2; exit 1; }
 
+# THE DASHBOARD APP THIS ELF CARRIES. tile_bundle.h .incbin's it, so a missing package is a link
+# error with no explanation; say so here instead. Build order is the package first, then this - and
+# it is one-way on purpose: the package must never carry this ELF back (see tile_bundle.h).
+TILE_PKG="$HERE/../tile-pkg/IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg"
+if [ ! -f "$TILE_PKG" ]; then
+  echo "ABORT: the PS4 dashboard app is not built - run ps4-app/tile-pkg/build-wsl.sh first." >&2
+  exit 1
+fi
+
 echo "== syntax check"
 "$SDK/bin/orbis-clang" -Wall -DPORT="$PORT" -fsyntax-only -Werror=implicit-function-declaration \
   "$HERE/server_ps4.c" || { echo "ABORT: server_ps4.c does not compile." >&2; exit 1; }

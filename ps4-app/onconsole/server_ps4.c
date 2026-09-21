@@ -60,11 +60,12 @@
 #include "sqmini.h"
 #include "bgft.h"
 #include "web_bundle.h"
+#include "tile_bundle.h"
 
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.62.1"
+#define SHOP_VERSION "3.62.0"
 
 #define SHOP_DATA_DIR  "/data/pkg-mutant-shop"
 #define WEB_ROOT       SHOP_DATA_DIR "/web"
@@ -1594,54 +1595,50 @@ static void json_str_field(const char *body, const char *key, char *out, size_t 
 }
 
 /* Install a package that is already on this console. Returns nothing - it answers `fd` itself. */
-static void install_local_path(int fd, const char *local) {
+/* Install a package that is ALREADY on this console. Returns 0 when the console has taken it;
+   `err` carries a sentence either way. Split out from the route below so the ELF's own dashboard-app
+   install can use the identical lane - one install path, one set of failures, one place to fix. */
+static int install_local_pkg(const char *local, char *err, size_t errsz) {
     struct stat st;
     if (stat(local, &st) != 0 || !S_ISREG(st.st_mode)) {
-        send_json(fd, "{\"ok\":false,\"error\":\"That package is not on the console any more\"}");
-        return;
+        snprintf(err, errsz, "That package is not on the console any more");
+        return -1;
     }
     char cid[64], cat[16], title[160];
     long long size = 0;
     if (!pkg_file_facts(local, cid, sizeof(cid), cat, sizeof(cat), title, sizeof(title), &size)) {
-        send_json(fd, "{\"ok\":false,\"error\":\"That file is not a PS4 package\"}");
-        return;
+        snprintf(err, errsz, "That file is not a PS4 package");
+        return -2;
     }
     if (!cid[0]) {
-        send_json(fd, "{\"ok\":false,\"error\":\"That package does not carry a content id, so the "
-                      "console will not accept it\"}");
-        return;
+        snprintf(err, errsz, "That package does not carry a content id, so the console will not "
+                             "accept it");
+        return -3;
     }
     job_refresh();
     pthread_mutex_lock(&g_job_lock);
     int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
     pthread_mutex_unlock(&g_job_lock);
     if (busy) {
-        send_status(fd, "409 Conflict", "application/json",
-                    "{\"ok\":false,\"busy\":true,\"error\":\"An install is already running on this PS4\"}");
-        return;
+        snprintf(err, errsz, "An install is already running on this PS4");
+        return -4;
     }
     int tok = localpkg_register(local);
     if (tok < 0) {
-        send_json(fd, "{\"ok\":false,\"error\":\"Too many packages are already queued from this "
-                      "console - reload the shop and try again\"}");
-        return;
+        snprintf(err, errsz, "Too many packages are already queued from this console - reload the "
+                             "shop and try again");
+        return -5;
     }
-    /* The console's OWN address, not 127.0.0.1: a LAN address is the one BGFT is proven to fetch
-       from on this firmware, and loopback is untested here. Nothing leaves the console either way -
-       this is the PS4 asking itself for the file. */
+    /* The console's OWN address, not 127.0.0.1: a LAN address is the one the transfer service is
+       proven to fetch from on this firmware, and loopback is untested here. Nothing leaves the
+       console either way - this is the PS4 asking itself for the file. */
     char uri[256];
     snprintf(uri, sizeof(uri), "http://%s:%d/pkgfile/%d", lan_ip_str(), (int)PORT, tok);
     const char *label = title[0] ? title : local;
-    char err[256] = {0};
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
-    if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat),
-                         err, sizeof(err), &task) != 0) {
-        char esc[300], out[520];
-        json_escape(err, esc, sizeof(esc));
-        snprintf(out, sizeof(out), "{\"ok\":false,\"queued\":false,\"error\":\"%s\"}", esc);
-        send_json(fd, out);
-        return;
-    }
+    if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat), err, errsz, &task) != 0)
+        return -6;
+
     pthread_mutex_lock(&g_job_lock);
     memset(&g_job, 0, sizeof(g_job));
     g_job.active = 1;
@@ -1655,15 +1652,163 @@ static void install_local_path(int fd, const char *local) {
     tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
     snprintf(g_job.state, sizeof(g_job.state), "downloading");
     snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is installing it from its own storage");
-    long long jid = g_job.job_id;
     pthread_mutex_unlock(&g_job_lock);
     ilog("install: local package %s (%s, %s, %lld bytes) -> task %d",
          local, cid, pkg_type_for_category(cat), size, (int)task);
+    return 0;
+}
+
+static void install_local_path(int fd, const char *local) {
+    char err[320] = {0};
+    if (install_local_pkg(local, err, sizeof(err)) != 0) {
+        int busy = (strstr(err, "already running") != NULL);
+        char esc[400], out[620];
+        json_escape(err, esc, sizeof(esc));
+        snprintf(out, sizeof(out), "{\"ok\":false,\"queued\":false,%s\"error\":\"%s\"}",
+                 busy ? "\"busy\":true," : "", esc);
+        if (busy) send_status(fd, "409 Conflict", "application/json", out);
+        else      send_json(fd, out);
+        return;
+    }
+    pthread_mutex_lock(&g_job_lock);
+    long long jid = g_job.job_id;
+    int task = (int)g_job.task;
+    pthread_mutex_unlock(&g_job_lock);
     char out[260];
     snprintf(out, sizeof(out),
              "{\"ok\":true,\"queued\":true,\"local\":true,\"job_id\":%lld,\"task\":%d}",
-             jid, (int)task);
+             jid, task);
     send_json(fd, out);
+}
+
+/* ------------------------------------------------ the dashboard app this ELF carries
+ *
+ * The PS5 build installs its tile on boot; this does the same for the PS4, and for the same reason:
+ * without it there is nothing on the console to press, and the shop only exists while this payload
+ * happens to be loaded.
+ *
+ * INTELLIGENTLY, meaning it does the least it can get away with:
+ *   - already installed at this version or newer  -> nothing at all, not even a write to disk
+ *   - installed but older                         -> install over it, which is how the PS4 updates
+ *   - not there                                   -> install it
+ *
+ * "Installed" is app.pkg on disk with bytes in it, never an app.db row on its own - the rule this
+ * project learned on the PS5, where trusting the row produced 53 phantom installs. The version
+ * comes from tbl_appinfo's APP_VER, which is the field the console itself updates when a package
+ * is installed over another.
+ *
+ * Nothing here touches the jailbreak's folders or files. The staged copy lives under our own
+ * /data/pkg-mutant-shop, and the install goes down our own BGFT lane - the same one a game from
+ * the PC uses, serving the file to the console from this very process.
+ */
+#define PS4_TILE_VER   "01.00"       /* bump when ps4-app/tile-pkg changes; compared numerically */
+#define TILE_PKG_DISK  SHOP_DATA_DIR "/pms-tile.pkg"
+
+/* "01.02" -> 102, "1.00" -> 100. Format-tolerant on purpose: the console stores whatever the
+   package's param.sfo carried, and a leading zero must not make 01.00 look older than 1.00. */
+static int tile_ver_num(const char *v) {
+    int n = 0, seen = 0;
+    for (const char *p = v ? v : ""; *p; p++) {
+        if (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); seen = 1; }
+        else if (*p != '.') break;
+    }
+    return seen ? n : -1;
+}
+
+/* The version of the app the console currently has, or "" if it has none. */
+static void tile_installed_ver(char *out, size_t outsz) {
+    out[0] = 0;
+    static ps4_title_t rows[MAX_TITLES];
+    pthread_mutex_lock(&g_scan_lock);
+    int n = read_console_titles(rows, MAX_TITLES);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i].tid, PS4_TILE_TID)) { snprintf(out, outsz, "%s", rows[i].ver); break; }
+    pthread_mutex_unlock(&g_scan_lock);
+}
+
+/* Write the embedded package out and hand it to the install lane. 0 = handed over. */
+static int tile_stage_and_install(char *detail, size_t dsz) {
+    size_t len = (size_t)(tb_ps4_tile_pkg_end - tb_ps4_tile_pkg);
+    /* A PS4 package begins \x7FCNT. Checking it here means a truncated or mis-built bundle is
+       caught before the console is asked to install anything. */
+    if (len < 4096 || tb_ps4_tile_pkg[0] != 0x7F || tb_ps4_tile_pkg[1] != 'C' ||
+        tb_ps4_tile_pkg[2] != 'N' || tb_ps4_tile_pkg[3] != 'T') {
+        snprintf(detail, dsz, "the embedded package looks wrong (%zu bytes)", len);
+        return -1;
+    }
+    mkdir(SHOP_DATA_DIR, 0777);
+    int f = open(TILE_PKG_DISK, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) { snprintf(detail, dsz, "cannot write %s", TILE_PKG_DISK); return -2; }
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(f, tb_ps4_tile_pkg + off, len - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    close(f);
+    if (off != len) { snprintf(detail, dsz, "short write %zu/%zu", off, len); return -3; }
+
+    char err[256] = {0};
+    if (install_local_pkg(TILE_PKG_DISK, err, sizeof(err)) != 0) {
+        snprintf(detail, dsz, "%s", err);
+        return -4;
+    }
+    snprintf(detail, dsz, "handed over (%zu bytes)", len);
+    return 0;
+}
+
+/* Decide, then act. Runs on its own thread once the server is listening, because the install lane
+   serves the package to the console from this very process - the socket has to be up first. */
+static void *tile_thread(void *unused) {
+    (void)unused;
+    char have[16] = {0};
+    long long bytes = installed_app_pkg(PS4_TILE_TID);
+    tile_installed_ver(have, sizeof(have));
+    int hv = tile_ver_num(have), wv = tile_ver_num(PS4_TILE_VER);
+
+    if (bytes > 0 && hv >= wv) {
+        ilog("tile: already installed at %s (carrying %s) - nothing to do", have, PS4_TILE_VER);
+        return NULL;
+    }
+    if (bytes > 0)
+        ilog("tile: installed at %s, this build carries %s - updating", have[0] ? have : "?",
+             PS4_TILE_VER);
+    else
+        ilog("tile: not installed - installing %s", PS4_TILE_VER);
+
+    char detail[300] = {0};
+    int rc = tile_stage_and_install(detail, sizeof(detail));
+    if (rc != 0) {
+        ilog("tile: could not install it - %s", detail);
+        return NULL;
+    }
+    /* Wait for the console to finish, then check the FILE rather than the return code. */
+    for (int i = 0; i < 90; i++) {
+        sleep(2);
+        if (installed_app_pkg(PS4_TILE_TID) > 0) {
+            ilog("tile: installed (%lld bytes on disk)", installed_app_pkg(PS4_TILE_TID));
+            notify("PKG MUTANT SHOP is on your home screen\nOpen it from there any time");
+            return NULL;
+        }
+        job_refresh();
+        pthread_mutex_lock(&g_job_lock);
+        int failed = g_job.active && !strcmp(g_job.state, "error");
+        char why[200];
+        snprintf(why, sizeof(why), "%s", g_job.msg);
+        pthread_mutex_unlock(&g_job_lock);
+        if (failed) { ilog("tile: the console stopped the install - %s", why); return NULL; }
+    }
+    ilog("tile: the console never finished installing it");
+    return NULL;
+}
+
+static void tile_start(void) {
+    pthread_t t;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 256 * 1024);
+    if (pthread_create(&t, &at, tile_thread, NULL) == 0) pthread_detach(t);
+    pthread_attr_destroy(&at);
 }
 
 static void serve_static(int fd, const char *path) {
@@ -2388,6 +2533,11 @@ int main(void) {
     listen(srv, 16);
     ilog("listening on :%d as %s", PORT, lan_ip_str());
     notifyf("PKG MUTANT SHOP v%s is ready\nOpen %s:%d in any browser", SHOP_VERSION, lan_ip_str(), PORT);
+
+    /* THE DASHBOARD APP, after the socket is listening and not before: the install lane serves the
+       package to the console from this very process, so there has to be something to serve it. On
+       its own thread - a console that is mid-install must not hold up the shop opening. */
+    tile_start();
 
     while (!g_quit) {
         int cl = accept(srv, 0, 0);

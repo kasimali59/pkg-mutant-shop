@@ -52,14 +52,9 @@ for f in sce_sys/about/right.sprx sce_module/libSceFios2.prx sce_module/libc.prx
   [ -f "$f" ] || cp "$OO_PS4_TOOLCHAIN/samples/hello_world/$f" "$f"
 done
 
-# THE PAYLOAD THE APP CARRIES. The tile's whole job is to get this running and then open it, so a
-# tile built against a stale payload would install an old shop. Always take the current build.
-PAYLOAD="$HERE/../onconsole/PKG-MUTANT-SHOP-PS4.elf"
-if [ ! -f "$PAYLOAD" ]; then
-  echo "ABORT: the payload is not built - run ps4-app/onconsole/build-wsl.sh first." >&2
-  exit 1
-fi
-cp "$PAYLOAD" pms-payload.elf
+# THIS PACKAGE CARRIES NO PAYLOAD, AND MUST NOT. The shop's ELF embeds this package and installs
+# it; a package that also contained the ELF would put a copy of the ELF inside the ELF, growing with
+# every build. Build order is therefore: this package first, then ps4-app/onconsole.
 
 if [ ! -f sce_sys/icon0.png ]; then
   echo "ABORT: sce_sys/icon0.png is missing - the console needs an icon for the tile." >&2

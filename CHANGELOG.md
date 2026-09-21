@@ -34,13 +34,14 @@ API, and both are held to the same build gates. From the user's side there is on
 ### The PS4 gets a real dashboard app — **built and validated, not yet installed**
 
 > **Status, plainly.** The package builds and every check passes: `pkg_validate` reports 28 checks
-> `[OK]` with no failures, the payload inside is sha256-identical to the shipped ELF, and the eboot
-> is a genuine `SCE Executable (ASLR) 0xFE10`. It has been copied to the console. It has **not** been
-> installed, the icon has **not** been seen, and the eboot has **not** been run — the console's
-> payload loader has been unavailable since it was built. Everything about the *file* is measured;
-> everything about its *behaviour on a PS4* is reasoned from the toolchain's own samples and from
-> what this project measured on the payload side. Do not read "built and validated" as "working" —
-> that substitution is the same shape as the mistake that cost this project a console.
+> `[OK]` with no failures, and the eboot is a genuine `SCE Executable (ASLR) 0xFE10`. The ELF
+> carries it — found at `0x1c6c0`, byte-identical — and installs it on boot. It has **not** been
+> installed, the icon has **not** been seen, and the eboot has **not** been run, because the
+> console's payload loader has been unavailable since it was written. Everything about the *file*
+> is measured; everything about its *behaviour on a PS4* is reasoned from the toolchain's own
+> samples and from what this project measured on the payload side. Do not read "built and
+> validated" as "working" — that substitution is the same shape as the mistake that cost this
+> project a console.
 
 A PS4 had nothing to press. The shop existed only while a payload happened to be injected, and the
 jailbreak's binary loader does not survive rest mode - so after one suspend there was no app on the
@@ -66,12 +67,25 @@ served by the app itself would die at the exact moment the page tried to load it
 in a long-running system process. The app is the button; the payload is the shop. Nothing in it is
 privileged - loopback sockets, its own `/app0`, two public system-service calls.
 
-**The PC installs it, not the ELF**, and that is deliberate. The package carries the payload so the
-icon works with every PC switched off; a payload that also carried the package would contain a copy
-of itself and grow with every build. So the exe ships it, registers it in the file registry (so the
-proven `/library/` route serves it - byte ranges included, which the console's installer requires),
-and installs it the first time it sees a PS4 without it. Settings has a row for it with a button;
-`POST /api/ps4/tile` forces it; the payload answers `/api/tile/status`.
+**The ELF installs it, exactly as the PS5 ELF installs its tile** — it carries the package and puts
+it on the console itself, with nothing else involved. That settled the one structural question this
+had: the package must therefore carry **nothing**, because an ELF that carried a package carrying
+the ELF would embed a copy of itself on every rebuild. One direction only, and both build scripts
+say so — the payload build refuses to start without the package.
+
+It is **intelligent about it**, which is the part worth having. Once its socket is listening it
+compares the version it carries with the installed app's `APP_VER` from the console's own
+`tbl_appinfo`: same version or newer with its `app.pkg` on disk and it does nothing at all, not even
+a write; older and it installs over it, which is how the PS4 updates a title; absent and it installs
+it. "Installed" is `app.pkg` **with bytes**, never an `app.db` row on its own. Versions compare
+numerically, so `1.00` and `01.00` are the same number.
+
+The staged copy goes to `/data/pkg-mutant-shop/` — **our own folder**. Nothing this app does writes
+into the jailbreak's folders or files; the jailbreak's only job is to start the ELF. The PC keeps a
+copy of the package and a Settings button for putting the app back by hand, and `GET /api/ps4/tile`
+reports what the console has, but the PC no longer installs it automatically: two installers
+starting together would have the console refuse the second as busy and log a failure for something
+that was working.
 
 **Built with the OpenOrbis PS4 Toolchain v0.5.4** - `clang` -> `create-fself` -> `param.sfo` ->
 `create-gp4` -> `PkgTool.Core pkg_build`, all fetched by `build-wsl.sh` on first run, with libssl 1.1

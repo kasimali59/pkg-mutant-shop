@@ -17,8 +17,9 @@ bash ps4-app/tile-pkg/build-wsl.sh     # WSL; fetches its toolchain on first run
 
 | | |
 | --- | --- |
-| the package builds | **yes**, verified — `pkg_validate` reports 28 checks `[OK]`, 0 errors, 0 warnings |
-| the package is on the console | **yes**, verified — `/data/pkg/PKG-MUTANT-SHOP.pkg`, SHA-256 matched after upload |
+| the package builds | **yes**, verified — `pkg_validate`: 28 checks `[OK]`, 0 errors, 0 warnings |
+| the ELF carries it | **yes**, verified — found at `0x1c6c0` in the ELF, byte-identical |
+| the ELF installs it on boot | **wired**, not yet observed — the console has had no payload loader since it was written |
 | the package has been **installed** | **no** — `/user/app` holds three games and no `PKGM00001` |
 | the icon has been seen on the home screen | **no** |
 | the eboot has been run | **no** |
@@ -28,8 +29,7 @@ the toolchain's own samples and from what this project measured on the payload s
 pressed this icon, because it has never been installed. Do not read "built and validated" as
 "working" — that substitution is the same shape as the mistake that cost this project a console.
 
-**What is actually missing is one install**, and it needs either the payload running (which needs a
-payload loader) or thirty seconds at the television. See *Installing it the first time*.
+**What is missing is one payload load.** Once the ELF runs, it installs this itself.
 
 ## What it is
 
@@ -38,7 +38,7 @@ payload loader) or thirty seconds at the television. See *Installing it the firs
 | title id | `PKGM00001` — the same identity the PS5 tile uses. One app, whichever console it is on, and it cannot collide with a game (those are `CUSA` / `NPXS`). |
 | content id | `IV0000-PKGM00001_00-PKGMUTANTSHOP001` (`IV0000` is the homebrew publisher prefix) |
 | category | `gd`, content type `0x1A`, flags `0x0A000000` — **byte-for-byte the shape of a retail base game** |
-| contents | `eboot.bin`, `sce_sys/param.sfo`, `sce_sys/icon0.png`, and the shop's payload |
+| contents | `eboot.bin`, `sce_sys/param.sfo`, `sce_sys/icon0.png` — **and nothing else** |
 
 That last row is the point: it is an **ordinary PS4 package**. `companion/pkg_meta.py` reads it
 exactly as it reads a retail title, our own integrity check calls it complete, and it installs down
@@ -46,114 +46,48 @@ the same lane every other game does. Nothing special-cases it.
 
 ## What pressing the icon does
 
-1. Is the shop already answering on `127.0.0.1:8710`? → open it.
-2. If not, hand the payload the package carries to a payload loader — GoldHEN's BinLoader on
-   `:9090` (an HTTP POST), then `elfldr` on `:9021` (the bare ELF) if that one is not there.
-3. Wait up to thirty seconds for the shop, then open the console's own browser at it.
-4. If none of that worked, say so on screen, naming the piece that is missing.
+1. Is the shop answering on `127.0.0.1:8710`? → open the console's browser at it.
+2. If not, say so on screen: the button cannot conjure the server.
 
-**It never opens a connection it does not then fill with the payload.** An empty connection to an
-ELF loader can stop it listening: that is how this console lost its loader twice while this was
-being built, from nothing more than a port scan. That rule is also why there is no "is a loader
-there?" probe — the connect *is* the probe, and the payload always follows it.
+That is the whole program, and it is the same contract the PS5 tile has always had — the tile opens
+the shop, the ELF *is* the shop.
 
-### Two things that made it look dead, fixed at 3.62.1
+## Why it carries nothing, and why the ELF carries it
 
-**The notification's icon field must stay zero.** `useIconImageUri = 1` selects the form that draws
-an icon beside the text, and on this console family that form returns success and renders
-**nothing** — the PS5 side has been caught by it twice. `server_ps4.c` sends the plain form because
-that is the one measured working on this console, and the tile now sends the identical struct. An
-app whose every message is invisible is an app that looks broken whatever it actually did.
+The ELF installs this package, the way the PS5 ELF installs its tile. So this package must not
+contain the ELF:
 
-**The browser needs the user service first.** The reference program for this on a PS4 — the browser
-sample in the ps4-payload-dev SDK — calls `sceUserServiceInitialize` and only launches the browser
-if it succeeded. The payload inherits a process that has already done it; a sandboxed application
-has not. The tile initialises it, launches, and hands it back.
+> The ELF would contain a package containing the ELF, and every rebuild would embed the previous
+> one, growing without limit.
 
-### Why it loads a payload instead of *being* the server
+An earlier version did ship the payload inside, so that pressing the icon could start the shop by
+handing the payload to a loader. It worked on paper and it is exactly the cycle above, so it is
+gone. **One direction only: package first, then ELF.** Both build scripts say so, and
+`ps4-app/onconsole/build-wsl.sh` refuses to build without the package.
 
-An application is suspended the moment the browser comes to the foreground, and a suspended process
-stops answering its socket. A shop served by this app would therefore die at the exact moment the
-page tried to load it. The payload lives in a long-running system process instead, which is why it
-survives the browser, the app closing, and everything else.
+### The version check
 
-**This app is the button. The payload is the shop.**
+`ps4-app/onconsole/server_ps4.c` carries `PS4_TILE_VER` and, once its socket is listening, compares
+it with the installed app's `APP_VER` from the console's own `tbl_appinfo`:
 
-Nothing here is privileged: loopback sockets, its own `/app0`, and three public system-service
-calls. An application runs sandboxed, and a tile that needed more than a sandbox allows is a tile
-that does not work.
+| console has | what happens |
+| --- | --- |
+| this version or newer, with its `app.pkg` on disk | nothing at all — not even a write |
+| an older version | installed over it, which is how the PS4 updates a title |
+| nothing | installed |
 
-### The one thing this shape cannot do
+"Installed" is `app.pkg` **with bytes**, never an `app.db` row on its own — the rule this project
+learned on the PS5, where trusting the row produced 53 phantom installs. Versions compare
+numerically, so `1.00` and `01.00` are the same number and a leading zero cannot look older.
 
-If **no payload loader is listening**, pressing the icon cannot start the shop — it can only say so.
-That is not a defect in the package, it is the shape of the platform: an unprivileged application
-cannot inject code into another process, and the shop has to live in another process to survive the
-browser coming forward. A console in that state was observed while this was written: GoldHEN's FTP
-answering on `2121` while `9090` and `3232` were both refusing, with `[BinLoader] Enabled = 1` in
-its own config. Re-running the jailbreak with the payload loader enabled is the remedy, and the
-app now says exactly that instead of "run the jailbreak again".
+The staged copy goes to `/data/pkg-mutant-shop/pms-tile.pkg` — **our own folder**. Nothing this app
+does touches the jailbreak's files or folders; the jailbreak's only job is to start the ELF.
 
-## Why the PC installs it, and not the ELF
+### Nothing privileged
 
-On the PS5 the ELF carries its tile and installs it on boot. The PS4 cannot work that way, and the
-reason is worth stating so nobody "fixes" it later:
-
-> **The package carries the payload**, so that pressing the icon can start the shop with every PC
-> switched off. A payload that also carried the package would therefore contain a copy of itself —
-> and each rebuild would embed the last one, growing without limit.
-
-So the companion ships the package, registers it in its file registry (which means the proven
-`/library/` route serves it, byte ranges and all — the console's installer requires them), and
-installs it the first time it sees a PS4 without it. `POST /api/ps4/tile` forces it; Settings shows
-its state and offers a button. The payload answers `/api/tile/status` so the console can report on
-itself, proved by `app.pkg` on disk rather than an `app.db` row.
-
-With no PC at all, the package can be installed from the console's own package installer — put it
-somewhere the installer scans and install it once, and the icon is there for good.
-
-## Installing it the first time
-
-There is a chicken-and-egg here and it is worth naming rather than hiding: **the shop installs the
-icon, and the icon starts the shop.** Somebody has to break the loop once. After that first install
-the icon is on the home screen permanently — it survives rest mode, reboots and losing the
-jailbreak, exactly like a game — and the shop keeps itself up to date from then on.
-
-**Route A — the console's own installer. No PC, no payload loader, one time.**
-
-The package is already on the console at **`/data/pkg/PKG-MUTANT-SHOP.pkg`** (uploaded over
-GoldHEN's FTP and verified by SHA-256 after the transfer, not just by size).
-
-On the television: **Settings → Debug Settings → Package Installer**, set the source to the internal
-drive if it is pointed at USB, pick **PKG-MUTANT-SHOP.pkg**, install. GoldHEN's Debug Settings menu
-is already enabled on this console (`Enabled = 2` in `/data/GoldHEN/config.ini`).
-
-The exact wording of that menu moves between GoldHEN point releases, so read the screen rather than
-this paragraph. If the installer only offers USB, copy the same file to the root of a FAT32 or
-exFAT stick and install it from there — it is the same package either way.
-
-**Route B — the shop installs its own icon.** If the payload is running (port `8710` answering),
-the companion does it with one button: **Settings → PS4 home-screen app → Install**, or
-`POST /api/ps4/tile`. This is the route that needs no television at all, and it is what will happen
-automatically on any PS4 the app meets that does not have the icon yet.
-
-**Proving it worked.** Not by an `app.db` row — this project has been burned by that twice. The
-test is the file:
-
-```
-/user/app/PKGM00001/app.pkg      exists, and is NOT zero bytes
-/user/appmeta/PKGM00001/         exists
-```
-
-`appmeta` alone is artwork and survives a reset, so it is not proof of anything on its own.
-
-### Why there is no remote install button for the very first time
-
-This was looked for rather than assumed. GoldHEN's FTP server was asked what it can do
-(`FEAT`, `HELP`, `SITE HELP`) and its whole vocabulary is file transfer plus `SITE CHMOD`,
-`SITE UMASK`, `MTRW` and a disabled `DECRYPT`. There is no install, run or execute command. The two
-honest ways to get a package registered are the console's own installer and our own BGFT lane, and
-the BGFT lane lives inside the payload. Anything else means writing the system's own records by
-hand, which is the exact failure that cost a console here before.
+A loopback connect, its own `/app0`, two public system-service calls. An application runs sandboxed
+— it cannot read `/data` and it cannot inject code into another process — so a button that needed
+either would be a button that does not work.
 
 ## The toolchain
 

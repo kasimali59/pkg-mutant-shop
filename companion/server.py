@@ -6498,21 +6498,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     _ps4_on = bool(_b4.up() and _b4.engine_available())
                     srv._ps4_probe = (time.monotonic(), _ps4_on)
-            if _ps4_on and not getattr(srv, "_ps4_tile_tried", False):
-                # ONCE PER PROCESS, ON A THREAD. Health is polled every six seconds and this is an
-                # install; it must never be on that path. It is also never retried in a loop - a
-                # console that refuses the app should say so once, not every six seconds forever.
-                srv._ps4_tile_tried = True
-                def _tile():
-                    try:
-                        if _b4.ps4_tile_installed():
-                            return
-                        print("[ps4] the dashboard app is not installed - installing it")
-                        ok, info = _b4.install_ps4_tile()
-                        print("[ps4] dashboard app: ok=%s %s" % (ok, str(info)[:160]))
-                    except Exception as e:
-                        print("[ps4] dashboard app install skipped: %r" % e)
-                threading.Thread(target=_tile, daemon=True).start()
+            # THE ELF INSTALLS THE DASHBOARD APP ITSELF now, the way the PS5 ELF installs its tile:
+            # it carries the package, compares the installed version, and only acts when the console
+            # has none or an older one. The PC used to do it here and must not any more - two
+            # installers starting together would have the console refuse the second as busy and log a
+            # failure for something that was working. Settings keeps its button for putting the app
+            # back by hand, and GET /api/ps4/tile still reports what the console has.
             # PROBE MEMO. This endpoint is polled every 6 s by the console's UI, again by this
             # PC's own UI if it is open, and again by peers - and each call opened fresh TCP
             # connections to the console for ping() and ftp_ok(). On the console those connections
