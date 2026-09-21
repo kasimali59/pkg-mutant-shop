@@ -52,9 +52,16 @@ for f in sce_sys/about/right.sprx sce_module/libSceFios2.prx sce_module/libc.prx
   [ -f "$f" ] || cp "$OO_PS4_TOOLCHAIN/samples/hello_world/$f" "$f"
 done
 
-# THIS PACKAGE CARRIES NO PAYLOAD, AND MUST NOT. The shop's ELF embeds this package and installs
-# it; a package that also contained the ELF would put a copy of the ELF inside the ELF, growing with
-# every build. Build order is therefore: this package first, then ps4-app/onconsole.
+# THE PAYLOAD THIS PACKAGE CARRIES is the LITE one - the same shop with no package inside it. That
+# is what lets the icon start the shop without creating a cycle: this package carries lite, and the
+# full payload carries this package. Build order is lite -> package -> full, which is what
+# ps4-app/build-all-wsl.sh does. Handing this the FULL payload would put a package inside a package.
+PAYLOAD="$HERE/../onconsole/PKG-MUTANT-SHOP-PS4-LITE.elf"
+if [ ! -f "$PAYLOAD" ]; then
+  echo "ABORT: the lite payload is not built - run ps4-app/build-all-wsl.sh." >&2
+  exit 1
+fi
+cp "$PAYLOAD" pms-payload.elf
 
 if [ ! -f sce_sys/icon0.png ]; then
   echo "ABORT: sce_sys/icon0.png is missing - the console needs an icon for the tile." >&2

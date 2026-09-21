@@ -61,7 +61,14 @@
 #include "sqmini.h"
 #include "bgft.h"
 #include "web_bundle.h"
+/* THE PACKAGE THIS ELF INSTALLS - except in the LITE build, which is the copy that travels
+   INSIDE that package so the home-screen app can start the shop by itself. Lite is how the
+   cycle is broken: package carries the lite payload, full payload carries the package. Three
+   stages, no growth, and the only thing lite gives up is installing the package - which the app
+   carrying it has by definition already been installed for. See ps4-app/build-all-wsl.sh. */
+#ifndef PMS_LITE
 #include "tile_bundle.h"
+#endif
 
 #ifndef PORT
 #define PORT 8710
@@ -1697,6 +1704,7 @@ static void install_local_path(int fd, const char *local) {
     send_json(fd, out);
 }
 
+#ifndef PMS_LITE
 /* ------------------------------------------------ the dashboard app this ELF carries
  *
  * The PS5 build installs its tile on boot; this does the same for the PS4, and for the same reason:
@@ -1826,6 +1834,12 @@ static void tile_start(void) {
     if (pthread_create(&t, &at, tile_thread, NULL) == 0) pthread_detach(t);
     pthread_attr_destroy(&at);
 }
+#else
+/* The LITE build is the payload that travels inside the home-screen app's package, so it
+   carries no package of its own - that would be a package containing itself. Everything
+   else about it is identical, which is the point: pressing the icon starts the same shop. */
+static void tile_start(void) { ilog("tile: lite build - no package to install"); }
+#endif
 
 static void serve_static(int fd, const char *path) {
     if (strstr(path, "..")) { send_status(fd, "403 Forbidden", "text/plain", "no"); return; }

@@ -9,8 +9,17 @@
 # sdk-goldhen.patch.py to it. That patch is what makes a payload actually RUN under GoldHEN - see
 # the comments in the patch for exactly why, and never skip it.
 #
-# Usage (WSL):  bash build-wsl.sh [PORT]
+# TWO BUILDS COME OUT OF THIS FILE:
+#   (default)  the full payload - carries the home-screen app's package and installs it
+#   --lite     the same shop with NO package inside, which is the copy that travels INSIDE that
+#              package so pressing the icon can start the shop
+# That is how the cycle is broken. ps4-app/build-all-wsl.sh builds them in the only order that
+# works; running this on its own builds the full one and needs the package to exist already.
+#
+# Usage (WSL):  bash build-wsl.sh [--lite] [PORT]
 set -e
+LITE=0
+if [ "${1:-}" = "--lite" ]; then LITE=1; shift; fi
 PORT="${1:-8710}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
@@ -64,20 +73,27 @@ python3 "$TOOLS/ps4_sync_sqmini.py" --check \
 # error with no explanation; say so here instead. Build order is the package first, then this - and
 # it is one-way on purpose: the package must never carry this ELF back (see tile_bundle.h).
 TILE_PKG="$HERE/../tile-pkg/IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg"
-if [ ! -f "$TILE_PKG" ]; then
-  echo "ABORT: the PS4 dashboard app is not built - run ps4-app/tile-pkg/build-wsl.sh first." >&2
-  exit 1
+if [ "$LITE" = "1" ]; then
+  EXTRA="-DPMS_LITE"
+  OUT="$HERE/PKG-MUTANT-SHOP-PS4-LITE.elf"
+else
+  EXTRA=""
+  OUT="$HERE/PKG-MUTANT-SHOP-PS4.elf"
+  if [ ! -f "$TILE_PKG" ]; then
+    echo "ABORT: the PS4 home-screen app is not built - run ps4-app/build-all-wsl.sh." >&2
+    exit 1
+  fi
 fi
 
 echo "== syntax check"
-"$SDK/bin/orbis-clang" -Wall -DPORT="$PORT" -fsyntax-only -Werror=implicit-function-declaration \
+"$SDK/bin/orbis-clang" -Wall -DPORT="$PORT" $EXTRA -fsyntax-only -Werror=implicit-function-declaration \
   "$HERE/server_ps4.c" || { echo "ABORT: server_ps4.c does not compile." >&2; exit 1; }
 
 echo "== link"
-"$SDK/bin/orbis-clang" -Wall -g -DPORT="$PORT" \
-  -o "$HERE/PKG-MUTANT-SHOP-PS4.elf" "$HERE/server_ps4.c" \
+"$SDK/bin/orbis-clang" -Wall -g -DPORT="$PORT" $EXTRA \
+  -o "$OUT" "$HERE/server_ps4.c" \
   -lSceAppInstUtil -lSceUserService -lSceSystemService
 
-echo "BUILT: $HERE/PKG-MUTANT-SHOP-PS4.elf"
-ls -l "$HERE/PKG-MUTANT-SHOP-PS4.elf"
-file "$HERE/PKG-MUTANT-SHOP-PS4.elf"
+echo "BUILT: $OUT"
+ls -l "$OUT"
+file "$OUT"

@@ -13,7 +13,11 @@ VERSION     := 1.00
 TITLE_ID    := PKGM00001
 CONTENT_ID  := IV0000-PKGM00001_00-PKGMUTANTSHOP001
 
-LIBS        := -lc -lkernel -lSceSystemService -lSceSystemServiceWebBrowser -lSceUserService
+# ONLY WHAT THE TOOLCHAIN'S OWN WORKING SAMPLE LINKS. Every extra -lSce... puts another entry in
+# the eboot's SCE_NEEDED_MODULE list, and an application whose module list the console cannot
+# satisfy is refused at launch - which is what CE-32930-7 looks like. hello_world, which launches,
+# needs libkernel alone. Everything else is resolved at run time in main.c.
+LIBS        := -lc -lkernel
 
 ASSETS      := $(wildcard assets/**/*)
 LIBMODULES  := $(wildcard sce_module/*)
@@ -44,7 +48,7 @@ all: $(TARGET)
 $(TARGET): pkg.gp4
 	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core pkg_build pkg.gp4 .
 
-pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png $(LIBMODULES) $(ASSETS)
+pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png pms-payload.elf $(LIBMODULES) $(ASSETS)
 	$(TOOLCHAIN)/bin/$(CDIR)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
 
 sce_sys/param.sfo: Makefile

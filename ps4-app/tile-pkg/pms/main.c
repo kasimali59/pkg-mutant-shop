@@ -1,27 +1,23 @@
-/* PKG MUTANT SHOP - the PS4 dashboard app.
+/* PKG MUTANT SHOP - the PS4 home-screen app.
  *
- * WHAT IT IS. The icon on the PS4's home screen. Pressing it opens the shop on the television.
- * That is the whole job, and it is deliberately the whole job: this is the PS4 twin of the PS5's
- * dashboard tile, which is likewise a small thing whose only purpose is to open the shop that the
- * ELF serves. The ELF is the shop; this is the button.
+ * WHAT IT IS. The icon on the PS4's home screen, and the PS4 twin of the PS5's dashboard tile.
+ * Pressing it gets the shop running on this console and then opens it in the console's own browser.
+ * The shop is a web app: the ELF hosts the page and the API on port 8710 from inside the console,
+ * so it works with every PC switched off.
  *
- * WHY IT CARRIES NOTHING. An earlier version shipped the shop's payload inside the package and
- * handed it to a payload loader. That had to go, and the reason is structural rather than taste:
+ * WHY THE PS5 TILE IS SMALLER THAN THIS. On the PS5 a package can be metadata only: its param.json
+ * carries `deeplinkUri` and the system opens that URL when the icon is pressed - no program at all.
+ * The PS4 has no such field. A PS4 icon is a real application with a real eboot, so this program
+ * exists to do by hand what the PS5 gets from one line of metadata.
  *
- *     The ELF installs this package, the way the PS5 ELF installs its tile. If the package also
- *     contained the ELF, the ELF would contain a copy of itself - and every rebuild would embed
- *     the previous one, growing without limit.
- *
- * So the package carries an icon and this program and nothing else, and the ELF carries the
- * package. One direction only, which is the shape the PS5 has always had.
- *
- * WHAT THAT MEANS WHEN THE SHOP IS NOT RUNNING. The same thing it means on the PS5: a button
- * cannot conjure the server. It says so in words instead of opening a browser onto a dead port -
- * which is exactly what an icon that "does nothing" looks like from the sofa.
- *
- * NOTHING HERE IS PRIVILEGED. A loopback connect, its own /app0, and two public system-service
- * calls. An application runs sandboxed - it cannot read /data and it cannot inject code into
- * another process - so a button that needed either would be a button that does not work.
+ * NOTHING IS LINKED THAT DOES NOT HAVE TO BE, and that is not tidiness - it is the fix for an app
+ * that would not start at all. Linking the system-service libraries put libSceSystemService and
+ * libSceUserService in the eboot's SCE_NEEDED_MODULE list; the toolchain's own hello_world, which
+ * launches, needs only libkernel. An application whose module list cannot be satisfied does not
+ * fail politely - the console refuses to start it, which is what CE-32930-7 looks like from the
+ * sofa. So this links libkernel alone and resolves everything else at run time, exactly the way the
+ * shop's payload resolves the install service: a symbol that is not there becomes a sentence on
+ * screen instead of an app that will not open.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,28 +26,75 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <orbis/libkernel.h>
-#include <orbis/SystemService.h>
-#include <orbis/UserService.h>
 
 #define SHOP_PORT 8710
 #define SHOP_URL  "http://127.0.0.1:8710/"
 
-/* The notification the console draws.
- *
- * THE ICON FIELD MUST STAY ZERO. `useIconImageUri = 1` selects the form that draws an icon beside
- * the text, and on this console family that form returns success and renders NOTHING - this project
- * has been caught by it twice already on the PS5. The shop's payload sends the plain form, measured
- * working on this exact console, so this sends the identical thing. An app whose every message is
- * invisible looks broken no matter what it actually did. */
-static void notify(const char *text) {
-    OrbisNotificationRequest req;
-    memset(&req, 0, sizeof(req));
-    snprintf(req.message, sizeof(req.message), "%s", text);
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+/* ---------------------------------------------------------------- run-time symbols */
+
+static int  (*p_launch_browser)(const char *, int, int, int);
+static int  (*p_user_init)(void *);
+static int  (*p_user_term)(void);
+static int  (*p_notify)(int, void *, size_t, int);
+
+/* The notification struct, copied from the toolchain's own orbis/_types/kernel.h rather than
+   invented. It is only declared here because sceKernelSendNotificationRequest is resolved at run
+   time now, so the header's prototype is not in play. */
+typedef struct {
+    int  type, reqId, priority, msgId, targetId, userId, unk1, unk2, appId, errorNum, unk3;
+    unsigned char useIconImageUri;
+    char message[1024], iconUri[1024], unk[1024];
+} notify_req_t;
+
+/* sceKernelLoadStartModule + sceKernelDlsym rather than dlopen/dlsym: both live in libkernel,
+   which is the one module this eboot declares, so resolution itself can never be the thing that
+   stops the app starting. A handle of 0 or below means the module is not there. */
+static int load_module(const char *path) {
+    int res = 0;
+    int h = (int)sceKernelLoadStartModule(path, 0, 0, 0, 0, &res);
+    printf("[PMS] load %s -> handle=%d res=0x%08x\n", path, h, res);
+    return h;
 }
 
-/* Is the shop listening on loopback? A refused connect settles immediately, so this costs nothing. */
+static void *sym_of(int handle, const char *name) {
+    void *addr = NULL;
+    if (handle <= 0) return NULL;
+    if (sceKernelDlsym(handle, name, &addr) != 0) return NULL;
+    return addr;
+}
+
+static void resolve_everything(void) {
+    int ss = load_module("/system/common/lib/libSceSystemService.sprx");
+    int us = load_module("/system/common/lib/libSceUserService.sprx");
+    int lk = load_module("/system/common/lib/libkernel.sprx");
+
+    p_launch_browser = (int (*)(const char *, int, int, int))
+                       sym_of(ss, "sceSystemServiceLaunchWebBrowser");
+    p_user_init = (int (*)(void *))sym_of(us, "sceUserServiceInitialize");
+    p_user_term = (int (*)(void))sym_of(us, "sceUserServiceTerminate");
+    p_notify = (int (*)(int, void *, size_t, int))
+               sym_of(lk, "sceKernelSendNotificationRequest");
+    printf("[PMS] resolved: browser=%p user_init=%p notify=%p\n",
+           (void *)p_launch_browser, (void *)p_user_init, (void *)p_notify);
+}
+
+/* THE ICON FIELD STAYS ZERO. `useIconImageUri = 1` picks the form that draws an icon beside the
+   text, and on this console family that form returns success and renders NOTHING - this project has
+   been caught by it twice on the PS5. The shop's payload sends the plain form, measured working on
+   this exact console, so this sends the identical thing. */
+static void notify(const char *text) {
+    if (!p_notify) return;
+    notify_req_t req;
+    memset(&req, 0, sizeof(req));
+    snprintf(req.message, sizeof(req.message), "%s", text);
+    p_notify(0, &req, sizeof(req), 0);
+}
+
+/* ---------------------------------------------------------------- the shop */
+
 static int shop_is_up(void) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return 0;
@@ -69,49 +112,139 @@ static int shop_is_up(void) {
     return rc == 0;
 }
 
-/* Opening the browser has a prerequisite the shop's payload does not: the user service. The
- * reference program for this on PS4 - the browser sample in the payload SDK - initialises it first
- * and only launches if that succeeded. A payload inherits a process that has already done it; a
- * sandboxed application has not.
- *
- * FOUR ARGUMENTS, deliberately. The published PS4 declaration takes none (it is a stub), and the
- * PS5 build of this shop calls the same export with four, proven on hardware. Extra arguments in
- * registers are harmless on this ABI; passing too few would leave whatever was already in the
- * remaining registers to be read as parameters. Four is the form that is right either way. */
-static void open_browser(const char *url) {
-    int rc = sceUserServiceInitialize(0);
-    printf("[PMS] sceUserServiceInitialize rc=0x%08x\n", rc);
-    sceSystemServiceLaunchWebBrowser(url, 0, 0, 0);
+/* Opening the browser needs the user service first - the browser sample in the payload SDK treats
+   that as a prerequisite, and an application has not inherited a process that already did it.
+   FOUR ARGUMENTS: the published PS4 declaration is a stub taking none, the PS5 build of this shop
+   calls the same export with four and is proven on hardware, and extra arguments in registers are
+   harmless on this ABI while too few would leave stale registers to be read as parameters. */
+static int open_browser(const char *url) {
+    if (!p_launch_browser) return -1;
+    if (p_user_init) {
+        int rc = p_user_init(NULL);
+        printf("[PMS] user service rc=0x%08x\n", rc);
+    }
+    int rc = p_launch_browser(url, 0, 0, 0);
+    printf("[PMS] browser rc=0x%08x\n", rc);
     sceKernelUsleep(3 * 1000000);
-    sceUserServiceTerminate();
+    if (p_user_term) p_user_term();
+    return rc;
+}
+
+/* ------------------------------------------------------- starting the shop
+
+   The package carries the shop's payload at /app0. A payload loader is what turns those bytes into
+   a running process, and a jailbroken PS4 has one of two: the common one speaks HTTP, the other
+   takes the bare ELF with no framing. Try both; one refused connect is all it costs.
+
+   NEVER OPEN A CONNECTION THAT IS NOT THEN FILLED WITH THE WHOLE PAYLOAD. A loader handed an empty
+   connection can stop listening - this console lost its loader twice that way, from nothing more
+   than a port scan. That is also why there is no "is a loader there?" probe: the connect below IS
+   the probe and it is always followed by the payload. */
+#define PAYLOAD_PATH "/app0/pms-payload.elf"
+#define LOADER_HTTP  9090
+#define LOADER_RAW   9021
+
+static int write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, buf + off, len - off);
+        if (w <= 0) return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+static int send_payload(int port, int http) {
+    struct stat st;
+    if (stat(PAYLOAD_PATH, &st) != 0 || st.st_size <= 0) return -1;
+    int f = open(PAYLOAD_PATH, O_RDONLY);
+    if (f < 0) return -1;
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { close(f); return -1; }
+    struct timeval tv;
+    tv.tv_sec = 30; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) { close(s); close(f); return -1; }
+
+    if (http) {
+        char hdr[256];
+        int hn = snprintf(hdr, sizeof(hdr),
+                          "POST / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                          "Content-Type: application/octet-stream\r\n"
+                          "Content-Length: %lld\r\nConnection: close\r\n\r\n",
+                          port, (long long)st.st_size);
+        if (write_all(s, hdr, (size_t)hn) != 0) { close(s); close(f); return -1; }
+    }
+    char *buf = (char *)malloc(64 * 1024);
+    if (!buf) { close(s); close(f); return -1; }
+    int bad = 0;
+    for (;;) {
+        ssize_t r = read(f, buf, 64 * 1024);
+        if (r < 0) { bad = 1; break; }
+        if (r == 0) break;
+        if (write_all(s, buf, (size_t)r) != 0) { bad = 1; break; }
+    }
+    free(buf);
+    close(f);
+    char rep[256];
+    if (!bad) (void)read(s, rep, sizeof(rep));
+    close(s);
+    printf("[PMS] loader :%d took the payload: %s\n", port, bad ? "no" : "yes");
+    return bad ? -1 : 0;
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[PMS] PKG MUTANT SHOP app starting\n");
+    resolve_everything();
 
-    /* Three tries over about four seconds. The shop is normally already up - it is what installed
-       this app - but a console just back from rest can still be settling. */
     int up = 0;
     for (int i = 0; i < 3 && !up; i++) {
         up = shop_is_up();
-        if (!up) sceKernelUsleep(1500 * 1000);
+        if (!up) sceKernelUsleep(1200 * 1000);
     }
 
     if (up) {
         printf("[PMS] the shop is answering - opening it\n");
         notify("Opening PKG MUTANT SHOP");
-        open_browser(SHOP_URL);
+        if (open_browser(SHOP_URL) != 0)
+            notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
         return 0;
     }
 
-    /* The one case a person has to act on, so it says what to do rather than failing silently. It
-       does NOT name the jailbreak software: the house style forbids naming software this project
-       does not ship - tools/message_report.py --check enforces that and reads this file - and on a
-       television the name of a payload loader means nothing to the person reading it. */
-    printf("[PMS] nothing is answering on :%d\n", SHOP_PORT);
-    notify("PKG MUTANT SHOP is not running on this PS4\n"
-           "Load it from the PC app or your jailbreak, then open this again");
+    /* NOT RUNNING - so start it. The package carries the shop, and handing it to a payload
+       loader is the one way an application that is not privileged can get code into a process that
+       outlives it. It has to outlive us: the moment the browser comes forward this app is
+       suspended, so a shop served from HERE would stop answering exactly when the page loaded. */
+    printf("[PMS] nothing on :%d - starting the shop\n", SHOP_PORT);
+    notify("Starting PKG MUTANT SHOP");
+
+    int handed = (send_payload(LOADER_HTTP, 1) == 0) || (send_payload(LOADER_RAW, 0) == 0);
+    if (handed) {
+        for (int i = 0; i < 30; i++) {
+            sceKernelUsleep(1000 * 1000);
+            if (shop_is_up()) {
+                printf("[PMS] the shop came up after %d second(s)\n", i + 1);
+                notify("Opening PKG MUTANT SHOP");
+                if (open_browser(SHOP_URL) != 0)
+                    notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
+                return 0;
+            }
+        }
+        notify("PKG MUTANT SHOP did not finish starting\n"
+               "Try opening this again in a moment");
+        return 1;
+    }
+
+    notify("PKG MUTANT SHOP cannot start\n"
+           "Nothing on this PS4 can load it right now - run the jailbreak again, then open this");
     sceKernelUsleep(6 * 1000000);
     return 1;
 }

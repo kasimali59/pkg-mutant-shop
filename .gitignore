@@ -20,6 +20,7 @@ ps4-app/tile-pkg/pms/x64/
 ps4-app/tile-pkg/eboot.bin
 ps4-app/tile-pkg/pkg.gp4
 ps4-app/tile-pkg/pms-payload.elf
+ps4-app/onconsole/PKG-MUTANT-SHOP-PS4-LITE.elf
 ps4-app/tile-pkg/sce_sys/param.sfo
 ps4-app/tile-pkg/sce_sys/about/
 ps4-app/tile-pkg/sce_module/
