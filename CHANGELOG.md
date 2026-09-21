@@ -31,6 +31,61 @@ So there are two payloads and one of everything else. `PKG-MUTANT-SHOP.elf` is t
 `PKG-MUTANT-SHOP-PS4.elf` is the PS4's; both embed the same `web/` directory, both answer the same
 API, and both are held to the same build gates. From the user's side there is one app.
 
+### The PS4 now has an icon on the dashboard
+
+A PS4 had nothing to press. The shop existed only while a payload happened to be injected, and the
+jailbreak's binary loader does not survive rest mode - so after one suspend there was no app on the
+console at all, whatever had been "installed". `ps4-app/tile-pkg/` builds the thing that was missing:
+
+**`IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg`** - a real, fake-signed PS4 application. Title id
+`PKGM00001` (the PS5 tile's identity: one app whichever console it is on, and it cannot collide with
+a game, which is `CUSA`/`NPXS`). Category `gd`, content type `0x1A`, flags `0x0A000000` - the shape
+of a retail base game, which is the point: `pkg_meta.parse_pkg` reads it exactly as it reads a
+retail title, our own integrity check calls it complete, and it installs down the same lane every
+other game does. Nothing special-cases it.
+
+**Pressing the icon:** if the shop is already answering on `127.0.0.1:8710` it opens it; otherwise
+it hands the payload it carries to the binary loader on `:9090`, waits for the shop, and opens the
+console's own browser at it. If neither works it says so on screen, with what to do about it. It
+never opens a connection it does not then fill with the payload - an empty connection to an ELF
+loader can stop it listening, which is how this console lost its loader twice during this work, from
+nothing but a port scan.
+
+**It loads a payload rather than being the server** because an application is suspended the moment
+the browser comes to the foreground, and a suspended process stops answering its socket: a shop
+served by the app itself would die at the exact moment the page tried to load it. The payload lives
+in a long-running system process. The app is the button; the payload is the shop. Nothing in it is
+privileged - loopback sockets, its own `/app0`, two public system-service calls.
+
+**The PC installs it, not the ELF**, and that is deliberate. The package carries the payload so the
+icon works with every PC switched off; a payload that also carried the package would contain a copy
+of itself and grow with every build. So the exe ships it, registers it in the file registry (so the
+proven `/library/` route serves it - byte ranges included, which the console's installer requires),
+and installs it the first time it sees a PS4 without it. Settings has a row for it with a button;
+`POST /api/ps4/tile` forces it; the payload answers `/api/tile/status`.
+
+**Built with the OpenOrbis PS4 Toolchain v0.5.4** - `clang` -> `create-fself` -> `param.sfo` ->
+`create-gp4` -> `PkgTool.Core pkg_build`, all fetched by `build-wsl.sh` on first run, with libssl 1.1
+unpacked beside the toolchain because PkgTool's runtime needs it and this machine has libssl 3 and no
+root. The toolchain's own `hello_world` was built and packaged first, so the chain was proven on
+something known-good before ours was trusted. Verified after: the eboot is `SCE Executable (ASLR)
+0xFE10` with a FreeBSD ABI, and extracting the finished package shows the payload inside at its exact
+1,690,912 bytes.
+
+**If it goes wrong:** `sceAppInstUtilAppUnInstall("PKGM00001")` removes it - the canonical signature
+from the toolchain's own header - or delete it from the home screen like any application. The failure
+that cost a console on the PS5 side was a registration with no data behind it; this is the opposite,
+a complete package handed to the console's own installer, which is the only thing that writes those
+records correctly.
+
+### The settings row for it does not lie when the console is off
+
+`installed_app_pkg` answers None both for "the console says it is not there" and for "the console did
+not answer", and collapsing those to False made a PS4 that was merely switched off report its app as
+missing - which the panel then offered to install, and the install would have failed. The console is
+asked whether it is there first; only a console that can answer gets to say no. With the PS4 off the
+row shows a dash and no button.
+
 ### New — the PS4 payload (`ps4-app/onconsole/server_ps4.c`)
 
 * Serves the shared UI and the JSON API on **:8710**, one thread per connection.
@@ -127,14 +182,12 @@ console has **no kernel read/write**. The cheat engine finds a game's memory by 
 tables, which needs exactly that. `/api/cheat*`, `/api/mods*` and `/api/patch*` answer with one
 sentence saying so rather than failing in a way that looks like a bug.
 
-### Known limit — no dashboard tile on the PS4 yet
+### On the PS4 dashboard app
 
-The PS5 ships one: a fake-signed PS5 package embedded in the ELF and installed on boot. A PS4 tile is
-a different container and a different problem — a real application with a signed `eboot.bin`, needing
-an fpkg build tool and an fself signer, neither of which is in this repo. The PS5 experience is that
-a wrong app registration leaves a tile that crashes the console hard enough to need the jailbreak
-re-run, so it is not worth guessing at. `/api/open` covers the need in the meantime: one tap in the
-app opens the shop on the console's own screen.
+Earlier in this release there was none, and this entry said so. There is now - see the top of this
+entry. What remains true is the reason the shortcut was refused: a wrong app registration is what
+left a tile that crashed the console on the PS5 side, so the package goes through the console's own
+installer rather than being written into the database by hand.
 
 ### Getting the payload to run at all
 
