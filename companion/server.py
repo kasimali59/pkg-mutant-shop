@@ -4230,6 +4230,47 @@ class Ps5Bridge:
         # just installed should stop being offered as installable on the next library read.
         self._usbpkg_memo = None
 
+    def _reachable_fast(self, budget=0.35):
+        """Is ANY transport to this console accepting connections right now?
+
+        Deliberately cheap. A TCP connect to a machine that is off settles in milliseconds, while
+        the FTP read this guards waits out its full eight seconds. That was tolerable with one
+        console and is not with two: with a PS5 and a PS4 both switched off, rebuilding the library
+        took sixteen seconds of pure timeout.
+
+        It asks about every transport, not just the shop port, because a console whose ELF is not
+        loaded yet is still readable over FTP - gating on the shop port alone would have broken the
+        fallback that exists for exactly that case. Only when NOTHING accepts a connection is there
+        anything left to skip.
+        """
+        if not self.ip:
+            return False
+        if self.up(budget=budget):
+            return True
+        ports, seen = [], set()
+        for p in [self._ftp_port, self.c.get("ftp_port")] + list(self.FTP_FALLBACKS):
+            try:
+                p = int(p)
+            except (TypeError, ValueError):
+                continue
+            if p not in seen:
+                seen.add(p)
+                ports.append(p)
+        for p in ports:
+            sock = socket.socket()
+            sock.settimeout(budget)
+            try:
+                if sock.connect_ex((self.ip, p)) == 0:
+                    return True
+            except Exception:
+                pass
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return False
+
     def _ps4_console_apps(self):
         """The PS4's installed games, as our PS4 payload reports them. None if it did not answer.
 
@@ -4290,6 +4331,10 @@ class Ps5Bridge:
         # every call in a single request paid the full FTP timeout again, which is what made the
         # library take ~25s whenever the PS5 was off. `force` still ignores it.
         if not force and time.time() - getattr(self, "_apps_fail_ts", 0) < 10:
+            return None
+        # Nothing is listening: skip the transports rather than waiting for each to give up.
+        if not self._reachable_fast():
+            self._apps_fail_ts = time.time()
             return None
         # A PS4 STORES ITS INSTALLED GAMES IN A DIFFERENT SCHEMA, and our PS4 payload already reads
         # it. app.db sits at the same path on both consoles, but a PS4 has no tbl_contentinfo: it has
