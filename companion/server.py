@@ -4956,14 +4956,51 @@ class Queue:
             # whose console has no resolvable address (and for single-console setups before the
             # first byte, where the per-IP bucket does not exist yet).
             b = self.fleet.bridge(t.get("console"))
+            counter = None
             if b is not None and b.ip:
-                mine = self.transfers.get("%s|%s" % (key, b.ip))
-                if mine is not None:
-                    return mine
-            return self.transfers.get(key)
+                counter = self.transfers.get("%s|%s" % (key, b.ip))
+            if counter is None:
+                counter = self.transfers.get(key)
+            return self._with_console_verdict(t, b, counter)
         if t.get("progress_url"):
             return http_get_json(t["progress_url"])
         return None
+
+    def _with_console_verdict(self, t, bridge, counter):
+        """Fold a PS4's own install verdict into the byte counter the transfer loop watches.
+
+        The loop already knows what to do with `state == "error"` - it stops and shows the message -
+        but nothing ever put one there for this lane, so a failure could only ever surface as the
+        generic "nothing arrived for 90 seconds". On the PS4 there IS a real verdict to read: the
+        console names the one case it refuses (a title the Store has a newer version of), and that
+        sentence is far more use than a stall.
+
+        PS5 ONLY GETS THE COUNTER, exactly as before. Its payload answers on a single accept loop
+        that is already busy installing, and this runs every half second - adding a round trip to it
+        would be paid in the frames of whatever the user is looking at. Nothing about the PS5 path
+        changes.
+
+        Memoised for three seconds, so a half-second loop costs at most one question per three.
+        """
+        if bridge is None or not bridge.is_ps4():
+            return counter
+        memo = getattr(self, "_job_memo", None)
+        if memo is None:
+            memo = self._job_memo = {}
+        now = time.time()
+        seen = memo.get(t["id"])
+        if not seen or now - seen[0] > 3.0:
+            job = bridge.engine_job() or {}
+            memo[t["id"]] = (now, job)
+        else:
+            job = seen[1]
+        if not isinstance(job, dict) or not job.get("state"):
+            return counter
+        out = dict(counter or {})
+        out["state"] = job.get("state")
+        if job.get("msg"):
+            out["msg"] = job["msg"]
+        return out
 
     def _run(self, t):
         # Cancel is a flag, and until now nothing looked at it until well after the handoff. A job

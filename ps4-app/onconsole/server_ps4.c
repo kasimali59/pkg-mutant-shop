@@ -1909,8 +1909,21 @@ static void handle_get(int fd, const char *rawpath) {
         char em[400];
         json_escape(g_job.msg, em, sizeof(em));
         char out[900];
-        if (!done)
-            snprintf(out, sizeof(out), "{\"ok\":false,\"pending\":true,\"state\":\"%s\"}", g_job.state);
+        /* THE VERDICT IS ON THE HAND-OVER, NOT ON THE WHOLE INSTALL - the same contract the PS5
+           build answers here, and the companion is built around it: it polls this for ninety
+           seconds and then stops, while the queue that follows allows thirty-five minutes to prove
+           the finish from the console's own files. Answering only when the download had completed
+           made every install longer than ninety seconds - which is most of them - report "the
+           console took this package but never reported back" while it was installing perfectly.
+           `rc` is what the companion waits for, so a running job carries the rc the register and
+           start calls actually returned: zero, because they succeeded. */
+        if (!done && !g_job.active)
+            snprintf(out, sizeof(out), "{\"ok\":false,\"pending\":true,\"state\":\"idle\"}");
+        else if (!done)
+            snprintf(out, sizeof(out),
+                     "{\"ok\":true,\"rc\":\"0x00000000\",\"accepted\":true,\"state\":\"%s\","
+                     "\"content_id\":\"%s\",\"uri\":\"%s\",\"via\":\"bgft\"}",
+                     g_job.state, g_job.tid, g_job.uri);
         else
             snprintf(out, sizeof(out),
                      "{\"ok\":%s,\"rc\":\"0x%08X\",\"content_id\":\"%s\",\"uri\":\"%s\","
