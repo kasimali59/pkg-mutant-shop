@@ -24,21 +24,54 @@ bash ps4-app/tile-pkg/build-wsl.sh     # WSL; fetches its toolchain on first run
 | the ELF **updates** it | **yes**, verified — `01.00` → `01.01` → `01.02` → `01.03` on the hardware |
 | the installed bytes are ours | **yes**, verified — read back over FTP and hashed: `01.03` = `5968c773…fb`, identical to the build |
 | the icon is on the home screen | **yes** — listed by the console as *PKG MUTANT SHOP* |
-| **the eboot has been run** | **no.** Pressing the icon gives **CE-32930-7**, and that error is **not diagnosed** |
+| **the eboot has been run** | **no** — and it cannot be. The console fails to mount `/app0` before any process exists: `PrepareProcessLaunchPkg() ret = 80990019` |
+| is that our package's fault | **no.** A fake-signed *retail* game on the same console fails at the identical line with the identical code |
 
-Everything about the *file*, the *install* and the *update* is now measured on a real PS4 at 13.52.
-What remains unmeasured is the one thing that matters most to the person holding the pad: **the app
-has never successfully launched.** `CE-32930-7` has no confirmed cause here — an earlier note in
-`pms/main.c` blamed the eboot's `SCE_NEEDED_MODULE` list and that claim did not survive checking, so
-it was withdrawn rather than left standing. Narrowing the eboot to `libkernel` alone is a shot in the
-dark taken because it is free, not a fix for an understood fault.
+Everything about the *file*, the *install* and the *update* is measured on a real PS4 at 13.52.
+**The app still cannot be launched from the home screen, and that is now understood well enough to
+say it is not this package's doing.**
 
-**The control test that would settle it:** press **Riptide GP2**. It is also fake-signed, also
-installed by this shop, and also never launched (`lastAccessTime == installDate`). If it fails the
-same way, the jailbreak's fake-self support is the problem and not this package. That test needs
-someone at the console with klog capturing; it has not been run.
+Captured on the console — `research/klog-ce32930-7-app0-mount-2026-09-21.txt`:
 
-Do not read "installed and verified" as "working". The install is proven. The launch is not.
+```
+[SceLncService] launchApp(PKGM00001)  category={gd}  appType={SCE_LNC_APP_TYPE_BIG_APP}  appVer={01.03}
+[SceLncService] PrepareProcessLaunchDir()
+[PS]Error: process_starter\process_mount.cpp at 3577
+[PS]Error: process_starter\process_mount.cpp at 4442
+PrepareProcessLaunchPkg() ret = 80990019
+[SceLncService] lnc_mount_root.cpp(425)  mountApp0Dir:      LNC_ISOK::0x80990019
+[SceLncService] lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
+[SceLncService] lnc_manager.cpp(439)     launchApp:         LNC_ISOK::0x80990019
+```
+
+`CE-32930-7` is `0x80990019` out of `PrepareProcessLaunchPkg`, surfacing as a failure to mount
+`/app0`. **No process is ever created** — the eboot is never reached, so nothing in `pms/` can be
+the cause and nothing in `pms/` can fix it.
+
+**The control test was run, and it is the whole answer.** Riptide GP2 (`CUSA02365`) — a fake-signed
+*retail* game, nothing to do with this build — was pressed on the same console minutes later and
+failed at the **identical line with the identical code**. On top of that, every flag field in our
+PKG header matches the installed retail-derived packages read off that same console:
+
+| field | ours | CUSA02365 / CUSA11740 |
+| --- | --- | --- |
+| `pkg_type` @0x04 | 1 | 1 |
+| `drm_type` @0x70 | 15 | 15 |
+| `content_type` @0x74 | 26 | 26 |
+| `content_flags` @0x78 | `0x0A000000` | `0x0A000000` |
+| `pfs_flags` @0x408 | `0x80000000000003CC` | `0x80000000000003CC` |
+| `ekc_version` @0x9C | 1 | 1 |
+
+Only sizes and entry counts differ, as they must for a smaller application.
+
+**So: this console cannot launch any fake-signed package from the dashboard.** Mounting an installed
+package as `/app0` happens in `SceShellCore`, not in our code and not in the package — which puts it
+in the jailbreak layer, on a firmware (13.52) newer than the GoldHEN build being used with it. That
+last step is the reasonable reading of the evidence rather than a measured fact, and it is labelled
+as such deliberately: two earlier explanations for this error were confidently wrong.
+
+Do not read "installed and verified" as "launchable". The build, the install and the self-update are
+proven. The launch is blocked outside this repository.
 
 ## What it is
 

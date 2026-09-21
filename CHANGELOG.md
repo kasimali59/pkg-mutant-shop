@@ -362,6 +362,61 @@ releases a task only when that task's own record contains a plain-http URL on `/
 match, and **nothing in this project starts, resumes or cancels a task that is not ours.** Store tasks
 stranded in that table can only be cleared from the console's own download list, by its owner.
 
+### CE-32930-7 measured: the console cannot mount `/app0` for ANY fake-signed package
+
+The dashboard icon installs, shows, self-updates — and will not open. Pressing it gives
+`CE-32930-7`. That error now has a measured cause, captured live on port 3232 and kept at
+`research/klog-ce32930-7-app0-mount-2026-09-21.txt`:
+
+```
+[SceLncService] launchApp(PKGM00001)  category={gd}  appType={SCE_LNC_APP_TYPE_BIG_APP}  appVer={01.03}
+[SceLncService] PrepareProcessLaunchDir()
+[PS]Error: process_starter\process_mount.cpp at 3577
+[PS]Error: process_starter\process_mount.cpp at 4442
+PrepareProcessLaunchPkg() ret = 80990019
+[SceLncService] lnc_mount_root.cpp(425)  mountApp0Dir:      LNC_ISOK::0x80990019
+[SceLncService] lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
+[SceLncService] lnc_manager.cpp(439)     launchApp:         LNC_ISOK::0x80990019
+```
+
+`CE-32930-7` is **`0x80990019` returned by `PrepareProcessLaunchPkg`**, surfacing as a failure to
+mount `/app0` from the installed package. **No process is ever created** — the eboot is never
+reached, so nothing in `ps4-app/tile-pkg/pms/` runs, and nothing in it can be the cause.
+
+**The control test settles whose fault it is.** Riptide GP2 (`CUSA02365`) — a fake-signed *retail*
+game, nothing to do with this project — was pressed on the same console minutes later and failed at
+the **identical line with the identical code**. Alongside that, every flag field of our PKG header,
+read off the console and compared against the retail-derived packages installed beside it, matches:
+
+| field | ours (`PKGM00001`) | `CUSA02365` / `CUSA11740` |
+| --- | --- | --- |
+| `pkg_type` @0x04 | 1 | 1 |
+| `drm_type` @0x70 | 15 | 15 |
+| `content_type` @0x74 | 26 | 26 |
+| `content_flags` @0x78 | `0x0A000000` | `0x0A000000` |
+| `pfs_flags` @0x408 | `0x80000000000003CC` | `0x80000000000003CC` |
+| `ekc_version` @0x9C | 1 | 1 |
+| `entry_count` @0x10 | 14 | 27 / 24 |
+| `pfs_image_size` @0x418 | 6,094,848 | 97,320,960 / 523,304,960 |
+
+Only sizes and entry counts differ, as they must for a smaller application.
+
+So **this console launches no fake-signed package from its dashboard at all.** Mounting an installed
+package as `/app0` is `SceShellCore`'s job, which places the block outside this repository — in the
+jailbreak layer, on a firmware (13.52) newer than the GoldHEN build running beside it. That last
+sentence is the reasonable reading of the evidence and is deliberately labelled as such: two earlier
+explanations of this error, both blaming our eboot, were confidently wrong and were withdrawn.
+
+**Nothing here changes how the shop is used.** The PS4 shop has never depended on the icon: the
+payload serves the UI on `:8710` and installs through the console's own Debug Package Installer
+service. The icon was convenience, and it is the only thing blocked.
+
+**What this project does not do, and never did:** mount anything itself. There is no mount lane in
+the PS4 payload — `grep` finds no mount call, only comments saying so. Every install, games and our
+own dashboard app alike, goes through one function into
+`sceBgftServiceIntDebugDownloadRegisterPkg` + `sceBgftServiceIntDownloadStartTask`; the console
+pulls the bytes over HTTP from us and its own installer promotes them.
+
 ### Verified on hardware
 
 * The payload runs as root, serves the 762 KB shared UI on :8710, and hot-reloads over a running copy.

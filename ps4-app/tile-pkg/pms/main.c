@@ -14,12 +14,26 @@
  * else at run time, which is the shape of the toolchain's own hello_world - the one sample known to
  * launch on this console family.
  *
- * BE CLEAR ABOUT WHY: **CE-32930-7 IS NOT DIAGNOSED.** An earlier version of this comment claimed
- * the extra SCE_NEEDED_MODULE entries were the cause. That does not survive checking - the modules
- * named are all resident at /system/common/lib, and the toolchain ships samples with the same shape
- * that work. Narrowing to the known-good reference is a shot in the dark taken because it is free
- * and cannot hurt, not a fix for an understood fault. What IS worth keeping either way: a symbol
- * that is not there becomes a sentence on screen instead of an app that will not open.
+ * CE-32930-7 IS NOW MEASURED, AND NOTHING IN THIS FILE CAUSES IT. Captured on the console
+ * (research/klog-ce32930-7-app0-mount-2026-09-21.txt):
+ *
+ *     [SceLncService] launchApp(PKGM00001)  category={gd}  appVer={01.03}
+ *     PrepareProcessLaunchPkg() ret = 80990019
+ *     lnc_mount_root.cpp(425) mountApp0Dir:      LNC_ISOK::0x80990019
+ *     lnc_application.cpp(321) initializeApp0Dir: LNC_ISOK::0x80990019
+ *
+ * The console fails to mount /app0 out of the installed package. **No process is ever created, so
+ * this code never runs** - not main(), not a single symbol lookup. And the control test settles
+ * whose fault it is: Riptide GP2 (CUSA02365), a fake-signed retail game with nothing to do with
+ * this build, fails at the identical line with the identical code. Every flag field in our PKG
+ * header matches the installed retail-derived packages exactly.
+ *
+ * So: do not "fix" this file to chase CE-32930-7. Two earlier attempts to explain that error from
+ * this side were both wrong - first the SCE_NEEDED_MODULE list, then narrowing the link to
+ * libkernel as a free shot in the dark. Linking libkernel alone stays because it is the shape of
+ * the one toolchain sample known to launch and it costs nothing, NOT because it fixes anything.
+ * What IS worth keeping either way: a symbol that is not there becomes a sentence on screen
+ * instead of an app that will not open.
  */
 #include <stdio.h>
 #include <stdlib.h>
