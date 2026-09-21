@@ -14,8 +14,10 @@ install flows, how to update, triage). Then `MUTANT PKG ENGINE.md` section 0 for
 
 > **Two consoles, one app.** A PS5 payload and a PS4 payload - one binary cannot run on both, which
 > was measured, not assumed - behind one UI, one companion, one queue and one set of build gates.
-> What the PS4 does not do yet: cheats and mods (its jailbreak gives a payload no kernel access) and
-> a dashboard tile. See [ps4-app/onconsole/README.md](ps4-app/onconsole/README.md).
+> Both consoles get an icon on their home screen: the PS5's tile, and a real PS4 application built
+> by [ps4-app/tile-pkg](ps4-app/tile-pkg/README.md). What the PS4 does not do yet: cheats and mods,
+> because its jailbreak gives a payload no kernel access. See
+> [ps4-app/onconsole/README.md](ps4-app/onconsole/README.md).
 
 ---
 

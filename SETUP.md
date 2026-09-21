@@ -140,6 +140,27 @@ pretending there is something to stop.
 There is no `deploy.py` for the PS4: that script drives Payload Manager, which is a PS5 tool, and
 this app does not reach into the PS4's jailbreak.
 
+### 2.1c The PS4's home-screen app
+
+`PKG-MUTANT-SHOP-PS4-APP.pkg` is a real PS4 application that puts the shop on the console's home
+screen, so it opens from an icon instead of only existing while a payload is loaded.
+
+**The PC installs it for you** the first time it sees a PS4 that does not have it, and Settings ->
+Your consoles -> **PS4 home screen app** shows its state with a button to put it back. That row
+shows a dash while the PS4 is switched off: the app does not guess about a console that cannot
+answer.
+
+**Without a PC**, install it from the console's own package installer - the file lives beside the
+exe and can be copied to the PS4 over FTP into whichever folder that installer scans.
+
+Pressing the icon starts the shop by handing the payload it carries to the jailbreak's loader, so
+**the jailbreak has to be running** - the same as every other homebrew on a PS4. After a sleep or a
+power cycle, run the jailbreak again and then press the icon.
+
+To rebuild it: `bash ps4-app/tile-pkg/build-wsl.sh` (fetches the OpenOrbis PS4 toolchain on first
+run). It embeds whatever `ps4-app/onconsole/PKG-MUTANT-SHOP-PS4.elf` currently is, so build the
+payload first.
+
 ### 2.2 Loading the shop
 
 The registered path Payload Manager runs is
