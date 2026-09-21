@@ -182,15 +182,58 @@ There is one: **`ps4-app/tile-pkg/`** builds `IV0000-PKGM00001_00-PKGMUTANTSHOP0
 fake-signed PS4 application that puts the shop on the home screen. Read that folder's README for
 how it is built and why it is shaped the way it is.
 
-Two things about it matter here:
+Two things about it matter here, and they pull against each other:
 
 * **It carries this payload**, so pressing the icon can start the shop with every PC switched off.
   It hands the payload to the jailbreak's binary loader on `:9090` and then opens the browser.
-* **This payload does NOT carry it**, and must not: a package that contains the payload, embedded
-  in the payload, is a payload containing a copy of itself, growing with every build. The companion
-  installs it instead - down the ordinary install lane, because it is an ordinary package. This
-  payload only reports on it, at `/api/tile/status`, proved by `app.pkg` on disk rather than an
-  `app.db` row.
+* **This payload carries it back**, and installs it itself - over the console's own loopback, from a
+  copy embedded in the ELF, with no PC, no FTP and nothing written into any jailbreak folder.
+
+Both at once is a package inside a package inside a package, growing with every rebuild. **The lite
+build cuts the cycle.** `build-all-wsl.sh` builds three artefacts in a line, never a circle:
+
+| | | |
+| --- | --- | --- |
+| 1 | `PKG-MUTANT-SHOP-PS4-LITE.elf` | the same shop, with no package inside it (~1.7 MB) |
+| 2 | `IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg` | the home-screen app, carrying **1** (~6.6 MB) |
+| 3 | `PKG-MUTANT-SHOP-PS4.elf` | the shop, carrying **2** (~8.3 MB) |
+
+Lite gives up exactly one thing - installing the home-screen app - and whoever is running lite got
+there by pressing that app, so it is already installed. A build gate refuses to build when
+`PS4_TILE_VER` and `ps4-app/tile-pkg/Makefile`'s `VERSION` disagree, because `"01.00"` and `"1.00"`
+normalise to the same number and every fix shipped in the package would otherwise be invisible.
+
+### What proves an install, and what does not
+
+**`/user/app/<TID>/app.pkg` CHANGING is the proof. Its mere existence is not.**
+
+That distinction cost a live install. `job_refresh()` used to call a job finished as soon as that file
+was present at roughly the expected size - honest for a first install, worthless for an update, where
+the file is already there from the version being replaced. So the first poll after an update started
+declared success and `bgft_release()` stopped and unregistered the *running* task. The console's own
+log: `tx stopped (524288/6619136)`, `error=0x0`. It left `app.db` carrying the new version number
+while `app.pkg` still held the old bytes, because the console writes the version early and promotes
+the file last, in `AppInstallApp`.
+
+So every install now records `app.pkg`'s size **and mtime** before it starts (`app_pkg_facts()`,
+`job_baseline_locked()`) and nothing is finished until that file changes. And because a version number
+cannot detect the state that cancellation left behind, `tile_bytes_match()` compares the installed
+package against the copy inside this very ELF, 64 KB at a time, and reinstalls when they differ -
+bounded to one attempt per build by `/data/pkg-mutant-shop/tile-repair.stamp`, so a firmware that ever
+re-wrapped `app.pkg` could not turn this into an install on every boot.
+
+`install_path_cleanup()` then removes every `pms-tile*.pkg` under `/data/pkg-mutant-shop` - only after
+the install is proven, only in that directory, only that name pattern. `/api/tile/status` reports on
+all of it, from `app.pkg` on disk rather than an `app.db` row.
+
+### Console-owned transfer tasks are never touched
+
+`bgft_sweep_ours()` releases a task only when that task's own `d0.pdb` contains a plain-http URL on
+`/library/` or `/pkgfile/`. A system firmware task points at `dus01.ps4.update.playstation.net` and a
+Store task is https on a Sony host, so neither can ever match. **Nothing in this project starts,
+resumes or cancels a transfer that is not ours** - a firmware download least of all, since installing
+one would cost the jailbreak. Audited on the hardware: of 11 slots in use, 9 were the console's own
+(8 for one title, plus a `PS4UPDATE.PUP`), and only our 2 were released.
 
 `/api/open` remains, and is what the app uses once the shop is up: it launches the console's own
 browser at the shop, so one tap from anywhere puts it on the television. The URL is also shown in

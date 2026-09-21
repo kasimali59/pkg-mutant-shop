@@ -31,7 +31,7 @@ So there are two payloads and one of everything else. `PKG-MUTANT-SHOP.elf` is t
 `PKG-MUTANT-SHOP-PS4.elf` is the PS4's; both embed the same `web/` directory, both answer the same
 API, and both are held to the same build gates. From the user's side there is one app.
 
-### The PS4 gets a real dashboard app — **built and validated, not yet installed**
+### The PS4 gets a real dashboard app — installed, self-updating, byte-verified
 
 > **Status.** **The app is installed on the console.** `/user/app/PKGM00001/app.pkg` holds exactly
 > 6,619,136 bytes with `app.pbm`, `app.json` and `app.xml` beside it, `/user/appmeta/PKGM00001/`
@@ -296,6 +296,72 @@ Two more things worth writing down:
 * `ps4-app/onconsole/README.md` — what was measured on the console, why each decision was made, and
   the SCE codes behind each one.
 
+### The defect that cancelled our own installs — and the proof that replaced it
+
+An update of the dashboard app was reported on screen as a progress bar that stopped near the start
+and never finished. It was not the console and it was not the network. **This shop was cancelling its
+own install**, about one second after starting it.
+
+`job_refresh()` decided an install had finished from `installed_app_pkg(tid)` — `/user/app/<TID>/app.pkg`
+present at roughly the expected size. That is honest proof for a **first** install: there was no file,
+and now there is one. It is worthless for an **update**, because the file is already on disk, at very
+nearly the same size, belonging to the version being replaced. So the first poll after the task started
+saw a file, called the job `installed`, and `bgft_release()` then *stopped and unregistered the running
+task*. The PC polling the job immediately after starting it is what pulled the trigger; the earlier
+`01.01` update survived only because nothing happened to poll during its four seconds.
+
+Measured on 13.52, in the console's own words:
+
+```
+[BGFT] task(00000077) tx started (65536/6619136)
+[BGFT] task(00000077) tx started (524288/6619136)
+[BGFT] task(00000077) tx stopped (524288/6619136)
+Task 00000077 ... ended (state=0,runstate=2,error=0x0)
+```
+
+524,288 of 6,619,136 — 7.9%, `error=0x0`, nothing refused anything. The wreckage it left is the part
+worth remembering: **`app.db` carried the new version number while `app.pkg` still held the old
+bytes**, because the console writes the version early and promotes the file at the end. A shop that
+checks only the version then reports itself up to date for ever, on a console that is not.
+
+`tile_thread()` had the same bug and a worse consequence: its wait loop fired on the first tick of an
+update and `install_path_cleanup()` **deleted the staged package the console was still downloading**.
+
+Fixed, and the fix is about what counts as evidence:
+
+* **`app_pkg_facts()`** reads size *and* mtime. Every install now records what `app.pkg` looked like
+  **before** it started (`job_baseline_locked()`, called in both install lanes), and nothing counts as
+  finished until that file **changes**. For a first install this is the same test as before — no file,
+  then a file. For an update, only the console replacing the file ends the job. The console writes
+  `/user/app/<TID>/app.pkg` last, in `AppInstallApp`, so the change is the honest signal.
+* **`tile_bytes_match()`** compares the installed package against the copy inside this very ELF, 64 KB
+  at a time, no allocation, stopping at the first difference. A version number cannot detect the state
+  the cancellation left behind; bytes can, and this console has now twice been measured storing
+  `app.pkg` byte-identical to the package handed to it. An unreadable file counts as a match — not
+  being able to read something is not evidence that it differs.
+* **`tile-repair.stamp`** bounds that repair to **one attempt per build**, so if some future firmware
+  ever re-wraps `app.pkg` as it installs it, the shop reinstalls its own icon once and not on every
+  boot.
+* **`install_path_cleanup()`** now sweeps every `pms-tile*.pkg` in `/data/pkg-mutant-shop`, not only
+  the one the running build happens to name — a copy staged by an older build is the same 6.6 MB of
+  dead weight. Still bounded to that one directory and that one name pattern, and still only after the
+  install is proven.
+
+The console was repaired the same way it will be from now on: the package was installed from its own
+storage over loopback, and `/user/app/PKGM00001/app.pkg` verified byte-for-byte against the build.
+
+### The console's own download table is the scarce resource, not ours
+
+Auditing the BGFT table after the fix: 11 of ~12 slots were in use and **nine of them were the
+console's own Store tasks**, eight for a single title (`CUSA23827`), plus a system firmware
+`PS4UPDATE.PUP` task. Ours were two, and the sweep released both.
+
+This is worth writing down because it changes where "the table is full" comes from. `bgft_sweep_ours()`
+releases a task only when that task's own record contains a plain-http URL on `/library/` or
+`/pkgfile/` — our routes. A firmware task points at `dus01.ps4.update.playstation.net`, so it can never
+match, and **nothing in this project starts, resumes or cancels a task that is not ours.** Store tasks
+stranded in that table can only be cleared from the console's own download list, by its owner.
+
 ### Verified on hardware
 
 * The payload runs as root, serves the 762 KB shared UI on :8710, and hot-reloads over a running copy.
@@ -308,6 +374,15 @@ Two more things worth writing down:
   nine alone.
 * A failed install reports as failed, is cleared by the next `spawn-cleanup`, and the install after it
   starts normally.
+* **The dashboard app updates itself and the result is byte-verified.** `01.00` → `01.01` → `01.02` →
+  `01.03` on the hardware, each one installed from the console's own storage over loopback, and after
+  the last two `/user/app/PKGM00001/app.pkg` was read back over FTP and hashed: `01.02` =
+  `b3988c3e…64`, `01.03` = `5968c773…fb`, each identical to the package the build produced. `app.db`
+  reports `01.03`.
+* **The staged copies are gone afterwards.** `/data/pkg-mutant-shop` holds `install.log` and `web/` and
+  nothing else — no package left behind on the drive.
+* **The task table was left as it was found.** Ours released, the console's nine untouched, the system
+  firmware task neither started nor cancelled.
 
 ---
 

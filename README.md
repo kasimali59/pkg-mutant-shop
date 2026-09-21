@@ -19,6 +19,17 @@ install flows, how to update, triage). Then `MUTANT PKG ENGINE.md` section 0 for
 > because its jailbreak gives a payload no kernel access. See
 > [ps4-app/onconsole/README.md](ps4-app/onconsole/README.md).
 
+> **The PS4 icon installs and updates itself, from the ELF, with this PC switched off.** The payload
+> carries the application's package and puts it on the home screen over the console's own loopback -
+> no PC, no FTP, no jailbreak folder touched. It compares versions first and then the bytes, so an
+> icon that is already current is left alone and one that is stale or wrong is replaced; the staged
+> copy is deleted once `/user/app/<TID>/app.pkg` proves the install. The version installed is proven
+> by reading that file back and hashing it, never by a return code.
+
+> **Nothing here ever touches a system update.** Console-owned transfer tasks - a firmware
+> `PS4UPDATE.PUP`, a Store download - are never started, resumed or cancelled by this app. The task
+> sweep releases a task only when that task's own record names one of our own routes.
+
 ---
 
 ## What this is (and isn't)

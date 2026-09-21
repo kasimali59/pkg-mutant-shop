@@ -494,6 +494,31 @@ static long long installed_app_pkg(const char *tid) {
     return 0;
 }
 
+/* SIZE AND MTIME, because "app.pkg is there" is NOT proof that an install finished.
+   It is proof for a FIRST install - there was no file and now there is one. For an UPDATE or a
+   reinstall the file is already on disk, at very nearly the same size, from the version being
+   replaced. Read as proof it says "finished" one second in, while the transfer is at 8%, and this
+   shop then cancelled its own live install and deleted the package it was serving. Measured on
+   13.52: `tx stopped (524288/6619136)`, error 0x0, the task gone from the table, app.db carrying
+   the new version number and app.pkg still holding the old bytes.
+   The console writes /user/app/<tid>/app.pkg at the END, in AppInstallApp, so a CHANGE to that
+   file is honest proof for both cases. Returns 1 if the file exists at all. */
+static int app_pkg_facts(const char *tid, long long *size, long long *mtime) {
+    if (size)  *size = 0;
+    if (mtime) *mtime = 0;
+    for (int i = 0; APP_ROOTS[i]; i++) {
+        char p[600];
+        struct stat st;
+        snprintf(p, sizeof(p), "%s/%s/app.pkg", APP_ROOTS[i], tid);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+            if (size)  *size  = (long long)st.st_size;
+            if (mtime) *mtime = (long long)st.st_mtime;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int icon_path_for(const char *tid, char *out, size_t outsz) {
     struct stat st;
     snprintf(out, outsz, "%s/%s/icon0.png", APPMETA_ROOT, tid);
@@ -564,6 +589,9 @@ static struct {
     long long done, total;
     long long expect;      /* the package size the companion told us, for the finished check */
     long long seen_total;  /* the widest total BGFT ever claimed for this job - see job_refresh */
+    long long base_size;   /* app.pkg for this title BEFORE this install started, and whether     */
+    long long base_mtime;  /* there was one at all - the finished check compares against these,   */
+    int  base_had;         /* because an update starts with the file already present.             */
     int  released;         /* its BGFT task has been handed back - do it once, not per poll */
     char state[24];        /* idle | downloading | installed | error */
     char msg[256];
@@ -825,7 +853,8 @@ static void job_refresh(void) {
             have  = 1;
         }
     }
-    long long onDisk = tid[0] ? installed_app_pkg(tid) : 0;
+    long long onDisk = 0, onDiskMtime = 0;
+    if (tid[0]) app_pkg_facts(tid, &onDisk, &onDiskMtime);
 
     pthread_mutex_lock(&g_job_lock);
     if (have) { g_job.done = done; g_job.total = total; }
@@ -836,7 +865,12 @@ static void job_refresh(void) {
        on its own. Where we know the size we require it; where we do not, any bytes plus a task
        that BGFT no longer reports is a finished install. */
     long long want = g_job.expect > 0 ? g_job.expect : 0;
-    int big_enough = onDisk > 0 && (want <= 0 || onDisk >= (want - want / 50));
+    /* THE FILE HAS TO HAVE CHANGED, not merely be present - see app_pkg_facts. With no file at the
+       start (a first install) this is the same test as before: any file of the right size is the
+       install. With one already there (an update) nothing counts until the console replaces it. */
+    int replaced = onDisk > 0 && (!g_job.base_had ||
+                                  onDisk != g_job.base_size || onDiskMtime != g_job.base_mtime);
+    int big_enough = replaced && (want <= 0 || onDisk >= (want - want / 50));
     if (err) {
         g_job.rc = err;
         snprintf(g_job.state, sizeof(g_job.state), "error");
@@ -872,6 +906,13 @@ static void job_refresh(void) {
     if (over) g_job.released = 1;
     pthread_mutex_unlock(&g_job_lock);
     if (spent != BGFT_INVALID_TASK_ID) bgft_release(spent);
+}
+
+/* Remember what app.pkg looked like before an install starts. Call with g_job_lock HELD, straight
+   after g_job.tid is final: the finished check is only as honest as this snapshot. */
+static void job_baseline_locked(void) {
+    g_job.base_had = g_job.tid[0]
+                     ? app_pkg_facts(g_job.tid, &g_job.base_size, &g_job.base_mtime) : 0;
 }
 
 /* ------------------------------------------- packages the console already has
@@ -1673,6 +1714,7 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
     snprintf(g_job.name, sizeof(g_job.name), "%s", label);
     snprintf(g_job.cid, sizeof(g_job.cid), "%s", cid);
     tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
+    job_baseline_locked();
     snprintf(g_job.state, sizeof(g_job.state), "downloading");
     snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is installing it from its own storage");
     pthread_mutex_unlock(&g_job_lock);
@@ -1731,7 +1773,7 @@ static void install_local_path(int fd, const char *local) {
    ps4-app/onconsole/build-wsl.sh now refuses to build when these two disagree. Bump BOTH whenever
    ps4-app/tile-pkg changes. Zero-padded NN.NN, which is the form every other title on the console
    uses. */
-#define PS4_TILE_VER   "01.01"
+#define PS4_TILE_VER   "01.03"
 #define TILE_PKG_DISK  SHOP_DATA_DIR "/pms-tile.pkg"
 
 /* "01.02" -> 102, "1.00" -> 100. Format-tolerant on purpose: the console stores whatever the
@@ -1787,24 +1829,147 @@ static int tile_stage_and_install(char *detail, size_t dsz) {
     return 0;
 }
 
+/* IS THE CONSOLE'S COPY THE PACKAGE THIS ELF CARRIES?
+ *
+ * The version number alone cannot answer that, and this console proved it: a cancelled update left
+ * app.db saying 01.02 while /user/app/PKGM00001/app.pkg still held the 01.01 bytes. A version check
+ * on its own then says "nothing to do" for ever and the console stays wrong permanently.
+ *
+ * So compare the bytes. One sequential read of the installed package against the copy already in
+ * this process's memory, 64 KB at a time, no allocation, stopping at the first difference - which
+ * for a mismatch is usually inside the first block. Measured twice on 13.52: the installed app.pkg
+ * is byte-identical to the package we hand over, so equality is the right expectation.
+ * Returns 1 when they match, and 1 when the file cannot be read through - an unreadable file is not
+ * evidence of a mismatch, and guessing would reinstall on every boot. */
+static int tile_bytes_match(void) {
+    size_t len = (size_t)(tb_ps4_tile_pkg_end - tb_ps4_tile_pkg);
+    long long sz = 0, mt = 0;
+    if (!app_pkg_facts(PS4_TILE_TID, &sz, &mt)) return 1;
+    if ((size_t)sz != len) return 0;
+    for (int i = 0; APP_ROOTS[i]; i++) {
+        char p[600];
+        snprintf(p, sizeof(p), "%s/%s/app.pkg", APP_ROOTS[i], PS4_TILE_TID);
+        int f = open(p, O_RDONLY);
+        if (f < 0) continue;
+        unsigned char buf[65536];
+        size_t off = 0;
+        int same = 1;
+        while (off < len) {
+            size_t want = len - off < sizeof(buf) ? len - off : sizeof(buf);
+            ssize_t r = read(f, buf, want);
+            if (r <= 0) { same = -1; break; }
+            if (memcmp(buf, tb_ps4_tile_pkg + off, (size_t)r)) { same = 0; break; }
+            off += (size_t)r;
+        }
+        close(f);
+        if (same < 0) return 1;      /* could not finish reading - do not call that a mismatch */
+        return same;
+    }
+    return 1;
+}
+
+/* ONE REPAIR ATTEMPT PER BUILD. If some future firmware re-wraps app.pkg as it installs it, the
+ * compare above would differ on every boot and this shop would reinstall its own icon on every
+ * boot. The stamp names the version a byte-repair was already tried for, so that costs one
+ * install, once. */
+#define TILE_STAMP SHOP_DATA_DIR "/tile-repair.stamp"
+static int tile_repair_tried(void) {
+    int f = open(TILE_STAMP, O_RDONLY);
+    if (f < 0) return 0;
+    char b[32] = {0};
+    ssize_t n = read(f, b, sizeof(b) - 1);
+    close(f);
+    if (n <= 0) return 0;
+    for (int i = 0; b[i]; i++)
+        if (b[i] == '\n' || b[i] == '\r') { b[i] = 0; break; }
+    return !strcmp(b, PS4_TILE_VER);
+}
+static void tile_repair_mark(void) {
+    mkdir(SHOP_DATA_DIR, 0777);
+    int f = open(TILE_STAMP, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) return;
+    (void)!write(f, PS4_TILE_VER, strlen(PS4_TILE_VER));
+    close(f);
+}
+
+/* ------------------------------------------------------- install-path cleanup
+ *
+ * What an install leaves behind on this console, and what is safe to remove:
+ *
+ *   /data/pkg-mutant-shop/pms-tile.pkg   OURS. Staged so the console could fetch it. Once the
+ *                                        console has its own copy under /user/app it is dead
+ *                                        weight - and it is a second copy of a package this very
+ *                                        ELF already carries, so it is 6.6 MB of the same thing
+ *                                        twice.
+ *   /user/bgft/task/<id>                 the console's, one directory per registered task. Swept
+ *                                        by bgft_sweep_ours(), which only ever releases a task
+ *                                        whose own record names one of our routes.
+ *   the /pkgfile token table             in memory; it goes when the process does.
+ *
+ * NEVER removed: a package the console might still be reading - which is why this only runs after
+ * app.pkg proves the install finished, not on a return code; anything under /user/app or
+ * /user/appmeta, because that IS the installed app; and anything at all outside
+ * /data/pkg-mutant-shop, because nothing this shop writes lives anywhere else. In particular it
+ * does not touch the jailbreak's folders, which are not ours to tidy.
+ */
+static void install_path_cleanup(const char *why) {
+    /* EVERY staged copy of the dashboard app in our own directory, not just the one this build
+       happens to name. A package staged by an older build, or put there by hand while working out
+       why an install stalled, is the same 6.6 MB of dead weight - and the name pattern is ours
+       alone. Bounded to SHOP_DATA_DIR and to "pms-tile*.pkg": nothing else is ever a candidate. */
+    DIR *d = opendir(SHOP_DATA_DIR);
+    if (!d) return;
+    struct dirent *e;
+    int gone = 0;
+    long long freed = 0;
+    while ((e = readdir(d))) {
+        const char *n = e->d_name;
+        size_t ln = strlen(n);
+        if (strncmp(n, "pms-tile", 8)) continue;
+        if (ln < 4 || strcmp(n + ln - 4, ".pkg")) continue;
+        char p[700];
+        struct stat st;
+        snprintf(p, sizeof(p), "%s/%s", SHOP_DATA_DIR, n);
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (unlink(p) == 0) { gone++; freed += (long long)st.st_size; }
+        else ilog("cleanup: could not remove %s", p);
+    }
+    closedir(d);
+    if (gone)
+        ilog("cleanup: removed %d staged package%s (%lld bytes) - %s",
+             gone, gone == 1 ? "" : "s", freed, why);
+}
+
 /* Decide, then act. Runs on its own thread once the server is listening, because the install lane
    serves the package to the console from this very process - the socket has to be up first. */
 static void *tile_thread(void *unused) {
     (void)unused;
     char have[16] = {0};
-    long long bytes = installed_app_pkg(PS4_TILE_TID);
+    long long bytes = 0, base_mtime = 0;
+    int had = app_pkg_facts(PS4_TILE_TID, &bytes, &base_mtime);
     tile_installed_ver(have, sizeof(have));
     int hv = tile_ver_num(have), wv = tile_ver_num(PS4_TILE_VER);
 
     if (bytes > 0 && hv >= wv) {
-        ilog("tile: already installed at %s (carrying %s) - nothing to do", have, PS4_TILE_VER);
-        return NULL;
-    }
-    if (bytes > 0)
+        if (tile_bytes_match()) {
+            ilog("tile: already installed at %s (carrying %s) - nothing to do",
+                 have[0] ? have : "?", PS4_TILE_VER);
+            return NULL;
+        }
+        if (tile_repair_tried()) {
+            ilog("tile: the console's copy still differs from this build after one repair "
+                 "- leaving it alone");
+            return NULL;
+        }
+        tile_repair_mark();
+        ilog("tile: the console reports %s but its copy is not the package this build carries "
+             "- reinstalling it", have[0] ? have : "?");
+    } else if (bytes > 0) {
         ilog("tile: installed at %s, this build carries %s - updating", have[0] ? have : "?",
              PS4_TILE_VER);
-    else
+    } else {
         ilog("tile: not installed - installing %s", PS4_TILE_VER);
+    }
 
     char detail[300] = {0};
     int rc = tile_stage_and_install(detail, sizeof(detail));
@@ -1815,8 +1980,19 @@ static void *tile_thread(void *unused) {
     /* Wait for the console to finish, then check the FILE rather than the return code. */
     for (int i = 0; i < 90; i++) {
         sleep(2);
-        if (installed_app_pkg(PS4_TILE_TID) > 0) {
-            ilog("tile: installed (%lld bytes on disk)", installed_app_pkg(PS4_TILE_TID));
+        /* CHANGED, not merely present. This loop used to fire on the first tick of an UPDATE,
+           because app.pkg was already there from the version being replaced - and it then deleted
+           the staged package the console was in the middle of downloading. */
+        long long nsz = 0, nmt = 0;
+        int now_has = app_pkg_facts(PS4_TILE_TID, &nsz, &nmt);
+        if (now_has && (!had || nsz != bytes || nmt != base_mtime)) {
+            ilog("tile: installed (%lld bytes on disk)", nsz);
+            /* THE STAGED COPY GOES NOW. The console has its own copy under /user/app; ours
+               was only ever the thing we served to it, and leaving it behind means carrying
+               the package twice on the drive for ever - once there and once inside this very
+               ELF. Only after the install is PROVEN by app.pkg on disk, never on a return
+               code. */
+            install_path_cleanup("the dashboard app finished installing");
             notify("PKG MUTANT SHOP is on your home screen\nOpen it from there any time");
             return NULL;
         }
@@ -1975,6 +2151,7 @@ static void handle_get(int fd, const char *rawpath) {
         if (!g_job.tid[0])
             if (!pkg_content_id_from_url_name(name, g_job.tid, sizeof(g_job.tid)))
                 pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
+        job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
         long long jid = g_job.job_id;

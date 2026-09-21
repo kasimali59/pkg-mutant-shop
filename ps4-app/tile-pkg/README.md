@@ -18,18 +18,27 @@ bash ps4-app/tile-pkg/build-wsl.sh     # WSL; fetches its toolchain on first run
 | | |
 | --- | --- |
 | the package builds | **yes**, verified — `pkg_validate`: 28 checks `[OK]`, 0 errors, 0 warnings |
-| the ELF carries it | **yes**, verified — found at `0x1c6c0` in the ELF, byte-identical |
-| the ELF installs it on boot | **wired**, not yet observed — the console has had no payload loader since it was written |
-| the package has been **installed** | **no** — `/user/app` holds three games and no `PKGM00001` |
-| the icon has been seen on the home screen | **no** |
-| the eboot has been run | **no** |
+| the ELF carries it | **yes**, verified — found in the ELF, byte-identical, checked by a build gate |
+| the ELF installs it on boot | **yes**, verified on 13.52 — from its own embedded copy, over the console's loopback |
+| the package has been **installed** | **yes** — `/user/app/PKGM00001/app.pkg`, 6,619,136 bytes, with `app.pbm` / `app.json` / `app.xml` beside it |
+| the ELF **updates** it | **yes**, verified — `01.00` → `01.01` → `01.02` → `01.03` on the hardware |
+| the installed bytes are ours | **yes**, verified — read back over FTP and hashed: `01.03` = `5968c773…fb`, identical to the build |
+| the icon is on the home screen | **yes** — listed by the console as *PKG MUTANT SHOP* |
+| **the eboot has been run** | **no.** Pressing the icon gives **CE-32930-7**, and that error is **not diagnosed** |
 
-Everything about the *file* is measured. Everything about its *behaviour on a PS4* is reasoned from
-the toolchain's own samples and from what this project measured on the payload side. Nobody has
-pressed this icon, because it has never been installed. Do not read "built and validated" as
-"working" — that substitution is the same shape as the mistake that cost this project a console.
+Everything about the *file*, the *install* and the *update* is now measured on a real PS4 at 13.52.
+What remains unmeasured is the one thing that matters most to the person holding the pad: **the app
+has never successfully launched.** `CE-32930-7` has no confirmed cause here — an earlier note in
+`pms/main.c` blamed the eboot's `SCE_NEEDED_MODULE` list and that claim did not survive checking, so
+it was withdrawn rather than left standing. Narrowing the eboot to `libkernel` alone is a shot in the
+dark taken because it is free, not a fix for an understood fault.
 
-**What is missing is one payload load.** Once the ELF runs, it installs this itself.
+**The control test that would settle it:** press **Riptide GP2**. It is also fake-signed, also
+installed by this shop, and also never launched (`lastAccessTime == installDate`). If it fails the
+same way, the jailbreak's fake-self support is the problem and not this package. That test needs
+someone at the console with klog capturing; it has not been run.
+
+Do not read "installed and verified" as "working". The install is proven. The launch is not.
 
 ## What it is
 
