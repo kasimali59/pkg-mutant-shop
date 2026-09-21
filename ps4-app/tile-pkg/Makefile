@@ -13,7 +13,7 @@ VERSION     := 1.00
 TITLE_ID    := PKGM00001
 CONTENT_ID  := IV0000-PKGM00001_00-PKGMUTANTSHOP001
 
-LIBS        := -lc -lkernel -lSceSystemService -lSceSystemServiceWebBrowser
+LIBS        := -lc -lkernel -lSceSystemService -lSceSystemServiceWebBrowser -lSceUserService
 
 ASSETS      := $(wildcard assets/**/*)
 LIBMODULES  := $(wildcard sce_module/*)

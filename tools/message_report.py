@@ -36,6 +36,10 @@ PROBE_C = os.path.join(ROOT, "ps5-app", "onconsole", "installer_probe.c")
 # The PS4 half of the shop. Both payloads say things to a person on a television, so both are held
 # to the same rules - a gate that covered only one binary would have let the PS4 build drift.
 PS4_C = os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c")
+# The PS4's dashboard app. Small, but everything it says lands on a television - and it had already
+# drifted, naming the jailbreak software in a message, which this file has banned since the rule was
+# written. A gate that does not read a binary cannot hold it to anything.
+PS4_TILE_C = os.path.join(ROOT, "ps4-app", "tile-pkg", "pms", "main.c")
 COMPANION = os.path.join(ROOT, "companion", "server.py")
 WEB = os.path.join(ROOT, "web", "index.html")
 
@@ -103,7 +107,7 @@ def console_messages():
     """Every notify()/notifyf()/notify_sync() call in the console binaries."""
     out = []
     for path, who in ((CONSOLE_C, "shop ELF"), (PROBE_C, "installer ELF"),
-                      (PS4_C, "PS4 shop ELF")):
+                      (PS4_C, "PS4 shop ELF"), (PS4_TILE_C, "PS4 app")):
         if not os.path.exists(path):
             continue
         src = read(path)
@@ -249,7 +253,7 @@ def lint(rows):
         # a television. The code belongs in the install log, which every one of these writes.
         if re.search(r'0x%0?8[xX]|0x[0-9A-Fa-f]{8}\b|\{\\"', t):
             bad.append((r, "puts a raw code or JSON on screen"))
-        if r["who"] in ("shop ELF", "installer ELF", "PS4 shop ELF") and t.startswith("PKG MUTANT SHOP\\n"):
+        if r["who"] in ("shop ELF", "installer ELF", "PS4 shop ELF", "PS4 app") and t.startswith("PKG MUTANT SHOP\\n"):
             bad.append((r, "app name used as a title line - the icon already says who is speaking"))
     return bad
 

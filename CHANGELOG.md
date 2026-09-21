@@ -31,7 +31,16 @@ So there are two payloads and one of everything else. `PKG-MUTANT-SHOP.elf` is t
 `PKG-MUTANT-SHOP-PS4.elf` is the PS4's; both embed the same `web/` directory, both answer the same
 API, and both are held to the same build gates. From the user's side there is one app.
 
-### The PS4 now has an icon on the dashboard
+### The PS4 gets a real dashboard app — **built and validated, not yet installed**
+
+> **Status, plainly.** The package builds and every check passes: `pkg_validate` reports 28 checks
+> `[OK]` with no failures, the payload inside is sha256-identical to the shipped ELF, and the eboot
+> is a genuine `SCE Executable (ASLR) 0xFE10`. It has been copied to the console. It has **not** been
+> installed, the icon has **not** been seen, and the eboot has **not** been run — the console's
+> payload loader has been unavailable since it was built. Everything about the *file* is measured;
+> everything about its *behaviour on a PS4* is reasoned from the toolchain's own samples and from
+> what this project measured on the payload side. Do not read "built and validated" as "working" —
+> that substitution is the same shape as the mistake that cost this project a console.
 
 A PS4 had nothing to press. The shop existed only while a payload happened to be injected, and the
 jailbreak's binary loader does not survive rest mode - so after one suspend there was no app on the
@@ -77,6 +86,29 @@ from the toolchain's own header - or delete it from the home screen like any app
 that cost a console on the PS5 side was a registration with no data behind it; this is the opposite,
 a complete package handed to the console's own installer, which is the only thing that writes those
 records correctly.
+
+### Two defects in that app, found by review rather than by running it
+
+**Every message it drew would have been invisible.** It set the notification's `useIconImageUri = 1`,
+which selects the form that draws an icon beside the text — and that form returns success and renders
+**nothing** on this console family. This project has been caught by it twice already on the PS5, and
+the PS4 payload deliberately sends the plain form for exactly that reason. The app now sends the
+identical struct the payload sends. That is the difference between an icon that explains itself and
+one that appears to do nothing, which is precisely the complaint that started this work.
+
+**The browser was launched without the user service.** The reference program for opening a URL on a
+PS4 — the browser sample in the payload SDK — initialises the user service first and only launches
+the browser if that succeeded. A payload inherits a process that has already done it; a sandboxed
+application does not. The app now initialises it, launches, and hands it back.
+
+It also tries **two** payload loaders now, in the two framings they use: one takes an HTTP POST, the
+other the bare ELF. The rule that keeps this safe is unchanged, and is why there is still no "is a
+loader there?" probe — **a connection is never opened unless the whole payload is then written into
+it**. An empty connection can stop a loader listening; this console lost its loader twice that way.
+
+`tools/message_report.py --check` now reads the dashboard app too. It had already drifted: its
+failure message named the jailbreak software, which the house style has banned since the rule was
+written, and no gate was looking at that file. 453 messages checked, none off style.
 
 ### The settings row for it does not lie when the console is off
 

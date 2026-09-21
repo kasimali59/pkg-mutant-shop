@@ -4,8 +4,16 @@ This is the PS4 half of the shop. It serves the same web UI and speaks the same 
 payload (`ps5-app/onconsole/server.c`), so the companion and the page need no per-console code paths
 beyond knowing which console they are talking to.
 
-Verified on real hardware: **PS4 firmware 13.52, GoldHEN 2.4b18.** Everything in this document was
+Verified on real hardware: **PS4 firmware 13.52**, jailbroken with GoldHEN. Everything in this document was
 measured on that console. Nothing here is inferred from the PS5 side.
+
+> A note on the GoldHEN version. This document used to say "GoldHEN 2.4b18". That release covers
+> firmware 5.05 through 11.00 and cannot be what is running here — 13.52 support arrives in the
+> `2.4b18.x` point builds. The exact build on this console has **not** been read off the screen;
+> its FTP banner only says `GoldHEN FTP server v2.2`, which is the FTP module's version and not
+> HEN's. So nothing in this project should gate behaviour on a GoldHEN version string, and nothing
+> does — every symbol is `dlsym`-checked before it is called, which is why the `ServiceInt` finding
+> below held up regardless of which point build this is.
 
 ---
 

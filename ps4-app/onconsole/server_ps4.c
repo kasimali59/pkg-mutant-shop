@@ -64,7 +64,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.62.0"
+#define SHOP_VERSION "3.62.1"
 
 #define SHOP_DATA_DIR  "/data/pkg-mutant-shop"
 #define WEB_ROOT       SHOP_DATA_DIR "/web"
