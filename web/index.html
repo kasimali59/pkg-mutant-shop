@@ -2455,7 +2455,7 @@ var I18N={
     ui_console_address:"Endereço da PS5",ui_ps4_address:"Endereço da PS4",ui_ps4_app:"App no menu da PS4",ui_ps4_app_yes:"instalada",ui_ps4_app_no:"não instalada",ui_ps4_app_install:"Instalar",ui_tip_ps4_app:"Coloca o PKG MUTANT SHOP no menu da PS4, para abrir a loja a partir de um ícone com este PC desligado.",
     ui_aria_ps5_address:"Endereço da PS5",
     ui_connection:"Ligação",
-    ui_open_on_tv:"Abrir na TV",
+    ui_open_on_tv:"Abre-a na TV",
     ui_sec_installing:"Instalação",
     ui_ready_to_install:"Pronto para instalar",
     ui_shop_on_ps5:"Loja na PS5",
@@ -4399,7 +4399,7 @@ var I18N={
     ui_console_address:"عنوان PS5",ui_ps4_address:"عنوان PS4",ui_ps4_app:"تطبيق الشاشة الرئيسية لـ PS4",ui_ps4_app_yes:"مثبَّت",ui_ps4_app_no:"غير مثبَّت",ui_ps4_app_install:"تثبيت",ui_tip_ps4_app:"يضع PKG MUTANT SHOP على الشاشة الرئيسية لجهاز PS4، ليفتح المتجر من أيقونة حتى مع إيقاف هذا الكمبيوتر.",
     ui_aria_ps5_address:"عنوان PS5",
     ui_connection:"الاتصال",
-    ui_open_on_tv:"افتحه على التلفاز",
+    ui_open_on_tv:"افتحه على التلفزيون",
     ui_sec_installing:"التثبيت",
     ui_ready_to_install:"جاهز للتثبيت",
     ui_shop_on_ps5:"المتجر على PS5",
@@ -5363,7 +5363,7 @@ var I18N={
     ui_on_this_network:"इस नेटवर्क पर",
     ui_only_on_rescan:"सिर्फ़ रीस्कैन पर",
     ui_open_on_a_phone:"फ़ोन पर खोलें",
-    ui_open_on_tv:"इसे टीवी पर खोलें",
+    ui_open_on_tv:"TV पर खोलें",
     ui_parallel_one:"एक बार में एक",
     ui_parallel_three:"एक बार में तीन",
     ui_parallel_two:"एक बार में दो",
@@ -6069,7 +6069,7 @@ var I18N={
     ui_on_this_network:"Su questa rete",
     ui_only_on_rescan:"Solo con Riscansiona",
     ui_open_on_a_phone:"Apri su un telefono",
-    ui_open_on_tv:"Apri sulla TV",
+    ui_open_on_tv:"Aprilo in TV",
     ui_parallel_one:"Una alla volta",
     ui_parallel_three:"Tre alla volta",
     ui_parallel_two:"Due alla volta",
@@ -7481,7 +7481,7 @@ var I18N={
     ui_on_this_network:"Op dit netwerk",
     ui_only_on_rescan:"Alleen bij Opnieuw scannen",
     ui_open_on_a_phone:"Openen op een telefoon",
-    ui_open_on_tv:"Openen op de tv",
+    ui_open_on_tv:"Open op de tv",
     ui_parallel_one:"Eén tegelijk",
     ui_parallel_three:"Drie tegelijk",
     ui_parallel_two:"Twee tegelijk",
@@ -10502,11 +10502,23 @@ function renderDevices(d){
      browser when the dashboard tile is not there yet. */
   var hh=state.health||{};
   if($("#devPs5")){
-    var pip=hh.ps5_ip||(state.engine&&state.engine.console_ip)||"";
-    var pport=(state.engine&&state.engine.shop_port)||8710;
-    /* No trailing "/": the row's start-ellipsis (direction:rtl) drew it at the front, so the
+    /* EVERY console gets a line, not just the first. This read ps5_ip alone, so on a machine with
+       a PS5 and a PS4 the PS4 - the console whose whole reason for being here is that you open the
+       shop on it - had no address shown anywhere. With one console it still prints one address and
+       looks exactly as it did.
+       No trailing "/": the row's start-ellipsis (direction:rtl) drew it at the front, so the
        address read "/http://10.0.0.99:8710". A browser adds the slash on its own. */
-    setTxt("devPs5",pip?("http://"+pip+":"+pport):t("msg_dev_no_ps5"));
+    var cons=(d&&d.consoles)||[];
+    var pport=(state.engine&&state.engine.shop_port)||8710;
+    if(cons.length){
+      $("#devPs5").innerHTML=cons.map(function(c){
+        var nm=esc((c.platform||"").toUpperCase()||c.name||c.id);
+        return nm+" "+esc("http://"+c.ip+":"+(c.shop_port||pport));
+      }).join("<br>");
+    }else{
+      var pip=hh.ps5_ip||(state.engine&&state.engine.console_ip)||"";
+      setTxt("devPs5",pip?("http://"+pip+":"+pport):t("msg_dev_no_ps5"));
+    }
   }
   var el2=$("#devPeers"); if(!el2) return;
   var peers=d.peers||[];

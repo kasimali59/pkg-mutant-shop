@@ -6694,16 +6694,32 @@ class Handler(BaseHTTPRequestHandler):
             # USB1-USB7 on a console that has none of them, each showing an undefined size. The
             # console answers this with real statvfs figures and a `detected` flag; the static list
             # is now only the fallback for when there is no console to ask.
+            # EVERY CONSOLE, not just the first. This asked consoles[0] and called the answer
+            # "ps5", so on a machine with a PS5 and a PS4 the PS4's drives were simply absent - the
+            # app knew about the console and showed nothing about it anywhere a person looks for
+            # devices. `ps5` still carries the first console's list, because the page and the peers
+            # read that key and neither is being broken to add a second console.
             ps5 = PS5_DEVICES
-            b = _first_bridge(srv)
-            if b is not None:
+            consoles = []
+            for c in srv.fleet.consoles:
+                b = srv.fleet.bridge(c["id"])
+                if b is None:
+                    continue
+                devs, ok = [], False
                 try:
                     d = b._shop("/api/devices", timeout=8) or {}
                     if isinstance(d.get("ps5"), list) and d["ps5"]:
-                        ps5 = d["ps5"]
+                        devs, ok = d["ps5"], True
                 except Exception:
-                    pass                                    # console asleep - fall back to the list
-            return self._json({"pc": enumerate_pc_drives(), "ps5": ps5,
+                    pass                                    # console asleep - say so, do not invent
+                plat = b.platform_id()
+                consoles.append({"id": c["id"], "name": c.get("name") or c["ip"], "ip": c["ip"],
+                                 "platform": plat, "online": ok,
+                                 "shop_port": srv.cfg.get("console", {}).get("shop_port", 8710),
+                                 "devices": devs})
+                if ok and not [x for x in consoles[:-1] if x["online"]]:
+                    ps5 = devs                              # first console that answered
+            return self._json({"pc": enumerate_pc_drives(), "ps5": ps5, "consoles": consoles,
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", [])})
         if path.startswith("/api/verify/"):                            # [B7] structural completeness check
             raw = unquote(path[len("/api/verify/"):])
