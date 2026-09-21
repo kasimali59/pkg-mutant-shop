@@ -55,6 +55,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <ps4/klog.h>
 
 #include "sqmini.h"
@@ -142,13 +143,19 @@ static void notifyf(const char *fmt, ...) {
 
 /* --------------------------------------------------------------- http output */
 
-static void write_all(int fd, const char *buf, size_t len) {
+/* Returns 0 when every byte went out, -1 when the far end stopped reading. Most callers are
+   writing a short JSON answer and have nothing to do about a failure, so they ignore it; the
+   package stream does care, because carrying on would mean pushing gigabytes into a socket nobody
+   is holding. With SIGPIPE ignored (see main) that failure arrives as EPIPE instead of killing the
+   process we are injected into. */
+static int write_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t w = write(fd, buf + off, len - off);
-        if (w <= 0) break;
+        if (w <= 0) return -1;
         off += (size_t)w;
     }
+    return 0;
 }
 
 static void send_status(int fd, const char *status, const char *ctype, const char *body) {
@@ -1564,7 +1571,9 @@ static void serve_pkgfile(int fd, const char *path, const char *req, int head_on
         size_t want = left > (long long)(256 * 1024) ? (size_t)(256 * 1024) : (size_t)left;
         ssize_t r = read(f, chunk, want);
         if (r <= 0) break;
-        write_all(fd, chunk, (size_t)r);
+        /* Stop when the reader goes away. With SIGPIPE ignored this is a plain EPIPE, and carrying
+           on would spend the rest of the file writing into a socket nobody is holding. */
+        if (write_all(fd, chunk, (size_t)r) != 0) break;
         left -= r;
     }
     free(chunk);
@@ -1629,11 +1638,18 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
                              "shop and try again");
         return -5;
     }
-    /* The console's OWN address, not 127.0.0.1: a LAN address is the one the transfer service is
-       proven to fetch from on this firmware, and loopback is untested here. Nothing leaves the
-       console either way - this is the PS4 asking itself for the file. */
+    /* THE URL HAS TO END IN .pkg, and that cost an afternoon to find. Handing the transfer service
+       `.../pkgfile/0` is refused with 0x80990033 no matter what address it is on - the console's
+       own log says it in words: "[BGFT] ERROR: [2239] Not supported extension." It reads the
+       EXTENSION out of the URL and will not touch a package whose url does not look like one. The
+       byte-identical file offered from the PC as `/library/NAME.pkg` installed first time, which is
+       what made the address look like the culprit when it never was.
+
+       The token parser on the serving side stops at the dot, so `/pkgfile/0.pkg` is still token 0.
+       Loopback rather than our LAN address: both are accepted now, and 127.0.0.1 cannot break if
+       the console's address changes under us. */
     char uri[256];
-    snprintf(uri, sizeof(uri), "http://%s:%d/pkgfile/%d", lan_ip_str(), (int)PORT, tok);
+    snprintf(uri, sizeof(uri), "http://127.0.0.1:%d/pkgfile/%d.pkg", (int)PORT, tok);
     const char *label = title[0] ? title : local;
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
     if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat), err, errsz, &task) != 0)
@@ -1929,11 +1945,14 @@ static void handle_get(int fd, const char *rawpath) {
         g_job.expect = psize;
         snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
         snprintf(g_job.name, sizeof(g_job.name), "%s", name);
-        /* The title id comes out of the CONTENT id first (EP0786-CUSA02365_00-... carries it), then
-           the file name, then the url. Reading it from the display name alone left it empty for
-           anything called something human like "Riptide GP2" - and an empty title id means the
-           finished-install check has nothing to look for, so a completed install never settled. */
-        if (!pkg_content_id_from_url_name(cid, g_job.tid, sizeof(g_job.tid)))
+        /* The title id comes out of the CONTENT id first, by STRUCTURE - everything between the
+           first '-' and the '_' - because that works for any title id there is. The older reader
+           below only recognises a game's (CUSA/NPXS), and this shop installs one package that is
+           not a game: its own dashboard app, PKGM00001. That install ran to completion on the
+           console and the job never said so, because the title id it was looking for was "". Fall
+           back to the game-shaped search for a request that carries no content id at all. */
+        tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
+        if (!g_job.tid[0])
             if (!pkg_content_id_from_url_name(name, g_job.tid, sizeof(g_job.tid)))
                 pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
@@ -2473,6 +2492,15 @@ static void *conn_thread(void *arg) {
 
 int main(void) {
     klog_puts("[PMS] PKG MUTANT SHOP for PS4 starting");
+    /* A WRITE TO A CLOSED SOCKET MUST NOT KILL US, and on this console that is not a theoretical
+       worry: the transfer service opens the package stream, gives up part-way (a task it decides
+       to abandon, a retry, a stop) and closes - and the next write raises SIGPIPE, whose default
+       action is to terminate. We are injected into a SHARED system process, so "terminate" means
+       the shop vanishes mid-install and takes whatever else lives in that process with it.
+       Measured: klog logged "A user thread receives a fatal signal" the first time a package was
+       served to the console's own downloader. Ignore it and let write() return EPIPE, which every
+       loop here already checks. */
+    signal(SIGPIPE, SIG_IGN);
     mkdir("/data", 0777);
     mkdir(SHOP_DATA_DIR, 0777);
     ilog("==== BOOT: PKG MUTANT SHOP PS4 %s (%s %s) ====", SHOP_VERSION, __DATE__, __TIME__);

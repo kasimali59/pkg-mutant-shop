@@ -33,15 +33,15 @@ API, and both are held to the same build gates. From the user's side there is on
 
 ### The PS4 gets a real dashboard app — **built and validated, not yet installed**
 
-> **Status, plainly.** The package builds and every check passes: `pkg_validate` reports 28 checks
-> `[OK]` with no failures, and the eboot is a genuine `SCE Executable (ASLR) 0xFE10`. The ELF
-> carries it — found at `0x1c6c0`, byte-identical — and installs it on boot. It has **not** been
-> installed, the icon has **not** been seen, and the eboot has **not** been run, because the
-> console's payload loader has been unavailable since it was written. Everything about the *file*
-> is measured; everything about its *behaviour on a PS4* is reasoned from the toolchain's own
-> samples and from what this project measured on the payload side. Do not read "built and
-> validated" as "working" — that substitution is the same shape as the mistake that cost this
-> project a console.
+> **Status.** **The app is installed on the console.** `/user/app/PKGM00001/app.pkg` holds exactly
+> 6,619,136 bytes with `app.pbm`, `app.json` and `app.xml` beside it, `/user/appmeta/PKGM00001/`
+> holds our 291,825-byte icon, and the console's own library lists it as *PKG MUTANT SHOP*, version
+> 1.00, installed. The package builds clean — `pkg_validate`: 28 checks `[OK]`, 0 failures — and the
+> ELF carries it byte-identically at `0x1c6c0`.
+>
+> What is **not** yet observed: the eboot has never been run, so nobody has pressed the icon and
+> watched it open the shop. And the ELF's own install of it has not yet succeeded end to end — it
+> tried, was refused, and the refusal is what uncovered the two defects below.
 
 A PS4 had nothing to press. The shop existed only while a payload happened to be injected, and the
 jailbreak's binary loader does not survive rest mode - so after one suspend there was no app on the
@@ -101,7 +101,34 @@ that cost a console on the PS5 side was a registration with no data behind it; t
 a complete package handed to the console's own installer, which is the only thing that writes those
 records correctly.
 
-### Two defects in that app, found by review rather than by running it
+### Two defects the console found for us, and one it nearly killed the shop over
+
+**`0x80990033` is "Not supported extension", and the console says so in words.** The ELF's own
+install of the dashboard app was refused every time, while the byte-identical file offered from the
+PC installed first time — which made the console's own address look like the culprit. It was not:
+klog spelled it out, `[BGFT] ERROR: [2239] Not supported extension.` The transfer service reads the
+**extension out of the URL** and will not touch a package whose url does not look like one. Ours was
+`/pkgfile/0`. It is `/pkgfile/0.pkg` now; the token parser stops at the dot, so it is still token 0.
+Two wrong theories died on the way to that — "it will not fetch from its own LAN address" and "not
+from loopback either" — both disproved by the same one-line change.
+
+**Serving a package to the console could kill the shop.** With the extension fixed the task
+registered and started, and the payload then took *"A user thread receives a fatal signal"*. That is
+SIGPIPE: the transfer service opened the stream, gave up part-way, and closed — and the next write
+terminated the process. We are injected into a **shared system process**, so that does not just end
+the shop, it takes whatever else lives there with it. `SIGPIPE` is ignored now, `write_all` reports
+EPIPE instead, and the stream stops when the reader goes away rather than pushing gigabytes into a
+socket nobody is holding. This was reachable by any transfer the console abandoned, not only this
+one.
+
+**A title id that is not a game's was never read.** The job's title id came from a search for
+`CUSA`/`NPXS`, so the one package this shop installs that is not a game — its own dashboard app,
+`PKGM00001` — produced an empty one. The install completed on the console and the job sat at
+"downloading" for ever, because the finished-check had nothing to look for, and that in turn blocked
+the next install as "busy". It is taken from the content id by structure now, which works for any
+title id there is.
+
+### Two more defects in that app, found by review rather than by running it
 
 **Every message it drew would have been invisible.** It set the notification's `useIconImageUri = 1`,
 which selects the form that draws an icon beside the text — and that form returns success and renders
