@@ -150,6 +150,16 @@ version is `tbl_appinfo` key **APP_VER**, which is the field the companion alrea
 titles. `sqmini.h` is the PS5 payload's SQLite reader, copied verbatim and kept honest by
 `tools/ps4_sync_sqmini.py --check` (a build gate) rather than edited by hand.
 
+**There is one `tbl_appbrowse_` table per user and the payload reads the first one.** That was
+checked rather than assumed: this console has two users (`tbl_appbrowse_<user-id>` with 79 rows and
+`tbl_appbrowse_<user-id>` with 66), and filtering both to real games gives **the same nine titles**
+with nothing in one and not the other - the PS4 registers an installed game for every user. Reading
+the first table therefore loses nothing, and a union pass would be more code for no measured gain.
+If a title ever does turn up for one user only, this is the line to revisit.
+
+`addcont.db` is also readable and carries a `content_id` column, so the companion's DLC proof
+(`installed_addons`) works on this console with no change - checked against the live file.
+
 Installed means **`/user/app/<TID>/app.pkg` with bytes in it** — never app.db registration alone.
 That rule was learned on the PS5, where trusting metadata produced 53 phantom installs.
 
