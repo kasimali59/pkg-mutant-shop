@@ -13,6 +13,7 @@ ps5-app/tile/__pycache__/
 ps5-app/tile-pkg/build/
 # generated bundles (build-wsl.sh regenerates them from web/ and assets/cheats)
 ps5-app/onconsole/web_bundle.h
+ps4-app/onconsole/web_bundle.h
 ps5-app/onconsole/cheat_bundle.h
 ps5-app/onconsole/cheats.pack
 

@@ -39,7 +39,7 @@ from urllib.parse import urlparse, unquote, quote, parse_qs
 import pkg_meta
 import sources as source_engine
 
-VERSION = "3.61.0"
+VERSION = "3.62.0"
 
 if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
     HERE = os.path.dirname(sys.executable)
@@ -192,6 +192,10 @@ LIBRARY_LAYOUT = ("PS4", "PS5")
 
 DEFAULT_CONFIG = {
     "ps5_ip": "192.168.1.50",
+    # The PS4's address, empty until someone has one. `consoles` is the list everything actually
+    # runs on; these two keys are the two boxes the settings panel offers, reconciled into it by
+    # reconcile_consoles(). Empty means "I do not have that console", not "look for it".
+    "ps4_ip": "",
     "consoles": [],
     # OUR engine is the only install lane: the companion serves the pkg, the on-console ELF
     # streams it to console storage and registers it itself. Nothing third-party is involved, and
@@ -313,24 +317,49 @@ def build_library(srv):
     """PC-folder library (installable) merged with the console's installed games (real, from app.db)."""
     games = [dict(g) for g in srv.library.games]
     by_tid = {g["title_id"]: g for g in games if g.get("title_id")}
-    bridge = _first_bridge(srv)
-    apps = bridge.console_apps() if bridge else None
-    if apps:
-        for a in apps:
+    # EVERY CONSOLE, not just the first one.
+    #
+    # This used to read consoles[0] alone, which was the whole fleet when the fleet was one PS5. With
+    # a PS5 and a PS4 configured, that meant the second console's installed games were invisible -
+    # the library showed them as not installed and offered to install them again. Each console is
+    # asked in turn and the first one that has a title fills in the scalar fields, so a machine with
+    # a single console behaves exactly as it did before; `installed_on` records all of them.
+    fleet_bridges = [(cid, srv.fleet.bridge(cid)) for cid in srv.fleet.ids()]
+    fleet_bridges = [(cid, b) for cid, b in fleet_bridges if b is not None]
+    bridge = fleet_bridges[0][1] if fleet_bridges else None
+    apps = None
+    per_console = []
+    for cid, b in fleet_bridges:
+        got = b.console_apps()
+        if got is None:
+            continue
+        per_console.append((cid, b, got))
+        apps = (apps or []) + got
+    for cid, _b, capps in per_console:
+        for a in capps:
             if a["platform"] not in ("PS4", "PS5"):
                 continue                       # skip system apps in the game library
             g = by_tid.get(a["title_id"])
             csize = a.get("size") or 0         # REAL installed size (tbl_contentinfo.size == AppInfoJson #_size)
             if g:                              # already in PC folder → enrich; keep the pkg file size as primary
+                first = not g.get("on_console")
                 g["on_console"] = True
-                g["installed_drive"] = a["drive"]
-                g["installed_version"] = a.get("app_ver") or ""   # lets the UI hide applied patches
-                g["console_size"] = csize
-                g["backup_path"] = a.get("backup_path")
+                g.setdefault("installed_on", [])
+                if cid not in g["installed_on"]:
+                    g["installed_on"].append(cid)
+                # The scalar fields describe ONE console, and there is no way to widen them without
+                # changing what every reader of them means. The first console that has the title
+                # wins, which is the PS5 on a machine that has both (reconcile_consoles orders them),
+                # so nothing that read these before sees a different answer.
+                if first:
+                    g["installed_drive"] = a["drive"]
+                    g["installed_version"] = a.get("app_ver") or ""   # lets the UI hide applied patches
+                    g["console_size"] = csize
+                    g["backup_path"] = a.get("backup_path")
+                    if a.get("source") == "backup":
+                        g["size"] = a["size"]
+                        g["format"] = a.get("format") or g.get("format")
                 g["region"] = (g.get("region") if g.get("region") not in (None, "", "—") else a.get("region")) or "—"
-                if a.get("source") == "backup":
-                    g["size"] = a["size"]
-                    g["format"] = a.get("format") or g.get("format")
                 g["size_known"] = True
             else:                              # installed on console (not in the PC folder) → real console data
                 games.append({"title_id": a["title_id"], "content_id": a.get("content_id", ""),
@@ -351,7 +380,9 @@ def build_library(srv):
                               "local_path": a.get("backup_path") or None,
                               "runs_in_place": bool(a.get("backup_path")),
                               "cover_seed": a["title_id"], "has_icon": bool(a.get("icon_path")),
+                              "installed_on": [cid],
                               "base": [], "updates": [], "dlc": [], "cheats": []})
+                by_tid[a["title_id"]] = games[-1]
 
     # Packages sitting on a USB stick plugged into the PS5. The console app finds these on
     # its own; without this the same stick would appear ONLY when the PC was switched off,
@@ -361,9 +392,9 @@ def build_library(srv):
     # console that is genuinely busy scanning sticks, which is right when it is there and
     # completely wrong when it is not — it was the bulk of the ~25s the library took with the
     # PS5 off. `apps is not None` is the same reachability signal reported below.
-    if bridge and apps is not None:
+    for _cid, b, _capps in per_console:
         try:
-            for cg in (bridge.console_usb_packages() or []):
+            for cg in (b.console_usb_packages() or []):
                 tid = cg.get("title_id")
                 if tid and tid in by_tid:
                     if not by_tid[tid].get("base"):
@@ -1069,8 +1100,12 @@ def build_storage(srv, apps, devices=None, console_online=True):
     return {"reachable": apps is not None and console_online, "drives": drives}
 
 
-def _identifies_as_console(host, port=8710, timeout=1.6):
+def _identifies_as_console(host, port=8710, timeout=1.6, out=None):
     """Does this host say IT IS a console? Returns True / False / None (could not ask).
+
+    Pass `out` as a dict to also receive what it said about itself - today just "platform", which
+    the PS4 payload reports and the PS5 payload does not (so a console that names no platform is a
+    PS5). Additive: every existing caller reads only the return value.
 
     An open port cannot answer this. A peer PC running the companion listens on the same 8710 and
     speaks the same API; the only difference is what it says about itself. Our on-console ELF sets
@@ -1082,11 +1117,19 @@ def _identifies_as_console(host, port=8710, timeout=1.6):
         return None
     if not isinstance(h, dict):
         return None
-    return bool(h.get("on_console")) or h.get("server") == "on-console"
+    is_console = bool(h.get("on_console")) or h.get("server") == "on-console"
+    if isinstance(out, dict) and is_console:
+        seen = str(h.get("platform") or "ps5").strip().lower()
+        out["platform"] = seen if seen in ("ps4", "ps5") else "ps5"
+    return is_console
 
 
 def discover_ps5(cfg):
-    """Scan the local /24 for a PS5. Only hosts that identify themselves as a console qualify."""
+    """Scan the local /24 for a console. Only hosts that identify themselves as one qualify.
+
+    Finds a PS4 as readily as a PS5 - both run our shop on 8710 and both answer /api/health with
+    on_console - and each result carries the platform the host reported, so a discovered PS4 is not
+    saved as a PS5."""
     ip = lan_ip()
     if "." not in ip:
         return []
@@ -1111,7 +1154,8 @@ def discover_ps5(cfg):
             return
         # ASK, do not assume. Without this a peer PC running the companion was indistinguishable
         # from the console and could be adopted as one - and then written to config.json.
-        says = _identifies_as_console(host) if 8710 in openp else None
+        said = {}
+        says = _identifies_as_console(host, out=said) if 8710 in openp else None
         if says is False:
             return                      # it told us it is not a console. Believe it.
         # If it would not answer, fall back to a fingerprint only a PS5 has: Payload Manager on
@@ -1120,7 +1164,8 @@ def discover_ps5(cfg):
         if says is None and 8084 not in openp:
             return
         with lock:
-            found.append({"ip": host, "ports": openp, "confirmed": bool(says)})
+            found.append({"ip": host, "ports": openp, "confirmed": bool(says),
+                          "platform": said.get("platform") or ""})
 
     # daemon=True, as discover_peers' are: a probe stuck in a connect must never be the thread
     # that keeps the process alive after the tray's Quit, and 254 of them were not.
@@ -1239,7 +1284,60 @@ def coerce_config(cfg):
     except (TypeError, ValueError):
         print("[cfg] companion.port was not a number - using 8710")
         cfg["companion"]["port"] = 8710
+    reconcile_consoles(cfg)
     return cfg
+
+
+def reconcile_consoles(cfg):
+    """Keep cfg["consoles"] in step with the ps5_ip / ps4_ip settings.
+
+    The settings panel asks for a PS5 address and a PS4 address, because which console you own is
+    the one thing a person really has to tell this app. What everything downstream runs on, though,
+    is a LIST - so the two fields are folded into it here, in one place, instead of the UI having to
+    build fleet entries and the queue having to guess what they mean.
+
+    Rules, in order:
+      * an address that is set gets (or updates) an entry with the stable id "ps5" / "ps4", so a
+        console selection stored in the UI or a held queue job keeps pointing at the same console
+        across saves;
+      * an address that is cleared removes only that platform's entry;
+      * every OTHER entry is left exactly as it is - a second PS5, or a console someone added to
+        config.json by hand, is not this function's business.
+
+    Returns True when it changed anything.
+    """
+    cons = cfg.get("consoles")
+    if not isinstance(cons, list):
+        cons = cfg["consoles"] = []
+    before = json.dumps(cons, sort_keys=True)
+    ftp_port = (cfg.get("ftp") or {}).get("port", 2121)
+    for plat, key, label in (("ps5", "ps5_ip", "PS5"), ("ps4", "ps4_ip", "PS4")):
+        ip = str(cfg.get(key) or "").strip()
+        # The shipped default address is a placeholder, not a console. Treating it as one is how an
+        # unconfigured PC ended up with a fleet entry pointing at somebody else's LAN.
+        if ip == DEFAULT_CONFIG.get(key):
+            ip = ""
+        mine = [c for c in cons
+                if isinstance(c, dict)
+                and (str(c.get("platform") or "").lower() == plat
+                     or (not c.get("platform") and str(c.get("id") or "").lower().startswith(plat)))]
+        if not ip:
+            for c in mine:
+                cons.remove(c)
+            continue
+        if mine:
+            mine[0]["ip"] = ip
+            mine[0]["platform"] = plat
+            mine[0].setdefault("name", label)
+            mine[0].setdefault("ftp_port", ftp_port)
+        else:
+            cons.append({"id": plat, "name": label, "ip": ip,
+                         "platform": plat, "ftp_port": ftp_port})
+    # PS5 first, so the many places that still mean "the console" by consoles[0] keep meaning the
+    # PS5 on a machine that has both. Everything unrecognised keeps its relative order at the end.
+    order = {"ps5": 0, "ps4": 1}
+    cons.sort(key=lambda c: order.get(str((c or {}).get("platform") or "").lower(), 2))
+    return json.dumps(cons, sort_keys=True) != before
 
 
 def deep_merge(base, over):
@@ -1529,10 +1627,30 @@ def consoles_from_cfg(cfg):
     for i, c in enumerate(raw):
         if not c.get("ip"):
             continue
-        out.append({"id": c.get("id") or ("ps5-%d" % i), "name": c.get("name") or c["ip"],
-                    "ip": c["ip"],
+        # PLATFORM IS CARRIED THROUGH, NOT GUESSED HERE. A config written before PS4 support
+        # existed says nothing about the platform, and reading that silence as "PS5" is exactly how
+        # a PS4 would be handed the PS5 install lane. So an unknown platform stays empty and the
+        # bridge learns it from the console's own /api/health, which is the only honest source.
+        plat = str(c.get("platform") or "").strip().lower()
+        if plat not in ("ps4", "ps5"):
+            plat = ""
+        # The default id keeps its historical "ps5-N" spelling for anything that is not known to be
+        # a PS4: ids are saved in config.json and referenced by the UI and the queue, so renaming
+        # them for existing setups would orphan every stored selection.
+        out.append({"id": c.get("id") or ("%s-%d" % ("ps4" if plat == "ps4" else "ps5", i)),
+                    "name": c.get("name") or c["ip"],
+                    "ip": c["ip"], "platform": plat,
                     "ftp_port": c.get("ftp_port", cfg["ftp"].get("port", 2121))})
     return out
+
+
+# What the PS4's background transfer service calls each kind of package. These are the same two
+# letters the package's own param.sfo CATEGORY carries (gd = game, gp = game patch, ac = additional
+# content), so this is the file's own description of itself rather than a label of ours - see
+# pkg_meta.kind_from_category, which reads it in the other direction.
+PS4_PACKAGE_TYPE = {"base": "PS4GD", "backport": "PS4GD",
+                    "update": "PS4GP", "patch": "PS4GP",
+                    "dlc": "PS4AC"}
 
 
 def http_get_json(url, timeout=3):
@@ -1552,6 +1670,40 @@ def registry_key(registry, raw):
     if q in registry:
         return q
     return None
+
+
+def pkg_facts_for_key(library, key):
+    """Content id, byte size and kind of one library item, found by its install key.
+
+    The PS4 install lane needs all three before the console will accept the task (see
+    Ps5Bridge._pkg_query), and a caller may only have been handed the key. Every value here was read
+    out of the package's own param.sfo when the library was scanned, so this is a lookup, not a
+    second parse. Returns a dict with empty/zero fields when the key is unknown - never None, so no
+    caller has to guard it, and a missing content id simply means the console is asked the way the
+    PS5 has always been asked.
+    """
+    out = {"content_id": "", "size": 0, "kind": ""}
+    if not key or library is None:
+        return out
+    rk = registry_key(getattr(library, "file_registry", {}) or {}, key) or key
+    try:
+        out["size"] = int((getattr(library, "file_sizes", {}) or {}).get(rk) or 0)
+    except (TypeError, ValueError):
+        out["size"] = 0
+    for g in getattr(library, "games", []) or []:
+        for bucket in ("base", "updates", "dlc"):
+            for it in (g.get(bucket) or []):
+                if it.get("install_key") not in (key, rk):
+                    continue
+                out["content_id"] = str(it.get("content_id") or "")
+                out["kind"] = str(it.get("kind") or "")
+                if not out["size"]:
+                    try:
+                        out["size"] = int(it.get("size") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                return out
+    return out
 
 
 def now_ms():
@@ -2444,6 +2596,8 @@ class Ps5Bridge:
         self._ftp_port = None      # sticky: which FTP port answered last. Probe, never assume -
                                    # the port depends on which FTP payload the user runs.
         self._fs_ok, self._fs_ok_at = None, 0.0   # is OUR on-console file API answering?
+        self._seen_platform = ""   # "ps4"/"ps5" as the console itself reported it — see platform_id()
+        self._plat_probe_at = 0.0
 
     # FTP is the FALLBACK transport, not the route. Every read of console state - app.db, bgft.db,
     # addcont.db, the install proof, the cheat sync - goes through fs_read/fs_list, which ask OUR
@@ -2754,6 +2908,9 @@ class Ps5Bridge:
                 j = {}
             raise ShopHTTPError(e.code, j, body, url)
 
+    # Any answer that identifies the console teaches us its platform, so the lazy probe in
+    # platform_id() almost never has to fire: /api/health goes through here from the UI poll, the
+    # queue and engine_available() alike.
     def _shop_text(self, path, timeout=15):
         """GET a PLAIN TEXT endpoint on the console. _shop() json.loads() its answer, which is
         exactly wrong for the install log - the only thing it could ever return is an exception."""
@@ -2875,9 +3032,48 @@ class Ps5Bridge:
 
     def engine_available(self):
         try:
-            return bool(self._shop("/api/health", timeout=4).get("on_console"))
+            h = self._shop("/api/health", timeout=4)
         except Exception:
             return False
+        self._note_platform(h)
+        return bool(h.get("on_console"))
+
+    # ------------------------------------------------- which console is this, really
+    #
+    # The PS4 payload reports `platform: "ps4"` in /api/health. The PS5 payload has never had that
+    # field and is not being changed to add one, so a health answer from a console that does NOT
+    # name a platform is a PS5. That asymmetry is deliberate: it means PS4 support needed no edit
+    # to the shipping PS5 build.
+    #
+    # A platform written in config.json wins, so a console that is switched off is still handled
+    # correctly. Anything learned from the console is remembered for the life of the process but
+    # never written to disk from here - config.json is saved in one place, by main().
+    def _note_platform(self, health):
+        if not isinstance(health, dict) or not health.get("on_console"):
+            return
+        seen = str(health.get("platform") or "ps5").strip().lower()
+        if seen in ("ps4", "ps5") and self._seen_platform != seen:
+            self._seen_platform = seen
+
+    def platform_id(self):
+        """"ps4" or "ps5". Configured value first, then whatever the console said, then "ps5"."""
+        cfgd = str(self.c.get("platform") or "").strip().lower()
+        if cfgd in ("ps4", "ps5"):
+            return cfgd
+        if not self._seen_platform and time.time() - self._plat_probe_at > 10:
+            # ASK, ONCE, RATHER THAN ASSUME. Callers reach here on paths that have not touched the
+            # console yet, and defaulting an unknown console to "ps5" would send a PS4 down the PS5
+            # lane. This is the same /api/health the UI polls, so it is warm in practice; a console
+            # that is switched off simply stays unknown until it answers.
+            self._plat_probe_at = time.time()
+            try:
+                self._note_platform(self._shop("/api/health", timeout=3))
+            except Exception:
+                pass
+        return self._seen_platform or "ps5"
+
+    def is_ps4(self):
+        return self.platform_id() == "ps4"
 
     # install_pms() lived here: the in-process /api/engine/install-url lane, which registers with
     # sceAppInstUtilAppInstallPkg (metadata only - a tile that crashes). Nothing called it from
@@ -2923,7 +3119,37 @@ class Ps5Bridge:
         except Exception:
             return None
 
-    def install_spawn(self, url, name="", force=False, cancelled=None):
+    # THE PS4 NEEDS THE PACKAGE DESCRIBED UP FRONT; THE PS5 DOES NOT.
+    #
+    # The PS5 lane hands over a URL and the console reads the package header itself. The PS4's
+    # background transfer service refuses a task that does not already carry the CONTENT id and the
+    # real byte size: a title id where the content id belongs answers 0x80990008, and a zero size is
+    # refused outright. It cannot read a header it has not downloaded yet - but this machine parsed
+    # that header when it scanned the library, so the values cost nothing to pass on.
+    #
+    # Sent to BOTH consoles on purpose. The PS5 build's route reads `uri` and `name` and ignores
+    # every other parameter, so this cannot change what the PS5 does, and one code path here will
+    # not drift the way a platform branch would.
+    @staticmethod
+    def _pkg_query(pkg):
+        if not isinstance(pkg, dict):
+            return ""
+        q = ""
+        cid = str(pkg.get("content_id") or "").strip()
+        if cid:
+            q += "&cid=" + quote(cid, safe="")
+        try:
+            size = int(pkg.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            q += "&size=%d" % size
+        ptype = PS4_PACKAGE_TYPE.get(str(pkg.get("kind") or "base").strip().lower())
+        if ptype:
+            q += "&type=" + ptype
+        return q
+
+    def install_spawn(self, url, name="", force=False, cancelled=None, pkg=None):
         """OUR OWN base-game lane. No etaHEN anywhere in the call.
 
         `cancelled` is an optional callable the queue passes so a cancel pressed while this waits
@@ -3012,8 +3238,9 @@ class Ps5Bridge:
             return False, {"error": "Canceled before it was handed to the console",
                            "host": "pms-spawn", "canceled": True, "do_not_reload": True}
         try:
-            j = self._shop("/api/engine/install-spawn?uri=%s&name=%s"
-                           % (quote(url, safe=""), quote(name or "", safe="")), timeout=90)
+            j = self._shop("/api/engine/install-spawn?uri=%s&name=%s%s"
+                           % (quote(url, safe=""), quote(name or "", safe=""),
+                              self._pkg_query(pkg)), timeout=90)
         except ShopHTTPError as e:
             # THE CONSOLE ANSWERED. 409 is its busy guard refusing a second install while one is
             # still being handed over - that refusal is protective and must be relayed, never
@@ -3118,7 +3345,7 @@ class Ps5Bridge:
         except Exception:
             return {}
 
-    def install(self, url, name="", force=False, cancelled=None):
+    def install(self, url, name="", force=False, cancelled=None, pkg=None):
         """Install a package on the console with OUR OWN engine. Returns (ok, info).
 
         This used to dispatch between four lanes. It does not any more - see install_spawn().
@@ -3132,7 +3359,7 @@ class Ps5Bridge:
         # disagreed with the default in DEFAULT_CONFIG ("v2"), so what an unconfigured PC did was
         # not predictable from reading either one. Both third-party lanes are gone, along with the
         # probe that decided which foreign daemon owned :12800.
-        return self.install_spawn(url, name, force=force, cancelled=cancelled)
+        return self.install_spawn(url, name, force=force, cancelled=cancelled, pkg=pkg)
 
     SMP_CONFIG = "/data/shadowmount/config.ini"
 
@@ -4003,6 +4230,47 @@ class Ps5Bridge:
         # just installed should stop being offered as installable on the next library read.
         self._usbpkg_memo = None
 
+    def _ps4_console_apps(self):
+        """The PS4's installed games, as our PS4 payload reports them. None if it did not answer.
+
+        Same dict shape the PS5 path produces, so build_library, the storage tiles, the icon lane and
+        already_installed all work without knowing which console they are looking at. The payload
+        lists only real games (app.db category 'gd', never the 'gdi' system stubs) and tells us which
+        of them have their own app.pkg on disk - the one honest proof a title is really installed, and
+        the same rule the PS5 side uses.
+        """
+        try:
+            j = self._shop("/api/library", timeout=25)
+        except Exception:
+            return None
+        if not isinstance(j, dict) or not j.get("ok"):
+            return None
+        apps = []
+        for g in (j.get("games") or []):
+            tid = str(g.get("title_id") or "").strip()
+            if not tid:
+                continue
+            cid = str(g.get("content_id") or "")
+            try:
+                size = int(g.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            apps.append({
+                "title_id": tid, "content_id": cid, "name": g.get("name") or tid, "size": size,
+                "region": pkg_meta.region_from_content_id(cid),
+                # The PS4 payload reports the internal drive; a game on a USB disk is still
+                # registered here, and build_storage buckets by the path it finds, not by this.
+                "location": "0", "drive": self.LOC_LABEL["0"],
+                "platform": "PS4",
+                # install_status mirrors the PS5 field: 0 for a title with its data in place.
+                "install_status": 0 if g.get("installed") else 1,
+                "app_format_type": "app", "app_ver": str(g.get("installed_version") or ""),
+                "icon_path": ("/user/appmeta/%s/icon0.png" % tid) if g.get("has_icon") else None,
+                # No ShadowMount on the PS4, so nothing here is ever a mounted backup.
+                "backup_path": None, "format": None, "source": "installed",
+            })
+        return apps
+
     def console_apps(self, force=False):
         """
         Read installed titles from the console's app.db (tbl_contentinfo, verified PS5 12.70 schema):
@@ -4023,6 +4291,20 @@ class Ps5Bridge:
         # library take ~25s whenever the PS5 was off. `force` still ignores it.
         if not force and time.time() - getattr(self, "_apps_fail_ts", 0) < 10:
             return None
+        # A PS4 STORES ITS INSTALLED GAMES IN A DIFFERENT SCHEMA, and our PS4 payload already reads
+        # it. app.db sits at the same path on both consoles, but a PS4 has no tbl_contentinfo: it has
+        # a per-user tbl_appbrowse_<userid> plus a key/value tbl_appinfo holding APP_VER. Pulling the
+        # file here and re-implementing that in Python would be a second copy of logic the
+        # console-side build already has right (and would have to track the user id), so the PS4 is
+        # asked for the finished list instead. Everything below this line is the PS5 path, unchanged.
+        if self.is_ps4():
+            apps = self._ps4_console_apps()
+            if apps is None:
+                self._apps_fail_ts = time.time()
+                return None
+            self._apps, self._apps_ts = apps, time.time()
+            self._apps_fail_ts = 0.0
+            return apps
         db_path = self.cfg.get("console", {}).get("app_db_path", "/system_data/priv/mms/app.db")
         # Through _pull_db: our own on-console file API first, the third-party FTP only as a
         # fallback. Unique temp name per pull - the confirm loop, the library scan and the UI can
@@ -4373,9 +4655,18 @@ class Fleet:
         self.bridges = {c["id"]: Ps5Bridge(c, self.cfg) for c in self.consoles}
 
     def bridge(self, cid):
+        """The bridge for this console id. None when the id is unknown and guessing is not safe.
+
+        The fallback below is for the single-console case, where "whatever console there is" and
+        "the one you asked for" are the same thing, and dropping it would break callers that pass a
+        stale or empty id. With TWO consoles configured - which is what PS4 support makes ordinary -
+        the same fallback would quietly hand a PS4's install to the PS5, so an unknown id becomes a
+        refusal the caller can report instead."""
         if cid in self.bridges:
             return self.bridges[cid]
-        return next(iter(self.bridges.values()), None)
+        if len(self.bridges) == 1:
+            return next(iter(self.bridges.values()))
+        return None
 
     def ids(self):
         return [c["id"] for c in self.consoles]
@@ -4783,7 +5074,10 @@ class Queue:
                   % (t.get("id"), t.get("name"), t.get("title_id") or "no-tid", bridge.name,
                      t.get("url")))
             ok, res = bridge.install(t["url"], t.get("name") or "", force=bool(t.get("force")),
-                                     cancelled=lambda: bool(t.get("cancel")))
+                                     cancelled=lambda: bool(t.get("cancel")),
+                                     pkg={"content_id": t.get("content_id") or "",
+                                          "size": t.get("pkg_size") or t.get("total") or 0,
+                                          "kind": t.get("kind") or "base"})
             print("[install] verdict %s: ok=%s %s" % (t.get("id"), ok,
                   {k: v for k, v in (res or {}).items() if k != "detail"} if isinstance(res, dict)
                   else res))
@@ -6027,6 +6321,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             cons = srv.fleet.consoles
             b = srv.fleet.bridge(cons[0]["id"]) if cons else None
+            # THE PS4 IS A SECOND CONSOLE, NOT A REPLACEMENT FOR THE FIRST. Everything below that
+            # says ps5_* keeps meaning the PS5, because the whole UI and every peer reads those keys;
+            # the PS4 gets its own pair beside them. A machine with no PS4 configured sends an empty
+            # address and ps4_online false, which is what the settings panel shows as "not set up".
+            _ps4 = next((c for c in cons
+                         if str(c.get("platform") or "").lower() == "ps4"), None)
+            _b4 = srv.fleet.bridge(_ps4["id"]) if _ps4 else None
+            _ps4_on = False
+            if _b4 is not None:
+                # Same 5 s memo the PS5 probe uses, for the same reason: this endpoint is polled
+                # every 6 s and the answer is a round trip to a console.
+                _m4 = getattr(srv, "_ps4_probe", None)
+                if _m4 and (time.monotonic() - _m4[0]) < 5.0:
+                    _ps4_on = _m4[1]
+                else:
+                    _ps4_on = bool(_b4.up() and _b4.engine_available())
+                    srv._ps4_probe = (time.monotonic(), _ps4_on)
             # PROBE MEMO. This endpoint is polled every 6 s by the console's UI, again by this
             # PC's own UI if it is open, and again by peers - and each call opened fresh TCP
             # connections to the console for ping() and ftp_ok(). On the console those connections
@@ -6102,6 +6413,8 @@ class Handler(BaseHTTPRequestHandler):
                                "ftp_port": (getattr(b, "_ftp_port", None) if b else None)
                                            or (b.c.get("ftp_port") if b else None) or 2121,
                                "connected": (engine_ready or ftp_on),
+                               "ps4_ip": (_ps4 or {}).get("ip") or srv.cfg.get("ps4_ip") or "",
+                               "ps4_online": _ps4_on,
                                "lan_ip": lan_ip(),
                                # The settings panel reads BOTH of these off health every few
                                # seconds. Neither was ever sent, so the poll kept overwriting the
@@ -7098,6 +7411,20 @@ class Handler(BaseHTTPRequestHandler):
         kind = (body.get("kind") or "").lower()
         tid = body.get("title_id")
 
+        # A PS5 PACKAGE CANNOT GO ON A PS4, and the console would be the one to say so.
+        #
+        # They are not the same container at all - a PS5 package begins FIH where a PS4 one
+        # begins CNT - so every PS5 game picked with "All consoles" would be handed to the PS4
+        # and come back refused, once per game, with the PS4 blamed for it. A PS4 package on a PS5
+        # is the opposite case and stays allowed: that console runs them.
+        if tid and str(tid).upper().startswith("PPSA"):
+            keep = [c for c in targets
+                    if not (srv.fleet.bridge(c) is not None and srv.fleet.bridge(c).is_ps4())]
+            if not keep:
+                return self._json({"ok": False, "error": "This is a PS5 game, and the console it "
+                                                         "was sent to is a PS4"}, 400)
+            targets = keep
+
         # An add-on has to go where its base game already lives — installing a patch to a
         # different drive than the game is a guaranteed failure, and the user should not have to
         # remember which drive they picked. Override whatever the drive selector says.
@@ -7394,7 +7721,17 @@ class Handler(BaseHTTPRequestHandler):
             progress_url = source_engine.served_url(src, key)
         measurable = local_progress or bool(progress_url)
         hold = body.get("mode") == "queued"                             # [B8] add-to-queue vs install-now
+        # The PS4 needs the package described when the task is handed over, and `total` above is
+        # deliberately 0 for a job whose progress cannot be measured - so the real size travels in
+        # its own field. Whatever the caller told us wins; the library fills in the rest.
+        _facts = pkg_facts_for_key(getattr(srv, "library", None), key)
+        _cid = str(body.get("content_id") or _facts["content_id"] or "")
+        try:
+            _psize = int(body.get("size") or 0) or _facts["size"] or int(total or 0)
+        except (TypeError, ValueError):
+            _psize = _facts["size"] or int(total or 0)
         jobs = [srv.queue.add({"name": body.get("name", "PKG"), "title_id": body.get("title_id"),
+                               "content_id": _cid, "pkg_size": _psize,
                                "kind": body.get("kind", "base"), "lane": "install", "hold": hold,
                                "drive": body.get("drive", "internal"), "url": url, "console": cid, "source": source,
                                "key": key if measurable else None, "total": total if measurable else 0,
@@ -8140,6 +8477,18 @@ def main():
         # "Auto-found" lines in one day for the same, already configured, address).
         present = bool(b0 and b0.ip and (b0.engine_available() or b0.up()
                                           or _port_open(b0.ip, cfg.get("dpi", {}).get("pldmgr_port", 8084), 0.6)))
+        # AUTO-FIND IS FOR THE ZERO-CONFIG CASE ONLY.
+        #
+        # It exists so a fresh install finds the console with nothing filled in, and the way it does
+        # that is to write ONE address. That was harmless while there could only be one console.
+        # With two - which is exactly what PS4 support makes ordinary - the write below stamped the
+        # discovered address onto EVERY entry, so a successful scan that found the PS4 also rewrote
+        # the PS5's address to the PS4's, in config.json, permanently. Anything the user has
+        # deliberately set up is left exactly as they set it.
+        if len(cfg.get("consoles") or []) > 1:
+            present = True
+            print(" %d consoles configured - not auto-finding; their addresses are yours to set"
+                  % len(cfg["consoles"]))
         if not present:
             found = discover_ps5(cfg)
             if found:
@@ -8149,27 +8498,38 @@ def main():
                 # merely not loaded yet used to get "Auto-found" and a config save on every boot.
                 unchanged = (cfg.get("ps5_ip") == newip and
                              all(c.get("ip") == newip for c in (cfg.get("consoles") or [])))
-                cfg["ps5_ip"] = newip
+                plat = str(found[0].get("platform") or "").lower()
+                # Only a PS5 is recorded as ps5_ip. That key is the legacy single-console setting and
+                # a great deal reads it; pointing it at a PS4 would be a lie about which console the
+                # PS5-only lanes should talk to.
+                if plat != "ps4":
+                    cfg["ps5_ip"] = newip
                 if cfg.get("consoles"):
-                    for c in cfg["consoles"]:
-                        c["ip"] = newip
+                    # Exactly one entry here (see the guard above), so this updates the console the
+                    # user already has rather than every console they have.
+                    cfg["consoles"][0]["ip"] = newip
+                    if plat:
+                        cfg["consoles"][0]["platform"] = plat
                 else:
-                    cfg["consoles"] = [{"id": "ps5", "name": "PS5", "ip": newip,
-                                                            "ftp_port": cfg["ftp"].get("port", 2121)}]
+                    cfg["consoles"] = [{"id": "ps4" if plat == "ps4" else "ps5",
+                                        "name": "PS4" if plat == "ps4" else "PS5",
+                                        "ip": newip, "platform": plat or "ps5",
+                                        "ftp_port": cfg["ftp"].get("port", 2121)}]
                 fleet = Fleet(cfg)
                 # Only a host that CONFIRMED it is a console gets written to disk. A guess is good
                 # enough to try for this run, but must not outlive it - that is how the console
                 # address silently became a peer PC's and stayed there.
+                label = "PS4" if plat == "ps4" else "PS5"
                 if confirmed and unchanged:
-                    print(" PS5 at %s is not answering yet - keeping that address" % newip)
+                    print(" %s at %s is not answering yet - keeping that address" % (label, newip))
                 elif confirmed:
                     try:
                         save_config(cfg)
                     except Exception:
                         pass
-                    print(" Auto-found PS5 at %s" % newip)
+                    print(" Auto-found %s at %s" % (label, newip))
                 else:
-                    print(" Trying %s as the PS5 for this run (it did not confirm it is a console, "
+                    print(" Trying %s as the console for this run (it did not confirm it is one, "
                           "so this is not being saved)" % newip)
     except Exception as e:
         print(" PS5 auto-find skipped: %s" % e)

@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.61.0"
+#define SHOP_VERSION "3.62.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the

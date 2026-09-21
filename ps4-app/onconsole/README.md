@@ -1,0 +1,184 @@
+# PKG MUTANT SHOP — the PS4 payload
+
+This is the PS4 half of the shop. It serves the same web UI and speaks the same JSON API as the PS5
+payload (`ps5-app/onconsole/server.c`), so the companion and the page need no per-console code paths
+beyond knowing which console they are talking to.
+
+Verified on real hardware: **PS4 firmware 13.52, GoldHEN 2.4b18.** Everything in this document was
+measured on that console. Nothing here is inferred from the PS5 side.
+
+---
+
+## One binary for both consoles is not possible
+
+This was tested rather than assumed, because it was the first thing worth knowing.
+
+The PS5 ELF was posted to the PS4's payload loader. GoldHEN accepted it — HTTP 200, *"payload
+launched successfully", "format: ELF"* — and **nothing ran**: port 8710 never opened and klog stayed
+silent. The two consoles have different SDKs, different ABIs and different system libraries, and a
+PS5 payload on a PS4 is simply not a program that machine can execute.
+
+So there are two payloads and **one** of everything else: one web UI (embedded in both from `web/`),
+one companion, one API, one set of build gates. That is the part that matters to anyone using the
+app — the shop looks and behaves identically on both consoles.
+
+## Building
+
+```bash
+bash ps4-app/onconsole/build-wsl.sh        # WSL; writes PKG-MUTANT-SHOP-PS4.elf beside itself
+```
+
+It fetches and patches the SDK the first time (see below), then runs **the same gates the PS5 build
+runs** — `check_web.py`, `i18n_report.py --check`, `message_report.py --check` — because both
+payloads embed the same UI and say the same sentences, so a broken script or an untranslated key has
+to stop both builds, not one.
+
+### The SDK has to be patched or `main()` never runs
+
+The payload is built with the [ps4-payload-dev SDK](https://github.com/ps4-payload-dev/sdk). Its
+C runtime assumes it is running under a loader that provides kernel access, and GoldHEN does not:
+
+* `payload_init()` calls `__kernel_init()`, which calls `kexec(...)` — a syscall GoldHEN does not
+  provide — and treats the failure as fatal.
+* `__rtld_init()` escapes the process jail before loading libraries. With the kernel unreachable
+  that escape cannot happen.
+* `__rtld_init()` then *restored* the jail unconditionally, failed, and returned −1 **after** every
+  library had already loaded fine. This was the last blocker and the least obvious one.
+
+`sdk-goldhen.patch.py` makes those three kernel steps advisory and is applied by the build script
+automatically. It is idempotent and each patch carries its own marker — an earlier version shared
+one marker between patches, so the third silently never applied and looked "already patched".
+
+Symbol resolution stays fatal: a payload that cannot find what it needs must refuse, not run blind.
+
+**Consequence:** with `kexec` absent there is **no kernel read/write** on this console, so the
+CR3-page-walk cheat engine cannot be ported as it stands. `/api/cheat*`, `/api/mods*` and
+`/api/patch*` answer with a plain "not available on the PS4 yet" rather than pretending.
+
+## What the payload gets under GoldHEN
+
+GoldHEN injects it into a **shared host process** (`ScePartyDaemon`, pid 66) which it jailbreaks
+first, so the payload inherits **uid 0 / gid 0** and can read the whole filesystem.
+
+That word *shared* has one hard consequence: **never call `_exit()`.** It tears down the host
+process — including the copy of the payload that was just loaded to replace this one. `/api/quit`
+closes the listening socket and returns instead, so a new build takes the port over cleanly.
+
+Working, measured: root, TCP listen + HTTP, `sceKernelSendNotificationRequest` (the same 3120-byte
+struct as the PS5), `dlopen`/`dlsym`, `sceKernelLoadStartModule`, `sceAppInstUtilInitialize()` → 0.
+
+## Installing — BGFT
+
+A package is installed by handing the console a URL and letting it download and install by itself,
+with its own progress UI and its own notifications. `bgft.h` carries the declarations, copied from
+the OpenOrbis toolchain rather than inferred, and every symbol was confirmed to exist on this
+console before it was called.
+
+Firmware detail that matters: **on 13.52 `libSceBgft` exports the `ServiceInt` family**, and the
+register call is the *Debug* one — `sceBgftServiceIntDebugDownloadRegisterPkg`. The older
+`sceBgftInitialize` / `sceBgftDownloadRegisterTask` names most PS4 installers use are absent here.
+
+Resolution goes through `dlsym_any()`, which searches the handles we `dlopen` as well as the default
+scope. **`RTLD_DEFAULT` alone is not enough**: every BGFT symbol came back NULL from it and resolved
+fine from the library handle, and the first build of this file refused every install because of it.
+
+Three things the task will not do without:
+
+| field | why |
+| --- | --- |
+| the **content id** (`EP0786-CUSA02365_00-…`) | a title id here is refused with `0x80990008` |
+| the real **byte size** | zero is refused outright |
+| the **package type** (`PS4GD`/`PS4GP`/`PS4AC`) | from the package's own `param.sfo` CATEGORY |
+
+The console cannot read a header it has not downloaded, so for a package on the PC the companion
+supplies these (it parsed the header when it scanned the library); for a package already on the
+console the payload reads them out of the file itself.
+
+### Tasks have to be handed back
+
+BGFT keeps one directory per registered task under `/user/bgft/task` and the table is **not**
+unlimited. A task only disappears when something unregisters it, so after a handful of failed test
+installs every new one was refused with `0x80990086` while the dead tasks sat there. Two halves fix
+it: a finished job releases its own task, and a sweep recovers tasks stranded by a reload or a crash.
+
+A task counts as ours only when its record (`d0.pdb`, plain text) carries a **plain-http URL on the
+`/library/` route** — a store task is https on a Sony host. Both halves must match. The seven tasks
+this console already had from the user's own Store and firmware downloads were left untouched, and
+one of those was plain http, which is exactly why one test is not enough.
+
+### The one thing BGFT will not do: a title the Store has an update for
+
+Measured, twice, on this console. Before downloading anything, BGFT asks PlayStation Network whether
+the title has a newer version:
+
+```
+[ScePatchChecker] check (title_id='CUSA11740', …): status=0   -> installed fine, 15 s
+[ScePatchChecker] check (title_id='CUSA14409', …): status=1   -> app_version 01.04 exists
+[PATCH MERGE] : CheckDeltaPatchInfo error. [0x80f00640]
+[BGFT] tx started (131072/238419968)     <- 227,540,992 offered + 10,878,976 it could not fetch
+[BGFT] tx stopped  (524288/10878976)
+Task ended (error=0x80990004)
+```
+
+When the Store has a newer version, BGFT builds a **two-part** task — the package we offered *plus*
+the update — and then cannot fetch the second part, because the first did not come from the Store.
+No task option changes this: `FORCE_UPDATE`, `INTERNAL`, `REMOTE`, `INVISIBLE` and
+`entitlementType` 0–3 were each tried and all four failed identically.
+
+So the shop says so, in words, and only when it can prove it: the job reports the merge attempt
+**only** if BGFT asked for more bytes than the package contains and nothing landed on disk. Anything
+else gets the plain sentence — the cause is never guessed. Stopping the console from reaching
+PlayStation Network is what clears it.
+
+## Installing a package the console already has
+
+`/api/engine/install-local?path=…`, or `/api/install` with `{"install_key":"local:<path>"}` — the
+same shape the PS5 build takes. Packages found on `/mnt/usb0…7` are listed in `/api/library` with
+`source: "usbN"`, so a stick is installable from any device with every PC switched off.
+
+The package is **served back to the console over HTTP** (`/pkgfile/<token>`, with byte ranges) and
+that URL is handed to the same BGFT lane. It is not registered with `sceAppInstUtilAppInstallPkg`:
+on the PS5 that call writes metadata without data and leaves a tile that crashes the console on
+launch, and the shape that avoids it is the same on both machines. One lane, one verdict path.
+
+## Reading what is installed
+
+`app.db` is at the same path as on the PS5 (`/system_data/priv/mms/app.db`) and has a **different
+schema**: per-user `tbl_appbrowse_<userid>` (titleId, contentId, titleName, contentSize, category, …)
+plus a key/value `tbl_appinfo`. Category `gd` is a real game, `gdi` a system stub. The installed
+version is `tbl_appinfo` key **APP_VER**, which is the field the companion already prefers for CUSA
+titles. `sqmini.h` is the PS5 payload's SQLite reader, copied verbatim and kept honest by
+`tools/ps4_sync_sqmini.py --check` (a build gate) rather than edited by hand.
+
+Installed means **`/user/app/<TID>/app.pkg` with bytes in it** — never app.db registration alone.
+That rule was learned on the PS5, where trusting metadata produced 53 phantom installs.
+
+`/user/bgft` here is directories (task, trash, pushlist, userlist), not the PS5's `bgft.db`, so the
+PS5's "bgft row 1026/1036" confirmation has no equivalent — the app.pkg check is the proof.
+
+## There is no dashboard tile yet
+
+The PS5 ships one: `ps5-app/onconsole/tile/pms-tile.pkg`, a fake-signed PS5 package embedded in the
+ELF and installed on boot. A PS4 tile is a **different container** (`\x7FCNT`, not `\x7FFIH`) and a
+different problem: a PS4 tile is a real application with a signed `eboot.bin`, so it needs an fpkg
+build tool and an fself signer, neither of which is in this repo — and the PS5 experience is that a
+wrong app registration leaves a tile that crashes the console hard enough to need the jailbreak
+re-run. It is not worth guessing at.
+
+What exists instead: **`/api/open`** launches the console's own browser at the shop, so one tap in
+the app (or on a phone) puts it on the television. The URL is also shown in Settings.
+
+## Ports and tools on the console
+
+| port | what |
+| --- | --- |
+| 8710 | this payload — the shop UI and the JSON API |
+| 2121 | GoldHEN's FTP (logs in as root, whole filesystem) — the companion's fallback transport |
+| 3232 | klog. **The only way to see payload output**; `printf` goes nowhere when injected |
+| 9090 | GoldHEN's payload loader — HTTP POST the raw ELF; 200 means accepted |
+
+Deploy: `curl -X POST --data-binary @PKG-MUTANT-SHOP-PS4.elf http://<ps4>:9090/`, wait ~12 s, then
+check `/api/health`. Reloading over a running copy is fine — the old one hands the port over.
+
+Note that **9090 does not survive rest mode**: after a suspend/resume, FTP and klog come back and
+the payload loader does not, so the exploit has to be re-run before another ELF can be pushed.

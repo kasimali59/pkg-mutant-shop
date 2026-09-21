@@ -9,6 +9,182 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.62.0] - 2026-09-21 - "The PS4 joins the fleet" `[VERIFIED]`
+
+### What this release is
+
+PKG MUTANT SHOP now runs on a **PS4 on firmware 13.52**, alongside the PS5, from the same app. One
+library, one page, one companion, one queue — a second console in the picker. Everything the PS5 side
+does is untouched: `ps5-app/onconsole/server.c` has exactly one changed token in this release, the
+version stamp, and the install lane was not modified at all.
+
+Everything below was measured on the hardware (PS4 at 13.52, GoldHEN 2.4b18 as the jailbreak layer).
+Nothing was carried over from the PS5 side on the assumption that it would hold.
+
+### One ELF for both consoles is not possible, and that was tested first
+
+The PS5 ELF was posted to the PS4's payload loader before a line of new code was written. It was
+accepted — HTTP 200, *"payload launched successfully", "format: ELF"* — and **nothing ran**: port 8710
+never opened and klog stayed silent. Different SDK, different ABI, different system libraries.
+
+So there are two payloads and one of everything else. `PKG-MUTANT-SHOP.elf` is the PS5's;
+`PKG-MUTANT-SHOP-PS4.elf` is the PS4's; both embed the same `web/` directory, both answer the same
+API, and both are held to the same build gates. From the user's side there is one app.
+
+### New — the PS4 payload (`ps4-app/onconsole/server_ps4.c`)
+
+* Serves the shared UI and the JSON API on **:8710**, one thread per connection.
+* Reads the console's installed games from the PS4's own `app.db` — a **different schema** from the
+  PS5's: per-user `tbl_appbrowse_<userid>` plus a key/value `tbl_appinfo` whose `APP_VER` is the
+  installed version. Category `gd` is a real game; `gdi` system stubs are skipped.
+* Installs packages from the PC over **BGFT**, with the console's own progress and notifications.
+* Installs packages **already on the console** — `/mnt/usb0…7` are scanned and listed in
+  `/api/library` with `source: "usbN"`, so a stick is installable with every PC switched off.
+* `/api/open` launches the console's own browser at the shop, so one tap puts it on the television.
+* Notifications, storage, drives, the file API (`/api/fs/*`), icons and the install log all work the
+  same way they do on the PS5, so the companion needed no new transport.
+* Cheats, mods and patches answer *"not available on the PS4 yet"* — see the limits section.
+
+### New — the companion speaks to two consoles
+
+* Settings has a **PS4 address** box beside the PS5 one, in all 15 languages. Filling it in adds the
+  console; clearing it removes it. `reconcile_consoles()` folds the two boxes into the fleet list in
+  one place, so nothing else has to know how they map.
+* A console's platform is **learned from the console**, never guessed: the PS4 payload reports
+  `platform: "ps4"` in `/api/health` and the PS5 payload has never had that field, so a console that
+  names no platform is a PS5. A platform saved in `config.json` wins, so a switched-off console is
+  still handled correctly.
+* The library now merges **every** console's installed games, not just the first. With two consoles
+  configured, the second one's games used to be invisible — shown as not installed, and offered for
+  installation again. Each game carries `installed_on` with the consoles that have it; the existing
+  single-value fields keep describing the first console that does, so a one-console machine behaves
+  exactly as before.
+* The install hand-off carries the package's **content id, real size and type**, which the PS4
+  requires and the PS5 ignores.
+* A **PS5 package is refused for a PS4** with a sentence, rather than letting "All consoles" collect
+  one console-side refusal per game. The reverse stays allowed: a PS5 runs PS4 games.
+
+### Fixed — auto-discovery corrupted a two-console config
+
+`main()`'s auto-find exists so a fresh install locates the console with nothing filled in, and it
+worked by writing one address. With two consoles configured, that write stamped the discovered
+address onto **every** entry — so finding the PS4 rewrote the PS5's address to the PS4's, in
+`config.json`, permanently. Auto-find now runs only when there is at most one console; anything the
+user has deliberately set up is left alone. It also records the platform it found, and only writes
+`ps5_ip` for a console that actually said it was a PS5.
+
+### Fixed — `Fleet.bridge()` answered with the wrong console
+
+An unknown console id fell back to "the first console there is". Harmless with one console; with two
+it would quietly hand a PS4's install to the PS5. The fallback now applies only when there is exactly
+one console, and an unknown id becomes a refusal the caller can report.
+
+### Four PS4-side bugs found by running it
+
+* **BGFT task table filled up and every install was refused.** `0x80990086` on register, with the
+  directories of dead tasks still under `/user/bgft/task`. A task only disappears when something
+  unregisters it, so a shop that does not clean up after itself stops being able to install anything
+  — including packages it had installed an hour earlier. A finished job now releases its own task,
+  and a sweep recovers tasks stranded by a payload reload or a crash. A task counts as ours only when
+  its record carries a plain-http URL on the `/library/` route; a Store task is https on a Sony host.
+  Both halves must match, which is what kept the seven tasks this console already had — the user's
+  own Store and firmware downloads, one of them plain http — untouched.
+* **A finished job read as still running.** The job state was only refreshed by `/api/engine/job`, so
+  a finished or failed install still looked busy to the very next request and the next install was
+  refused. Both the busy check and the cleanup route refresh first now.
+* **A finished job was rewritten back to "downloading".** Once its task is handed back, BGFT answers
+  every progress call with an error — which read as "no error, no bytes yet" and overwrote a job that
+  had already failed. The verdict is reached once and then left alone.
+* **Raw SCE codes reached the screen.** The house style has always been that a hex code belongs in
+  the install log, not on a television, and `tools/message_report.py --check` enforces it — but the
+  report never read the PS4 payload, so the rule was not being applied to it. The report now covers
+  both payloads (445 messages checked) and the PS4's sentences were rewritten to obey it.
+
+### Known limit — a title the Store has an update for will not install
+
+Measured twice on this console, and worth stating plainly because it is the one thing that does not
+work. Before downloading anything, BGFT asks PlayStation Network whether the title has a newer
+version. When it does, BGFT builds a **two-part** task — the package we offered *plus* the update —
+and then cannot fetch the second part, because the first did not come from the Store.
+
+> METAL SLUG XX (no Store update): `status=0` → installed in 15 seconds, 532,217,856 of 532,217,856.
+> Castle Crashers Remastered (Store has 01.04): `status=1` → the task asked for 238,419,968 against a
+> 227,540,992-byte package, the extra 10,878,976 being the update, and ended `0x80990004` with
+> nothing written.
+
+No task option changes it: `FORCE_UPDATE`, `INTERNAL`, `REMOTE`, `INVISIBLE` and `entitlementType`
+0–3 were each tried and all failed identically. Stopping the console from reaching PlayStation
+Network is what clears it.
+
+So the shop **says so, and only when it can prove it**: the job reports the merge attempt only if
+BGFT asked for more bytes than the package contains and nothing landed on disk. Anything else gets
+the plain sentence. The cause is never guessed.
+
+### Known limit — no cheats or mods on the PS4 yet
+
+GoldHEN does not provide the `kexec` syscall the SDK's C runtime expects, so a payload on this
+console has **no kernel read/write**. The cheat engine finds a game's memory by walking its CR3 page
+tables, which needs exactly that. `/api/cheat*`, `/api/mods*` and `/api/patch*` answer with one
+sentence saying so rather than failing in a way that looks like a bug.
+
+### Known limit — no dashboard tile on the PS4 yet
+
+The PS5 ships one: a fake-signed PS5 package embedded in the ELF and installed on boot. A PS4 tile is
+a different container and a different problem — a real application with a signed `eboot.bin`, needing
+an fpkg build tool and an fself signer, neither of which is in this repo. The PS5 experience is that
+a wrong app registration leaves a tile that crashes the console hard enough to need the jailbreak
+re-run, so it is not worth guessing at. `/api/open` covers the need in the meantime: one tap in the
+app opens the shop on the console's own screen.
+
+### Getting the payload to run at all
+
+The [ps4-payload-dev SDK](https://github.com/ps4-payload-dev/sdk) builds the payload, and its C
+runtime had to be patched or `main()` never ran — `payload_init()` calls `__kernel_init()` →
+`kexec(...)`, which GoldHEN does not provide, and treated the failure as fatal. Three edits in
+`sdk-goldhen.patch.py` make the kernel steps advisory; the build script applies them automatically
+and upstream is left unmodified. Symbol resolution stays fatal.
+
+The last of the three was the least obvious: `__rtld_init` restored the process jail
+*unconditionally*, failed, and returned −1 **after** every library had already loaded fine.
+
+Two more things worth writing down:
+
+* **Never `_exit()`.** GoldHEN injects the payload into a shared host process (`ScePartyDaemon`), so
+  `_exit()` tears that process down — including the copy of the payload just loaded to replace this
+  one. `/api/quit` closes the listening socket and returns instead.
+* **`RTLD_DEFAULT` is not enough.** Every BGFT symbol came back NULL from the default scope and
+  resolved fine from the handle of the library we opened. The first build of this file refused every
+  install with "BGFT is incomplete on this firmware", which was our own lookup being wrong.
+
+### Tooling
+
+* `ps4-app/onconsole/build-wsl.sh` — fetches and patches the SDK the first time, then runs **the same
+  gates the PS5 build runs** (`check_web.py`, `i18n_report.py --check`, `message_report.py --check`),
+  because both payloads embed the same UI and say the same sentences.
+* `tools/ps4_sync_sqmini.py --check` — a build gate that keeps the PS4's copy of the PS5 payload's
+  SQLite reader honest, rather than letting two copies drift.
+* `tools/stamp_version.py` now stamps the PS4 payload too. Left out, it drifted immediately: it was
+  written at 3.62.0 while everything else said 3.61.0, which is the exact failure that file exists to
+  prevent.
+* `tools/message_report.py` now reads both payloads.
+* `ps4-app/onconsole/README.md` — what was measured on the console, why each decision was made, and
+  the SCE codes behind each one.
+
+### Verified on hardware
+
+* The payload runs as root, serves the 762 KB shared UI on :8710, and hot-reloads over a running copy.
+* `app.db` read with real names and `APP_VER` versions; `/api/installed` lists only titles with their
+  own `app.pkg` on disk.
+* **Riptide GP2** (107,806,720 bytes) and **METAL SLUG XX** (532,217,856 bytes) installed end to end
+  from this PC's library — exact byte sizes on disk, `app.pbm`/`app.json`/`app.xml` present,
+  registered in `app.db`, `sceAppInstaller::AppInstallApp` → `0x00000000`.
+* The task sweep released exactly the three tasks the shop had stranded and left the console's own
+  nine alone.
+* A failed install reports as failed, is cleared by the next `spawn-cleanup`, and the install after it
+  starts normally.
+
+---
+
 ## [3.61.0] - 2026-09-04 - "The audit pass: 262 findings, and the sync that never converged" `[VERIFIED]`
 
 ### Where this release came from

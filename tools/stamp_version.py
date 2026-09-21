@@ -21,12 +21,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SERVER = os.path.join(ROOT, "companion", "server.py")
 SHOP_C = os.path.join(ROOT, "ps5-app", "onconsole", "server.c")
+# The PS4 payload carries its own SHOP_VERSION and is stamped from the same source. Left out, it
+# drifted immediately - it was written at 3.62.0 while everything else said 3.61.0, which is the
+# exact failure this file exists to prevent.
+PS4_C = os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c")
 INDEX = os.path.join(ROOT, "web", "index.html")
 HOMEBREW_JS = os.path.join(ROOT, "ps5-app", "homebrew.js")
 
 # (path, pattern with the version as group 2 between group 1 and group 3, human name)
 TARGETS = (
     (SHOP_C, rb'(#define\s+SHOP_VERSION\s+")([^"]+)(")', "ps5-app/onconsole/server.c SHOP_VERSION"),
+    (PS4_C, rb'(#define\s+SHOP_VERSION\s+")([^"]+)(")', "ps4-app/onconsole/server_ps4.c SHOP_VERSION"),
     (INDEX, rb'(var APP_VERSION=")([^"]*)(";)', "web/index.html APP_VERSION"),
     (HOMEBREW_JS, rb'("version"\s*:\s*")([^"]*)(")', "ps5-app/homebrew.js version"),
 )
