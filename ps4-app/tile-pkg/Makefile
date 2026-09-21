@@ -9,7 +9,7 @@
 # prefix homebrew uses.
 
 TITLE       := PKG MUTANT SHOP
-VERSION     := 01.03
+VERSION     := 01.04
 TITLE_ID    := PKGM00001
 CONTENT_ID  := IV0000-PKGM00001_00-PKGMUTANTSHOP001
 
@@ -20,7 +20,12 @@ CONTENT_ID  := IV0000-PKGM00001_00-PKGMUTANTSHOP001
 # SCE_NEEDED_MODULE entries were the cause; that does not survive checking - the modules named are
 # resident on the console and the toolchain ships working samples with the same shape. Matching the
 # known-good reference is free and cannot hurt, which is the whole argument for it.
-LIBS        := -lc -lkernel
+# -lSceSystemService is what makes HideSplashScreen and LoadExec real calls instead of NULL
+# pointers. An application sandbox cannot open /system/common/lib, so linking is the ONLY way
+# it reaches these - see the long note in pms/main.c. It is one extra needed module, and the
+# old theory that extra needed modules stopped this app launching is disproven: the launch
+# blocker was a missing BGFT task, and the app launches.
+LIBS        := -lc -lkernel -lSceSystemService
 
 ASSETS      := $(wildcard assets/**/*)
 LIBMODULES  := $(wildcard sce_module/*)

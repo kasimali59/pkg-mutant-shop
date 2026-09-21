@@ -48,70 +48,91 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <orbis/libkernel.h>
+#include <orbis/SystemService.h>
 
 #define SHOP_PORT 8710
-#define SHOP_URL  "http://127.0.0.1:8710/"
 
-/* ---------------------------------------------------------------- run-time symbols */
-
-static int  (*p_launch_browser)(const char *, int, int, int);
-static int  (*p_hide_splash)(void);
-static int  (*p_user_init)(void *);
-static int  (*p_user_term)(void);
-static int  (*p_notify)(int, void *, size_t, int);
-
-/* The notification struct, copied from the toolchain's own orbis/_types/kernel.h rather than
-   invented. It is only declared here because sceKernelSendNotificationRequest is resolved at run
-   time now, so the header's prototype is not in play. */
-typedef struct {
-    int  type, reqId, priority, msgId, targetId, userId, unk1, unk2, appId, errorNum, unk3;
-    unsigned char useIconImageUri;
-    char message[1024], iconUri[1024], unk[1024];
-} notify_req_t;
-
-/* sceKernelLoadStartModule + sceKernelDlsym rather than dlopen/dlsym: both live in libkernel,
-   which is the one module this eboot declares, so resolution itself can never be the thing that
-   stops the app starting. A handle of 0 or below means the module is not there. */
-static int load_module(const char *path) {
-    int res = 0;
-    int h = (int)sceKernelLoadStartModule(path, 0, 0, 0, 0, &res);
-    printf("[PMS] load %s -> handle=%d res=0x%08x\n", path, h, res);
-    return h;
-}
-
-static void *sym_of(int handle, const char *name) {
-    void *addr = NULL;
-    if (handle <= 0) return NULL;
-    if (sceKernelDlsym(handle, name, &addr) != 0) return NULL;
-    return addr;
-}
-
-static void resolve_everything(void) {
-    int ss = load_module("/system/common/lib/libSceSystemService.sprx");
-    int us = load_module("/system/common/lib/libSceUserService.sprx");
-    int lk = load_module("/system/common/lib/libkernel.sprx");
-
-    p_launch_browser = (int (*)(const char *, int, int, int))
-                       sym_of(ss, "sceSystemServiceLaunchWebBrowser");
-    p_user_init = (int (*)(void *))sym_of(us, "sceUserServiceInitialize");
-    p_user_term = (int (*)(void))sym_of(us, "sceUserServiceTerminate");
-    p_hide_splash = (int (*)(void))sym_of(ss, "sceSystemServiceHideSplashScreen");
-    p_notify = (int (*)(int, void *, size_t, int))
-               sym_of(lk, "sceKernelSendNotificationRequest");
-    printf("[PMS] resolved: browser=%p user_init=%p notify=%p\n",
-           (void *)p_launch_browser, (void *)p_user_init, (void *)p_notify);
-}
+/* ------------------------------------------------- calling things, and leaving without crashing
+ *
+ * NOTHING IS RESOLVED AT RUN TIME ANY MORE, because run-time resolution by absolute path cannot
+ * work from inside an application sandbox and the first successful launch proved it:
+ *
+ *     [PMS] load /system/common/lib/libSceSystemService.sprx -> handle=-2147352574 res=0x00000000
+ *     [PMS] resolved: browser=0 user_init=0 notify=0
+ *
+ * -2147352574 is 0x80020002, ORBIS_KERNEL_ERROR_ENOENT. The crash dump named the real location:
+ * this process had its system libraries mapped at /vm2LJNGVpN/common/lib/ - a per-sandbox random
+ * prefix - so /system/common/lib is simply not a path an application can see. Linking is how a
+ * sandboxed app reaches these functions; the loader then resolves them from wherever the sandbox
+ * actually keeps them.
+ *
+ * sceKernelSendNotificationRequest never needed any of that: it is a libkernel export declared in
+ * orbis/libkernel.h, and -lkernel was on the link line the whole time. It was being looked up
+ * through a handle that could never open.
+ *
+ * THE BROWSER CALL IS GONE. The toolchain declares `void sceSystemServiceLaunchWebBrowser();` -
+ * no url, no return - so the four-argument call this file used to make was a guess dressed up with
+ * a comment. Asking the shop's payload instead is measured working on this console (`/api/open`
+ * answered 200 and the browser came forward), and the payload is not sandboxed. One route that
+ * works beats two where one is invented.
+ */
 
 /* THE ICON FIELD STAYS ZERO. `useIconImageUri = 1` picks the form that draws an icon beside the
    text, and on this console family that form returns success and renders NOTHING - this project has
    been caught by it twice on the PS5. The shop's payload sends the plain form, measured working on
    this exact console, so this sends the identical thing. */
 static void notify(const char *text) {
-    if (!p_notify) return;
-    notify_req_t req;
+    OrbisNotificationRequest req;
     memset(&req, 0, sizeof(req));
     snprintf(req.message, sizeof(req.message), "%s", text);
-    p_notify(0, &req, sizeof(req), 0);
+    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
+
+/* ---- WHY THIS APP USED TO CRASH ON THE WAY OUT, and the two things that stop it
+ *
+ * The television showed an error to dismiss (CE-34878-0) every time, AFTER the shop had already
+ * opened. klog:
+ *
+ *     # A user thread receives a fatal signal
+ *     # signal: 12 (SIGSYS)   thread name: eboot.bin
+ *     # rip: 00000008000028bc   BrF: 0000000000406c20   BrT: 00000008000028b0
+ *
+ * SIGSYS is a system call this process is not allowed to make. The two branch registers say where
+ * from: BrF 0x406c20 is in this eboot's own text (the PLT), BrT 0x8000028b0 is in libkernel, and
+ * the fault is twelve bytes further in. That is the chain `return` out of main -> the CRT's exit ->
+ * _Exit -> _exit@plt -> libkernel's _exit -> its syscall, refused. An application sandbox does not
+ * get to call it.
+ *
+ * TWO LAYERS, and the first is what actually guarantees it:
+ *
+ *   1. DEFINE _Exit HERE. The toolchain's libc keeps _Exit, exit and _exit in three separate
+ *      archive members (verified: `ar t libc.a` lists _Exit.lo, exit.lo, _exit.lo), so our
+ *      definition satisfies exit's reference to _Exit and _exit.lo is never pulled in at all. The
+ *      faulting instruction is not merely unreached, it is not in the binary. No stray exit(),
+ *      abort() or `return` from main can find it again.
+ *   2. LEAVE THE WAY AN APPLICATION IS MEANT TO. sceSystemServiceLoadExec("exit", NULL) is the
+ *      documented way for a title to close itself and hand the user back to the system.
+ *
+ * If LoadExec is refused this parks instead of exiting. Parking is not lovely - the app sits
+ * suspended and shows nothing if you navigate back to it, and it has to be closed with the PS
+ * button - but it is quiet, and a silent oddity beats an error dialog after every single launch.
+ * The return code is logged so the next person knows which of the two actually happened. */
+static void park_forever(void) {
+    for (;;) sceKernelUsleep(60 * 1000000);
+}
+
+_Noreturn void _Exit(int ec) {
+    (void)ec;
+    /* No printf: stdio has already been torn down by the time exit() reaches here. */
+    sceSystemServiceLoadExec("exit", NULL);
+    park_forever();
+}
+
+static _Noreturn void leave(void) {
+    fflush(stdout);
+    int rc = (int)sceSystemServiceLoadExec("exit", NULL);
+    printf("[PMS] LoadExec(exit) rc=0x%08x - parking instead\n", (unsigned)rc);
+    park_forever();
 }
 
 /* ---------------------------------------------------------------- the shop */
@@ -169,24 +190,6 @@ static int ask_shop_to_open(void) {
     printf("[PMS] the shop answered /api/open: %.120s\n", rep);
     /* "launched":true is the shop saying the console took it. Anything else and we try ourselves. */
     return strstr(rep, "\"launched\":true") ? 0 : -1;
-}
-
-/* Opening the browser needs the user service first - the browser sample in the payload SDK treats
-   that as a prerequisite, and an application has not inherited a process that already did it.
-   FOUR ARGUMENTS: the published PS4 declaration is a stub taking none, the PS5 build of this shop
-   calls the same export with four and is proven on hardware, and extra arguments in registers are
-   harmless on this ABI while too few would leave stale registers to be read as parameters. */
-static int open_browser(const char *url) {
-    if (!p_launch_browser) return -1;
-    if (p_user_init) {
-        int rc = p_user_init(NULL);
-        printf("[PMS] user service rc=0x%08x\n", rc);
-    }
-    int rc = p_launch_browser(url, 0, 0, 0);
-    printf("[PMS] browser rc=0x%08x\n", rc);
-    sceKernelUsleep(3 * 1000000);
-    if (p_user_term) p_user_term();
-    return rc;
 }
 
 /* ------------------------------------------------------- starting the shop
@@ -262,11 +265,11 @@ static int send_payload(int port, int http) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[PMS] PKG MUTANT SHOP app starting\n");
-    resolve_everything();
     /* WITHOUT THIS THE CONSOLE SHOWS THE LOADING SCREEN AND NOTHING ELSE, which from the sofa is
        indistinguishable from an app that does not work. The toolchain's own samples call it first
-       thing; ours never did. */
-    if (p_hide_splash) p_hide_splash();
+       thing; ours never did - and until this build it was called through a pointer that was always
+       NULL, so it has never actually run. */
+    sceSystemServiceHideSplashScreen();
 
     int up = 0;
     for (int i = 0; i < 3 && !up; i++) {
@@ -277,10 +280,11 @@ int main(void) {
     if (up) {
         printf("[PMS] the shop is answering - opening it\n");
         notify("Opening PKG MUTANT SHOP");
-        /* the shop first (it is not sandboxed), ourselves second */
-        if (ask_shop_to_open() != 0 && open_browser(SHOP_URL) != 0)
+        /* ASKING THE SHOP IS THE ONLY ROUTE. It is not sandboxed and this is measured working on
+           the hardware; the app's own browser call was a guessed signature and is gone. */
+        if (ask_shop_to_open() != 0)
             notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
-        return 0;
+        leave();
     }
 
     /* NOT RUNNING - so start it. The package carries the shop, and handing it to a payload
@@ -297,18 +301,18 @@ int main(void) {
             if (shop_is_up()) {
                 printf("[PMS] the shop came up after %d second(s)\n", i + 1);
                 notify("Opening PKG MUTANT SHOP");
-                if (ask_shop_to_open() != 0 && open_browser(SHOP_URL) != 0)
+                if (ask_shop_to_open() != 0)
                     notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
-                return 0;
+                leave();
             }
         }
         notify("PKG MUTANT SHOP did not finish starting\n"
                "Try opening this again in a moment");
-        return 1;
+        leave();
     }
 
     notify("PKG MUTANT SHOP cannot start\n"
            "Nothing on this PS4 can load it right now - run the jailbreak again, then open this");
     sceKernelUsleep(6 * 1000000);
-    return 1;
+    leave();
 }

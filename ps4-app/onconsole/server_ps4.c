@@ -762,6 +762,10 @@ static void bgft_task_title(const char *dir, char *out, size_t outsz) {
 /* Stop and unregister one task. Stop first: unregistering a task that is still transferring is
    how you get a half-written package left on the drive. Both codes are ignored on purpose - a
    task that is already stopped answers non-zero and that is a success for our purposes. */
+/* Defined further down with the other title-id helpers; needed here so an install can release the
+   tasks of the title it is about to replace. */
+static void tid_from_cid(const char *cid, char *out, size_t outsz);
+
 static void bgft_release(OrbisBgftTaskId task) {
     if (task == BGFT_INVALID_TASK_ID) return;
     if (bgft_stop_fn)  bgft_stop_fn(task);
@@ -786,27 +790,27 @@ static void bgft_release(OrbisBgftTaskId task) {
  * It launched. So this sweep - written to stop the table filling up, which is a real measured
  * problem - was also quietly making every title it had installed unlaunchable, games included.
  *
- * The rule now: a task whose title actually has an app.pkg on disk is KEPT. Only tasks whose title
- * installed nothing (failed, abandoned, orphaned by a payload reload) is released on sight.
+ * The rule: a task whose title actually has an app.pkg on disk is KEPT - that is its launch ticket.
+ * Only tasks whose title installed nothing (failed, abandoned, orphaned by a payload reload) are
+ * released here, because those are pure waste.
  *
- * `reclaim` is how many launch tickets this pass is allowed to give up, and it is 0 everywhere
- * except one place: when register answers 0x80990086 the table really is full, and
- * bgft_install_url asks for ONE at a time and retries. One at a time matters - a console with
- * several of our titles installed should not have every icon stop working so that one new install
- * can start. Oldest task id first, because that is the closest thing to least-recently-installed
- * that the table offers. Every reclaim is written to the install log, so a title that stops opening
- * has a recorded reason instead of being a mystery. */
-static int bgft_sweep_ours(OrbisBgftTaskId keep, int reclaim) {
+ * WHAT DOES NOT HAPPEN HERE IS RECLAIMING UNDER "TABLE PRESSURE", because there is no measured
+ * table pressure. This project believed for a long time that `/user/bgft/task` had about twelve
+ * slots and that 0x80990086 meant it was full. klog says otherwise, in words:
+ *
+ *     [BGFT] ERROR: [2283] SCE_BGFT_ERROR_CONTENT_ALREADY_DOWNLOADING
+ *
+ * printed for the very register that answered 0x80990086. The conflict is PER CONTENT ID, not a
+ * global count - which is also why releasing tasks always appeared to "make room": the task being
+ * released was the one holding that content id. Measured since: registering worked fine with
+ * thirteen directories in the table. So nothing is given up to make room, and no title loses its
+ * place on the home screen so that another can install. See bgft_release_title(). */
+static int bgft_sweep_ours(OrbisBgftTaskId keep) {
     if (!bgft_unreg_fn) return 0;
     DIR *d = opendir(BGFT_TASK_ROOT);
     if (!d) return 0;
 
-    /* Collected rather than released as we go: reclaiming wants the OLDEST first, which cannot be
-       known until the whole directory has been read. 64 is far above the ~12 slots the console
-       actually has. */
-    enum { CAND_MAX = 64 };
-    long cand[CAND_MAX];
-    int  ncand = 0, kept = 0;
+    int freed = 0, kept = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
@@ -819,40 +823,58 @@ static int bgft_sweep_ours(OrbisBgftTaskId keep, int reclaim) {
         if (!bgft_task_is_ours(e->d_name)) continue;
         char tid[16];
         bgft_task_title(e->d_name, tid, sizeof(tid));
-        int is_ticket = tid[0] && installed_app_pkg(tid) > 0;
-        if (is_ticket && reclaim <= 0) { kept++; continue; }
-        if (ncand < CAND_MAX) cand[ncand++] = id;
-    }
-    closedir(d);
-
-    /* insertion sort, ascending - ncand is at most a couple of dozen */
-    for (int i = 1; i < ncand; i++) {
-        long v = cand[i];
-        int j = i - 1;
-        while (j >= 0 && cand[j] > v) { cand[j + 1] = cand[j]; j--; }
-        cand[j + 1] = v;
-    }
-
-    int freed = 0, tickets = 0;
-    for (int i = 0; i < ncand; i++) {
-        char dir[16];
-        snprintf(dir, sizeof(dir), "%08lx", cand[i]);
-        char tid[16];
-        bgft_task_title(dir, tid, sizeof(tid));
-        int is_ticket = tid[0] && installed_app_pkg(tid) > 0;
-        if (is_ticket) {
-            if (tickets >= reclaim) continue;
-            tickets++;
-            ilog("install: no free task slots - giving up %s's place on the home screen so this "
-                 "install can start. Reinstall it to get the icon working again", tid);
-        }
-        bgft_release((OrbisBgftTaskId)cand[i]);
+        if (tid[0] && installed_app_pkg(tid) > 0) { kept++; continue; }   /* its launch ticket */
+        bgft_release((OrbisBgftTaskId)id);
         freed++;
     }
-    if (freed - tickets > 0)
+    closedir(d);
+    if (freed)
         ilog("install: released %d task%s of ours that installed nothing%s",
-             freed - tickets, (freed - tickets) == 1 ? "" : "s",
+             freed, freed == 1 ? "" : "s",
              kept ? " (kept the ones their titles need to open)" : "");
+    return freed;
+}
+
+/* Release the tasks belonging to ONE title, which is what has to happen before that same title is
+ * installed again.
+ *
+ * Keeping a finished task is what makes a title launchable, and it is also what makes BGFT refuse
+ * to register the title a second time. Measured, updating our own app from 01.03 to 01.04 with its
+ * ticket in place:
+ *
+ *     register failed rc=0x80990088
+ *     [BGFT] ERROR: [2289] SCE_BGFT_ERROR_SAME_APPLICATION_ALREADY_INSTALLED
+ *
+ * Our register call carries a content id and a size, not a version, so BGFT cannot tell an update
+ * from a pointless reinstall - it sees a task saying this application is already here and stops.
+ * Every earlier update succeeded only because the old sweep had just deleted that task, which is
+ * also what left the title unlaunchable afterwards.
+ *
+ * So the ticket for the title being installed goes, and nothing else does. It is about to be
+ * replaced by the new install's own task, so nothing is lost even if the install then fails - and
+ * no OTHER title pays for it. */
+static int bgft_release_title(const char *tid) {
+    if (!bgft_unreg_fn || !tid || !tid[0]) return 0;
+    DIR *d = opendir(BGFT_TASK_ROOT);
+    if (!d) return 0;
+    int freed = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char *end = NULL;
+        long id = strtol(e->d_name, &end, 16);
+        if (!end || *end || id < 0 || id > 0x7fffffff) continue;
+        if (!bgft_task_is_ours(e->d_name)) continue;
+        char t[16];
+        bgft_task_title(e->d_name, t, sizeof(t));
+        if (strcmp(t, tid)) continue;
+        bgft_release((OrbisBgftTaskId)id);
+        freed++;
+    }
+    closedir(d);
+    if (freed)
+        ilog("install: %s is being installed again - released its %d old task%s first",
+             tid, freed, freed == 1 ? "" : "s");
     return freed;
 }
 
@@ -876,11 +898,15 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
     char fallback[16] = {0};
     if (!cid || !*cid) pkg_content_id_from_url_name(label && *label ? label : uri, fallback, sizeof(fallback));
 
-    /* Always before registering, never after a failure. The table fills up silently and a sweep is
-       cheap and idempotent, so the shop cannot be stopped by its own history. This pass only takes
-       back tasks that installed nothing; the ones their titles need in order to open are kept, and
-       are only reclaimed below if the console actually runs out of room. */
-    bgft_sweep_ours(BGFT_INVALID_TASK_ID, 0);
+    /* Always before registering, never after a failure: a sweep is cheap and idempotent, so the
+       shop cannot be stopped by its own history. Two different things happen here, and conflating
+       them is what made this hard to see. The sweep drops tasks that installed nothing. The release
+       drops the tasks of the ONE title about to be installed, because BGFT will not register a
+       content id that already has a task - and nothing else is touched. */
+    bgft_sweep_ours(BGFT_INVALID_TASK_ID);
+    char want_tid[16] = {0};
+    tid_from_cid(cid, want_tid, sizeof(want_tid));
+    if (want_tid[0]) bgft_release_title(want_tid);
 
     OrbisBgftDownloadParam p;
     memset(&p, 0, sizeof(p));
@@ -898,15 +924,18 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
 
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
     int rc = bgft_register_fn(&p, &task);
-    /* THE TABLE IS FULL, AND ONLY NOW IS IT WORTH GIVING UP LAUNCH TICKETS - one at a time, and
-       only as many as it takes. Most slots on a real console belong to the console itself (measured
-       here: 9 of 11, eight for one title plus a system update) and none of those are ours to touch,
-       so there may be nothing left to give and this loop simply ends. An install that cannot start
-       is worse than an icon that will not open, but only just, so it is paid for a ticket at a
-       time rather than by clearing the board. */
-    for (int give = 1; give <= 4 && (unsigned)rc == 0x80990086u; give++) {
-        if (bgft_sweep_ours(BGFT_INVALID_TASK_ID, 1) <= 0) break;
-        rc = bgft_register_fn(&p, &task);
+    /* TWO REFUSALS WORTH SAYING IN WORDS, because their codes have been misread here before.
+       0x80990086 is CONTENT_ALREADY_DOWNLOADING and 0x80990088 is SAME_APPLICATION_ALREADY_INSTALLED
+       - both mean "a task for this content id is in the way", and the release above should already
+       have cleared ours. Reaching here means the task belongs to something else, most likely the
+       console's own Store download for the same title, and that is not ours to remove. */
+    if ((unsigned)rc == 0x80990086u || (unsigned)rc == 0x80990088u) {
+        snprintf(err, errsz,
+                 "The PS4 is already handling this title itself - check its Downloads, cancel what "
+                 "is there, then try again");
+        ilog("install: refused rc=0x%08X (a task for %s already exists and is not ours) id=%.48s",
+             (unsigned)rc, want_tid[0] ? want_tid : "this title", cid ? cid : "");
+        return -2;
     }
     if (rc != 0) {
         /* NO CODE IN THE SENTENCE. It is on screen, often on a television, and it means nothing
@@ -1878,7 +1907,7 @@ static void install_local_path(int fd, const char *local) {
    ps4-app/onconsole/build-wsl.sh now refuses to build when these two disagree. Bump BOTH whenever
    ps4-app/tile-pkg changes. Zero-padded NN.NN, which is the form every other title on the console
    uses. */
-#define PS4_TILE_VER   "01.03"
+#define PS4_TILE_VER   "01.04"
 #define TILE_PKG_DISK  SHOP_DATA_DIR "/pms-tile.pkg"
 
 /* "01.02" -> 102, "1.00" -> 100. Format-tolerant on purpose: the console stores whatever the
@@ -2439,7 +2468,7 @@ static void handle_get(int fd, const char *rawpath) {
         pthread_mutex_unlock(&g_job_lock);
         /* The companion calls this between installs. Sweeping here is what clears tasks left by a
            payload reload or a crash, which no longer have a job to finish them. */
-        int freed = bgft_sweep_ours(live, 0);
+        int freed = bgft_sweep_ours(live);
         char out[96];
         snprintf(out, sizeof(out), "{\"ok\":true,\"cleaned\":true,\"freed\":%d}", freed);
         send_json(fd, out);
