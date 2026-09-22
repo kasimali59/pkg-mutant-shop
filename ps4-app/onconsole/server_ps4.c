@@ -2033,25 +2033,50 @@ static int tile_bytes_match(void) {
 
 /* ONE REPAIR ATTEMPT PER BUILD. If some future firmware re-wraps app.pkg as it installs it, the
  * compare above would differ on every boot and this shop would reinstall its own icon on every
- * boot. The stamp names the version a byte-repair was already tried for, so that costs one
- * install, once. */
+ * boot. The stamp records which build already tried, so that costs one install, once.
+ *
+ * IT HAS TO IDENTIFY THE BUILD, NOT THE VERSION NUMBER. The first version of this wrote
+ * PS4_TILE_VER alone, and that is not enough: the package changes whenever anything inside it
+ * changes - the lite payload it carries, a rebuilt eboot - while the version stays put for a fix
+ * that does not deserve a bump. Measured immediately: a rebuilt 01.04 package was refused with
+ * "still differs after one repair" and the console kept the older 01.04 bytes for ever.
+ *
+ * So the stamp is the version plus a fingerprint of the package this ELF actually carries. A new
+ * build is a new fingerprint and gets its one attempt; the same build hitting the same mismatch
+ * twice is the runaway case the stamp exists to stop, and still stops. FNV-1a over a copy already
+ * in memory - no file read, and it runs once at boot. */
 #define TILE_STAMP SHOP_DATA_DIR "/tile-repair.stamp"
+
+static void tile_build_id(char *out, size_t outsz) {
+    size_t len = (size_t)(tb_ps4_tile_pkg_end - tb_ps4_tile_pkg);
+    unsigned long long h = 1469598103934665603ULL;          /* FNV-1a 64 offset basis */
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned long long)tb_ps4_tile_pkg[i];
+        h *= 1099511628211ULL;
+    }
+    snprintf(out, outsz, "%s-%zu-%016llx", PS4_TILE_VER, len, h);
+}
+
 static int tile_repair_tried(void) {
+    char want[64];
+    tile_build_id(want, sizeof(want));
     int f = open(TILE_STAMP, O_RDONLY);
     if (f < 0) return 0;
-    char b[32] = {0};
+    char b[64] = {0};
     ssize_t n = read(f, b, sizeof(b) - 1);
     close(f);
     if (n <= 0) return 0;
     for (int i = 0; b[i]; i++)
         if (b[i] == '\n' || b[i] == '\r') { b[i] = 0; break; }
-    return !strcmp(b, PS4_TILE_VER);
+    return !strcmp(b, want);
 }
 static void tile_repair_mark(void) {
+    char id[64];
+    tile_build_id(id, sizeof(id));
     mkdir(SHOP_DATA_DIR, 0777);
     int f = open(TILE_STAMP, O_WRONLY | O_CREAT | O_TRUNC, 0777);
     if (f < 0) return;
-    (void)!write(f, PS4_TILE_VER, strlen(PS4_TILE_VER));
+    (void)!write(f, id, strlen(id));
     close(f);
 }
 
