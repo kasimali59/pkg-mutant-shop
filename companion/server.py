@@ -8759,12 +8759,37 @@ def main():
                 # PS5-only lanes should talk to.
                 if plat != "ps4":
                     cfg["ps5_ip"] = newip
+                added = False
                 if cfg.get("consoles"):
-                    # Exactly one entry here (see the guard above), so this updates the console the
-                    # user already has rather than every console they have.
-                    cfg["consoles"][0]["ip"] = newip
-                    if plat:
-                        cfg["consoles"][0]["platform"] = plat
+                    # Exactly one entry here (see the guard above).
+                    #
+                    # A DIFFERENT KIND OF CONSOLE IS A SECOND CONSOLE, NOT A REPLACEMENT. This used
+                    # to overwrite the one entry's address and platform unconditionally, so a
+                    # PS5 that was merely switched off, with the PS4 awake on the LAN, had its
+                    # config entry quietly turned into the PS4 - address, platform and all - and
+                    # /api/health then reported the PS4's address as ps5_ip. Measured: a config
+                    # holding one PS5 at 10.0.0.99 came back as a PS4 at 10.0.0.87.
+                    #
+                    # Overwriting is still right for the case it was written for - the SAME console
+                    # having moved to a new address. It is only wrong across platforms.
+                    c0 = cfg["consoles"][0]
+                    have = str(c0.get("platform") or "").lower()
+                    if plat and have and plat != have:
+                        used = {str(c.get("id") or "") for c in cfg["consoles"]}
+                        cid = plat
+                        n = 0
+                        while cid in used:
+                            n += 1
+                            cid = "%s-%d" % (plat, n)
+                        cfg["consoles"].append({"id": cid,
+                                                "name": plat.upper(),
+                                                "ip": newip, "platform": plat,
+                                                "ftp_port": cfg["ftp"].get("port", 2121)})
+                        added = True
+                    else:
+                        c0["ip"] = newip
+                        if plat:
+                            c0["platform"] = plat
                 else:
                     cfg["consoles"] = [{"id": "ps4" if plat == "ps4" else "ps5",
                                         "name": "PS4" if plat == "ps4" else "PS5",
@@ -8775,14 +8800,15 @@ def main():
                 # enough to try for this run, but must not outlive it - that is how the console
                 # address silently became a peer PC's and stayed there.
                 label = "PS4" if plat == "ps4" else "PS5"
-                if confirmed and unchanged:
+                if confirmed and unchanged and not added:
                     print(" %s at %s is not answering yet - keeping that address" % (label, newip))
                 elif confirmed:
                     try:
                         save_config(cfg)
                     except Exception:
                         pass
-                    print(" Auto-found %s at %s" % (label, newip))
+                    print(" Auto-found %s at %s%s" % (label, newip,
+                          " - added as a second console; the one you had is untouched" if added else ""))
                 else:
                     print(" Trying %s as the console for this run (it did not confirm it is one, "
                           "so this is not being saved)" % newip)

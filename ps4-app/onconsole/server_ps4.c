@@ -75,6 +75,18 @@
 #endif
 #define SHOP_VERSION "3.62.0"
 
+/* WHEN THIS PROCESS STARTED SERVING, so "did the shop restart?" is a question with an answer.
+ * The PS4 shop lives inside a shared system daemon rather than a process of its own, and the
+ * reasonable worry is that something - closing the browser, launching a game, resting the console -
+ * quietly takes it down and the port with it. Reported by /api/health as `uptime_s`, so anyone can
+ * tell a shop that has been up for an hour from one that restarted thirty seconds ago without
+ * reading a log over FTP. It is also the honest way to answer that worry: measured, not assumed. */
+static long long g_boot_ms = 0;
+/* Requests answered since this process started serving. Reported beside uptime_s: a shop that has
+   served thousands of requests and been up for an hour is provably the same one that was up
+   before, which is what makes "it closed with the browser" answerable. */
+static volatile long long g_conns_served = 0;
+
 #define SHOP_DATA_DIR  "/data/pkg-mutant-shop"
 #define WEB_ROOT       SHOP_DATA_DIR "/web"
 #define INSTALL_LOG    SHOP_DATA_DIR "/install.log"
@@ -1007,19 +1019,35 @@ static void job_refresh(void) {
         snprintf(g_job.state, sizeof(g_job.state), "error");
         /* WHY IT STOPPED, WHEN WE CAN ACTUALLY TELL.
            A console that can reach PlayStation Network checks every title for an update before it
-           downloads anything, and when it finds one it builds a task with a SECOND piece in it - the
-           patch - which it then cannot fetch, because the package it was given came from here and
-           not from the store. The fingerprint is unmistakable and it is ours to measure: BGFT asked
-           for more bytes than the package contains. Measured on 13.52 with a 227,540,992-byte game
-           whose store version was newer: the task total came back 238,419,968, the extra 10,878,976
-           being the update, and the install ended with nothing written.
-           Anything else gets the plain sentence - inventing a cause we have not checked is how a
-           protective refusal once got described as something the user should fix by reloading. */
-        if (onDisk <= 0 && want > 0 && g_job.seen_total > want + (1LL << 20))
+           downloads anything. When it finds one it tries to MERGE that update into the install, and
+           it cannot fetch it - the package came from here, not from the store - so it abandons the
+           whole thing with nothing written.
+
+           0x80990004 IS THAT CASE, and it is measured twice on this console rather than guessed.
+           The second time the console spelled the sequence out in klog:
+
+               [ScePatchChecker] check (title_id='CUSA14409', app_version='01.00'): status=1
+               [BGFT] Patch Check [UP2015-CUSA14409_00-CASTLECRASHERSNA]
+               [PATCH MERGE] : CheckDeltaPatchInfo error. [0x80f00640]
+               Task 0000007c ... ended (state=0,runstate=2,error=0x80990004)
+
+           status=1 is PlayStation Network saying a newer version exists. The first time, the only
+           fingerprint we had was arithmetic - BGFT asked for 238,419,968 bytes against a
+           227,540,992-byte package, the difference being the update - and that test is kept because
+           it catches the case where the code differs.
+
+           It still has to be paired with "nothing landed on disk": a code on its own is not a
+           diagnosis, and this project has twice shipped a confident wrong one. Anything else gets
+           the plain sentence. */
+        int psn_patch_check = onDisk <= 0 &&
+                              ((unsigned)err == 0x80990004u ||
+                               (want > 0 && g_job.seen_total > want + (1LL << 20)));
+        if (psn_patch_check)
             snprintf(g_job.msg, sizeof(g_job.msg),
                      "The PS4 found a newer version of this game on PlayStation Network and tried to "
-                     "merge it instead of installing this package. Stop the console reaching "
-                     "PlayStation Network, or install the update package as well, then try again");
+                     "merge it instead of installing this package. Add the update package to your "
+                     "library and install it too, or stop the console reaching PlayStation Network, "
+                     "then try again");
         else
             snprintf(g_job.msg, sizeof(g_job.msg),
                      "The console stopped this install. The install log on the PS4 says why");
@@ -2182,9 +2210,11 @@ static void handle_get(int fd, const char *rawpath) {
                  "\"connected\":true,\"version\":\"%s\",\"built\":\"%s %s\",\"ps5_ip\":\"%s\","
                  "\"lan_ip\":\"%s\",\"companion_port\":%d,\"shop_port\":%d,"
                  "\"engine\":\"pms-bgft\",\"engine_ready\":%s,\"ftp_online\":true,\"ftp_port\":2121,"
-                 "\"shadowmount\":false,\"shadowmount_port\":0,\"running_title\":\"\"}",
+                 "\"shadowmount\":false,\"shadowmount_port\":0,\"running_title\":\"\","
+                 "\"uptime_s\":%lld,\"conns\":%lld}",
                  SHOP_VERSION, __DATE__, __TIME__, lan_ip_str(), lan_ip_str(), PORT, PORT,
-                 g_bgft_ready ? "true" : "false");
+                 g_bgft_ready ? "true" : "false",
+                 g_boot_ms ? (now_ms() - g_boot_ms) / 1000 : 0, g_conns_served);
         send_json(fd, out);
         return;
     }
@@ -2899,14 +2929,26 @@ int main(void) {
        its own thread - a console that is mid-install must not hold up the shop opening. */
     tile_start();
 
+    g_boot_ms = now_ms();
+    long long accept_fails = 0;
     while (!g_quit) {
         int cl = accept(srv, 0, 0);
         if (cl < 0) {
             /* accept() failing while g_quit is set IS the handover - the quit handler closed this
-               socket on purpose so a newly loaded build can bind. Anything else is transient. */
+               socket on purpose so a newly loaded build can bind. */
             if (g_quit) break;
+            /* ANYTHING ELSE IS TRANSIENT - BUT `continue` ON ITS OWN IS A BUSY SPIN, and this code
+               runs inside a SHARED system daemon. A persistent failure (out of descriptors, say)
+               would have pinned a console's core at 100% with no way to tell why. Back off, and say
+               so once rather than every time. */
+            if (++accept_fails == 1 || (accept_fails % 200) == 0)
+                ilog("serve: accept failed %lld time(s) - still listening on :%d",
+                     accept_fails, (int)PORT);
+            usleep(20 * 1000);
             continue;
         }
+        accept_fails = 0;
+        g_conns_served++;
         /* One thread per connection: a multi-GB upload or a slow client must never stop the UI
            from answering, which is the trap the PS5 build hit with a single accept loop. */
         conn_t *c = (conn_t *)malloc(sizeof(conn_t));
