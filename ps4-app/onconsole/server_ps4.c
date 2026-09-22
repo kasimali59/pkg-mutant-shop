@@ -1872,7 +1872,13 @@ static void serve_pkgfile(int fd, const char *path, const char *req, int head_on
     while (t[k] && t[k] != '?' && t[k] != '/' && k + 1 < sizeof(tok)) { tok[k] = t[k]; k++; }
     tok[k] = 0;
     char local[1024];
-    if (!tok[0] || !localpkg_path(atoi(tok), local, sizeof(local))) {
+    /* DIGITS ONLY. atoi() answers 0 for anything it cannot parse, so /pkgfile/anything served
+       whatever package happened to be token 0 - to any caller, and the installer is not the only
+       thing that can ask. */
+    int all_digits = 1;
+    for (const char *q = tok; *q; q++)
+        if (*q < '0' || *q > '9') { all_digits = 0; break; }
+    if (!tok[0] || !all_digits || !localpkg_path(atoi(tok), local, sizeof(local))) {
         send_status(fd, "404 Not Found", "text/plain", "no such package");
         return;
     }
@@ -3122,7 +3128,16 @@ static void handle_get(int fd, const char *rawpath) {
     }
     if (!strcmp(path, "/api/quit")) {
         send_json(fd, "{\"ok\":true,\"bye\":true}");
-        close(fd);
+        /* THE CONNECTION IS NOT CLOSED HERE. conn_thread owns this descriptor and closes it when it
+           returns, so closing it as well was a DOUBLE CLOSE - and in this process that is not a
+           harmless untidiness. GoldHEN injects every payload into the SAME host process, so an old
+           instance and the new one that just asked it to stand down share one descriptor table:
+           the second close can free a number the host, another thread, or the NEW INSTANCE'S
+           LISTENING SOCKET has since been given.
+           That is the shape of a failure measured here - 28,000 consecutive accept() failures with
+           the port still open, every browser request answered by a reset, and no way to reload
+           because the loader had gone. The reply is self-delimiting (Content-Length and
+           Connection: close), so nothing is lost by letting the one owner close it. */
         ilog("quit: handing :%d over", PORT);
         /* NEVER _exit() HERE. The PS5 build can, because its payload owns its process. GoldHEN
            injects us INTO A SHARED HOST PROCESS (ScePartyDaemon), so _exit() tears down that whole
@@ -3453,9 +3468,44 @@ int main(void) {
                runs inside a SHARED system daemon. A persistent failure (out of descriptors, say)
                would have pinned a console's core at 100% with no way to tell why. Back off, and say
                so once rather than every time. */
+            /* SAY WHY, AND THEN FIX IT. The first version of this logged a count and nothing else,
+               and the count is what caught a real failure - 22,800 consecutive failures with the
+               port still open, so the kernel completed every handshake and this process could not
+               take a single one. From the outside that is a browser saying the connection was
+               forcibly closed, and from here it was invisible apart from the count. errno names it.
+
+               A LISTENING SOCKET THAT CANNOT ACCEPT IS NOT WORTH KEEPING. After a run of failures
+               this closes it and binds a new one, which recovers from a descriptor that has been
+               closed underneath us or a listener the host has broken - the shop coming back by
+               itself rather than waiting for someone to notice and reload it. If the rebind also
+               fails it keeps the old socket and carries on trying, because a shop with a wounded
+               listener is still better than one with none. */
+            int e = errno;
             if (++accept_fails == 1 || (accept_fails % 200) == 0)
-                ilog("serve: accept failed %lld time(s) - still listening on :%d",
-                     accept_fails, (int)PORT);
+                ilog("serve: accept failed %lld time(s) on :%d - errno %d (%s)",
+                     accept_fails, (int)PORT, e, strerror(e));
+            if ((accept_fails % 50) == 0) {
+                int fresh = socket(AF_INET, SOCK_STREAM, 0);
+                if (fresh >= 0) {
+                    int opt = 1;
+                    setsockopt(fresh, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                    struct sockaddr_in a;
+                    memset(&a, 0, sizeof(a));
+                    a.sin_family = AF_INET;
+                    a.sin_addr.s_addr = htonl(INADDR_ANY);
+                    a.sin_port = htons(PORT);
+                    if (bind(fresh, (struct sockaddr *)&a, sizeof(a)) == 0 && listen(fresh, 16) == 0) {
+                        ilog("serve: the listening socket was not accepting - replaced it "
+                             "after %lld failure(s)", accept_fails);
+                        close(srv);
+                        srv = fresh;
+                        g_srv = fresh;
+                        accept_fails = 0;
+                        continue;
+                    }
+                    close(fresh);
+                }
+            }
             usleep(20 * 1000);
             continue;
         }

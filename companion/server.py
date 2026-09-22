@@ -236,6 +236,10 @@ DEFAULT_CONFIG = {
     "sources": [],
     "queue": {"max_parallel": 2, "allow_parallel_per_console": False},
     "companion": {"host": "0.0.0.0", "port": 8710},
+    # The DNS answer for the consoles. A jailbroken PS4 that can reach PlayStation Network refuses
+    # to install anything the Store has an update for, and deletes fake-signed retail titles on
+    # restart - both measured. See DnsBlocker. Point the console's DNS at this PC to use it.
+    "psn_block": {"enabled": True, "listen_ip": "", "upstream": "1.1.1.1", "extra_blocked": []},
     "drives": ["internal", "ext0", "ext1", "usb0", "usb1", "usb2", "usb3", "usb4", "usb5", "usb6", "usb7"],
     "maintenance": {"auto_rescan": True, "rescan_interval_sec": 10, "rescan_settle_sec": 3,
                     "temp_sweep_age_sec": 3600},
@@ -4809,6 +4813,176 @@ class Fleet:
         return [results.get(c["id"], dict(c, online=False)) for c in self.consoles]
 
 
+
+# --------------------------------------------------------------------------- #
+# PSN blocker - a DNS server that answers everything except PlayStation        #
+# --------------------------------------------------------------------------- #
+#
+# WHY THIS IS IN A GAME INSTALLER AT ALL.
+#
+# A jailbroken PS4 that can reach PlayStation Network does two things that make it unusable as a
+# homebrew console, and both were measured on the owner's machine rather than read about:
+#
+#   * IT REFUSES TO INSTALL. Before downloading anything the console asks PSN whether the title has
+#     a newer version. When it finds one it builds a task with a second piece in it - the update -
+#     fetches the package it was given, cannot fetch the update, and abandons the whole install.
+#     Bluey's Quest for the Gold Pen: a 737,869,824-byte package, the console demanded 1,348,665,344,
+#     and gave up at 89%. Castle Crashers Remastered: the same at 2%. Riptide GP2 installed first
+#     time, because the Store has no newer version of it. That is the entire difference.
+#   * IT DELETES WHAT IS ALREADY INSTALLED. After a restart, every fake-signed RETAIL title was gone
+#     from /user/app, /user/appmeta and app.db - three of them - while the owner's own Store game and
+#     our homebrew-prefixed app survived untouched.
+#
+# THE OBVIOUS FIX MAKES THINGS WORSE. Setting the console's DNS to 127.0.0.1 stops it reaching PSN
+# and also stops it reaching everything else, including our own page on the LAN: the console's
+# connection check fails and the browser then answers WV-33920-7 for every address, IP or not.
+# A public "update blocker" DNS has the same shape of problem - it is someone else's server, it may
+# be down, and it decides for you what is blocked.
+#
+# So the companion answers DNS itself. Sony's names get NXDOMAIN; everything else is forwarded to a
+# real resolver and relayed back untouched. The console keeps working - browser, LAN, our page - and
+# simply cannot find PlayStation Network. It also cannot find a system update, which is what the
+# owner wanted anyway.
+#
+# It listens on the LAN address rather than 0.0.0.0 on purpose: Windows already has something on
+# 0.0.0.0:53 (svchost) on this machine, and binding the specific address both coexists with it and
+# keeps this off the loopback interface. A bind that fails is logged and the rest of the app carries
+# on - a game installer must not refuse to start because a side feature could not open a port.
+PSN_BLOCK_SUFFIXES = (
+    "playstation.net",
+    "playstation.com",
+    "sonyentertainmentnetwork.com",
+    "scea.com",
+    "scee.com",
+    "np.community.playstation.net",
+)
+
+
+class DnsBlocker(threading.Thread):
+    """Answers DNS for the consoles: NXDOMAIN for Sony, forwarded for everything else."""
+
+    daemon = True
+
+    def __init__(self, cfg):
+        threading.Thread.__init__(self, name="dns-blocker")
+        self.cfg = cfg
+        b = cfg.get("psn_block") or {}
+        self.enabled = bool(b.get("enabled", True))
+        self.listen_ip = str(b.get("listen_ip") or "") or None
+        self.upstream = str(b.get("upstream") or "1.1.1.1")
+        self.extra = tuple(x.lower().strip(".") for x in (b.get("extra_blocked") or []) if x)
+        self.sock = None
+        self.bound = None
+        self.blocked_count = 0
+        self.passed_count = 0
+        self.last_blocked = ""
+        self.error = ""
+
+    # ---- wire format, only as much of it as this needs
+    @staticmethod
+    def _qname(data):
+        """The queried name, and the offset just past it. ('' , 0) when it cannot be read."""
+        try:
+            i, parts = 12, []
+            while True:
+                n = data[i]
+                if n == 0:
+                    i += 1
+                    break
+                if n & 0xC0:                      # a pointer has no business in a question
+                    return "", 0
+                parts.append(data[i + 1:i + 1 + n].decode("ascii", "replace"))
+                i += 1 + n
+                if i > len(data) or len(parts) > 40:
+                    return "", 0
+            return ".".join(parts).lower(), i
+        except Exception:
+            return "", 0
+
+    def _is_blocked(self, name):
+        for suf in PSN_BLOCK_SUFFIXES + self.extra:
+            if name == suf or name.endswith("." + suf):
+                return True
+        return False
+
+    @staticmethod
+    def _nxdomain(data, qend):
+        """The same question back with RCODE 3. Echoing the question is what makes a resolver
+        accept the answer rather than retry it forever."""
+        ident = data[0:2]
+        rd = data[2] & 0x01                        # keep the caller's recursion-desired bit
+        flags = bytes([0x81 | 0x00, 0x80 | 0x03]) if rd else bytes([0x80, 0x03])
+        head = ident + flags + b"\x00\x01" + b"\x00\x00" + b"\x00\x00" + b"\x00\x00"
+        return head + data[12:qend + 4]
+
+    def _forward(self, data):
+        up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        up.settimeout(3.0)
+        try:
+            up.sendto(data, (self.upstream, 53))
+            reply, _ = up.recvfrom(4096)
+            return reply
+        finally:
+            up.close()
+
+    def run(self):
+        if not self.enabled:
+            return
+        ip = self.listen_ip or _lan_ip()
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            srv.bind((ip, 53))
+            srv.settimeout(1.0)
+        except Exception as e:
+            self.error = str(e)
+            print(" PSN blocker: could not listen on %s:53 (%s) - point the console's DNS "
+                  "somewhere else, or turn this off" % (ip, e))
+            return
+        self.sock, self.bound = srv, ip
+        print(" PSN blocker: answering DNS on %s:53 - PlayStation Network is unreachable for any "
+              "console pointed here, everything else is forwarded to %s" % (ip, self.upstream))
+        while True:
+            try:
+                data, peer = srv.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except Exception:
+                time.sleep(0.2)
+                continue
+            if len(data) < 13:
+                continue
+            name, qend = self._qname(data)
+            try:
+                if name and self._is_blocked(name):
+                    self.blocked_count += 1
+                    self.last_blocked = name
+                    srv.sendto(self._nxdomain(data, qend), peer)
+                else:
+                    self.passed_count += 1
+                    srv.sendto(self._forward(data), peer)
+            except Exception:
+                # A forward that fails is not worth an answer we made up.
+                pass
+
+    def status(self):
+        return {"enabled": self.enabled, "listening_on": self.bound, "upstream": self.upstream,
+                "blocked": self.blocked_count, "forwarded": self.passed_count,
+                "last_blocked": self.last_blocked, "error": self.error,
+                "suffixes": list(PSN_BLOCK_SUFFIXES) + list(self.extra)}
+
+
+def _lan_ip():
+    """This machine's address on the LAN - the one a console can reach."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "0.0.0.0"
+    finally:
+        s.close()
+
+
 # --------------------------------------------------------------------------- #
 # install queue - parallel, per-console serialized, unified real progress      #
 # --------------------------------------------------------------------------- #
@@ -6721,6 +6895,13 @@ class Handler(BaseHTTPRequestHandler):
                     ps5 = devs                              # first console that answered
             return self._json({"pc": enumerate_pc_drives(), "ps5": ps5, "consoles": consoles,
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", [])})
+        if path == "/api/psn-block":
+            d = getattr(srv, "dns", None)
+            out = d.status() if d else {"enabled": False, "listening_on": None,
+                                        "error": "not started"}
+            out["ok"] = True
+            out["set_console_dns_to"] = out.get("listening_on") or _lan_ip()
+            return self._json(out)
         if path.startswith("/api/verify/"):                            # [B7] structural completeness check
             raw = unquote(path[len("/api/verify/"):])
             rk = registry_key(srv.library.file_registry, raw)
@@ -8814,6 +8995,9 @@ def main():
                           "so this is not being saved)" % newip)
     except Exception as e:
         print(" PS5 auto-find skipped: %s" % e)
+    dns = DnsBlocker(cfg)
+    dns.start()
+
     transfers = {}
     queue = Queue(fleet, transfers, cfg)
     queue.library = library          # [B7] so the worker can verify the local PKG before handoff
@@ -8824,6 +9008,7 @@ def main():
     httpd = CompanionServer((cfg["companion"]["host"], cfg["companion"]["port"]), Handler)
     httpd.cfg, httpd.library, httpd.fleet, httpd.queue = cfg, library, fleet, queue
     httpd.transfers, httpd.engine, httpd.hashes = transfers, engine, load_hashes()
+    httpd.dns = dns
     httpd.peers = PeerRegistry(cfg)
 
     sweep_temp_dbs(cfg.get("maintenance", {}).get("temp_sweep_age_sec", 3600))   # [B4] clean leftover temps
