@@ -5630,7 +5630,33 @@ class Queue:
                     heavy_due = (time.time() - heavy_at) >= 15.0
                     if heavy_due:
                         heavy_at = time.time()
-                    if is_addon:
+                    # A PS4 ANSWERS FOR ITSELF, AND EVERYTHING BELOW THIS ASKS A PS5's QUESTIONS.
+                    #
+                    # The add-on branch waits on install_job_row(), which reads bgft.db - a PS5
+                    # database. A PS4 keeps task DIRECTORIES under /user/bgft/task instead, so that
+                    # call answers nothing on a PS4 and an update could never be confirmed: measured
+                    # with Subnautica's update, which installed completely - patch.pkg, patch.pbm,
+                    # patch.json and patch.xml all present at /user/patch/CUSA13529 - while this
+                    # queue sat at "Installing 99%" indefinitely.
+                    #
+                    # Our own payload already reaches the verdict, on the console, using the proof
+                    # that suits the package: app.pkg for a game, patch.pkg for an update, ac.pkg for
+                    # add-on content - and it errors out rather than hanging if a job stops moving.
+                    # So for a PS4 that verdict IS the answer, and asking it costs one request every
+                    # fifteen seconds rather than a database read that cannot work.
+                    if bridge.is_ps4() and heavy_due:
+                        j = bridge.engine_job() or {}
+                        jst = (j or {}).get("state")
+                        if jst == "installed":
+                            installed = True
+                            break
+                        if jst == "error":
+                            self._set(t, state="error", pct=99, fail_reason="console_refused",
+                                      msg=(j.get("msg")
+                                           or "The console stopped this install. The install log on "
+                                              "the PS4 says why"))
+                            return
+                    if is_addon and not bridge.is_ps4():
                         # An update/DLC adds to a title that is ALREADY registered and already has a
                         # full-size app.pkg, so neither app.db nor app.pkg can say anything about it.
                         # Its own completed bgft row is the proof: a row that is not the one we saw
@@ -7942,19 +7968,42 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("drive"):
                     break
         if kind in ("update", "patch", "dlc", "backport") and tid:
-            installed = set()
+            # THE BASE GAME HAS TO BE ON THE CONSOLE THIS IS BEING SENT TO.
+            #
+            # This used to build ONE set from every console plus this PC's own installed.json and
+            # accept the add-on if the title appeared anywhere in it. With two consoles that is
+            # simply the wrong question, and it let a real mistake through: Subnautica's update was
+            # sent to the PS4 because CUSA13529 was in the PC's remembered list - from the PS5 - while
+            # the PS4 reported its installed titles as CUSA00001, CUSA02365, CUSA14409, CUSA23827,
+            # CUSA58072 and PKGM00001. The console accepted the update it had nothing to patch, and
+            # the job then sat at 99% for ever.
+            #
+            # So each target is asked about itself, and the PC's memory is not evidence about a
+            # console. A console that cannot be asked is refused rather than guessed at: an add-on
+            # installed onto nothing is a wasted transfer at best.
             for cid in targets:
                 b = srv.fleet.bridge(cid)
-                if b:
-                    try:
-                        installed |= set(b.installed_titles() or [])
-                    except Exception:
-                        pass
-            installed |= set(local_installed() or [])
-            if tid not in installed:
+                if not b:
+                    continue
+                try:
+                    have = set(b.installed_titles() or [])
+                    asked = True
+                except Exception:
+                    have, asked = set(), False
+                if asked and tid in have:
+                    continue
+                who = b.name or cid
+                if not asked:
+                    return self._json({"ok": False, "error": "base_unknown", "title_id": tid,
+                                       "message": "%s did not answer, so there is no way to tell "
+                                                  "whether the game this %s belongs to is installed "
+                                                  "there. Turn the console on and try again."
+                                                  % (who, kind)}, 409)
                 return self._json({"ok": False, "error": "base_not_installed", "title_id": tid,
-                                   "message": "Install the base game first — a %s can only be applied "
-                                              "on top of the installed game." % kind}, 409)
+                                   "console": cid,
+                                   "message": "Install the game on %s first — a %s can only be "
+                                              "applied on top of the installed game." % (who, kind)},
+                                  409)
 
         # --- MOUNT lane: a ShadowMount backup (.ffpfsc etc.) -> FTP to the scan folder, not DPI ---
         # A registered path that is a DIRECTORY is a game stored unpacked — it mounts exactly like a

@@ -572,6 +572,77 @@ static int app_pkg_facts(const char *tid, long long *size, long long *mtime) {
     return 0;
 }
 
+/* WHERE A TITLE PROVES ITSELF DEPENDS ON WHAT WAS INSTALLED, and getting this wrong hangs a job
+ * for ever rather than failing it.
+ *
+ * Measured: an UPDATE for Subnautica was installed and the job sat at "installing" indefinitely,
+ * which the PC reported as 99% with no end. The install had in fact been handed over correctly - but
+ * the finished check only ever looked at /user/app/<TID>/app.pkg, and the console writes an update to
+ * /user/patch/<TID>/patch.pkg. A base game's file was never going to appear, so the job could never
+ * reach a verdict either way.
+ *
+ * Categories are the package's own word for what it is, out of its param.sfo: gd a game, gp a patch,
+ * ac additional content. With no category known - a caller that did not say - a change in ANY of the
+ * three is accepted, because the alternative is the hang this replaces. */
+static int title_proof_facts(const char *tid, const char *cat,
+                             long long *size, long long *mtime) {
+    if (size)  *size = 0;
+    if (mtime) *mtime = 0;
+    if (!tid || !tid[0]) return 0;
+    int want_app   = !cat || !cat[0] || !strcmp(cat, "gd");
+    int want_patch = !cat || !cat[0] || !strcmp(cat, "gp");
+    int want_ac    = !cat || !cat[0] || !strcmp(cat, "ac");
+
+    struct stat st;
+    char p[700];
+    if (want_app && app_pkg_facts(tid, size, mtime)) return 1;
+    if (want_patch) {
+        for (int i = 0; APP_ROOTS[i]; i++) {
+            /* /user/app -> /user/patch, the same drive, the console's own layout */
+            const char *root = APP_ROOTS[i];
+            const char *tail = strstr(root, "/app");
+            if (!tail) continue;
+            snprintf(p, sizeof(p), "%.*s/patch/%s/patch.pkg",
+                     (int)(tail - root), root, tid);
+            if (stat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                if (size)  *size  = (long long)st.st_size;
+                if (mtime) *mtime = (long long)st.st_mtime;
+                return 1;
+            }
+        }
+    }
+    if (want_ac) {
+        for (int i = 0; APP_ROOTS[i]; i++) {
+            const char *root = APP_ROOTS[i];
+            const char *tail = strstr(root, "/app");
+            if (!tail) continue;
+            snprintf(p, sizeof(p), "%.*s/addcont/%s", (int)(tail - root), root, tid);
+            DIR *d = opendir(p);
+            if (!d) continue;
+            struct dirent *e;
+            long long newest = 0, bytes = 0;
+            while ((e = readdir(d))) {
+                if (e->d_name[0] == '.') continue;
+                char q[900];
+                snprintf(q, sizeof(q), "%s/%s/ac.pkg", p, e->d_name);
+                if (stat(q, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                    if ((long long)st.st_mtime > newest) {
+                        newest = (long long)st.st_mtime;
+                        bytes  = (long long)st.st_size;
+                    }
+                }
+            }
+            closedir(d);
+            if (newest) {
+                if (size)  *size  = bytes;
+                if (mtime) *mtime = newest;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int icon_path_for(const char *tid, char *out, size_t outsz) {
     struct stat st;
     snprintf(out, outsz, "%s/%s/icon0.png", APPMETA_ROOT, tid);
@@ -652,6 +723,12 @@ static struct {
     long long base_mtime;  /* there was one at all - the finished check compares against these,   */
     int  base_had;         /* because an update starts with the file already present.             */
     int  released;         /* its BGFT task has been handed back - do it once, not per poll */
+    char cat[8];           /* the package's own category: gd a game, gp a patch, ac add-on. It
+                              decides WHERE the finished install proves itself - see
+                              title_proof_facts - and an update that is looked for in the base
+                              game's place is a job that can never finish. */
+    long long last_move_ms;/* when this job last did something: more bytes, or its file changed.
+                              A job that stops moving has to end in a sentence, not in silence. */
     int  direct;           /* installed with the console's own installer, so it has no BGFT task
                               and its progress comes from AppInstUtil - see job_refresh */
     char state[24];        /* idle | downloading | installed | error */
@@ -1151,8 +1228,12 @@ static void job_refresh(void) {
             have  = 1;
         }
     }
+    char jcat[8];
+    pthread_mutex_lock(&g_job_lock);
+    snprintf(jcat, sizeof(jcat), "%s", g_job.cat);
+    pthread_mutex_unlock(&g_job_lock);
     long long onDisk = 0, onDiskMtime = 0;
-    if (tid[0]) app_pkg_facts(tid, &onDisk, &onDiskMtime);
+    if (tid[0]) title_proof_facts(tid, jcat, &onDisk, &onDiskMtime);
 
     pthread_mutex_lock(&g_job_lock);
     if (have) { g_job.done = done; g_job.total = total; }
@@ -1173,6 +1254,24 @@ static void job_refresh(void) {
         snprintf(g_job.msg, sizeof(g_job.msg),
                  "The console started installing this and never finished. Nothing was changed - "
                  "try it again, or install it from the PC");
+        g_job.released = 1;
+        pthread_mutex_unlock(&g_job_lock);
+        return;
+    }
+
+    /* A JOB THAT STOPS MOVING HAS TO SAY SO. Measured: an update whose finished check looked in the
+       wrong place sat at "installing" for ever, and the PC showed 99% with nothing behind it. Even
+       with the check corrected, a console can accept a package and quietly do nothing, and silence
+       is the one answer this shop must never give. Movement is more bytes transferred OR the title's
+       own file changing; fifteen minutes without either, on a transfer the service is not reporting
+       an error for, is a stall. Generous, because a large game on a slow link is slow, not stuck. */
+    if (have && done > g_job.done) g_job.last_move_ms = now_ms();
+    if (onDisk != g_job.base_size || onDiskMtime != g_job.base_mtime) g_job.last_move_ms = now_ms();
+    if (!err && g_job.last_move_ms && now_ms() - g_job.last_move_ms > 15LL * 60 * 1000) {
+        snprintf(g_job.state, sizeof(g_job.state), "error");
+        snprintf(g_job.msg, sizeof(g_job.msg),
+                 "This install stopped making progress and the console has not said why. Nothing "
+                 "was changed - try it again");
         g_job.released = 1;
         pthread_mutex_unlock(&g_job_lock);
         return;
@@ -1257,7 +1356,9 @@ static void job_refresh(void) {
    after g_job.tid is final: the finished check is only as honest as this snapshot. */
 static void job_baseline_locked(void) {
     g_job.base_had = g_job.tid[0]
-                     ? app_pkg_facts(g_job.tid, &g_job.base_size, &g_job.base_mtime) : 0;
+                     ? title_proof_facts(g_job.tid, g_job.cat, &g_job.base_size, &g_job.base_mtime)
+                     : 0;
+    g_job.last_move_ms = now_ms();
 }
 
 /* ------------------------------------------- packages the console already has
@@ -2148,6 +2249,7 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
     snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
     snprintf(g_job.name, sizeof(g_job.name), "%s", label);
     snprintf(g_job.cid, sizeof(g_job.cid), "%s", cid);
+    snprintf(g_job.cat, sizeof(g_job.cat), "%s", cat ? cat : "");
     tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
     job_baseline_locked();
     snprintf(g_job.state, sizeof(g_job.state), "downloading");
@@ -2284,6 +2386,7 @@ static int install_direct_start(const char *local, char *err, size_t errsz) {
     g_job.expect = (long long)st.st_size;
     snprintf(g_job.uri, sizeof(g_job.uri), "%s", local);
     snprintf(g_job.cid, sizeof(g_job.cid), "%s", cid);
+    snprintf(g_job.cat, sizeof(g_job.cat), "%s", cat);
     /* The console's own title id wins; the content id's is the fallback. */
     if (tid[0]) snprintf(g_job.tid, sizeof(g_job.tid), "%s", tid);
     else        tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
@@ -2904,6 +3007,11 @@ static void handle_get(int fd, const char *rawpath) {
         if (!g_job.tid[0])
             if (!pkg_content_id_from_url_name(name, g_job.tid, sizeof(g_job.tid)))
                 pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
+        /* The companion names the package type; turn it back into the category the console uses,
+           so the finished check looks in the right place for an update or an add-on. */
+        if (!strcmp(ptype, "PS4GP"))      snprintf(g_job.cat, sizeof(g_job.cat), "gp");
+        else if (!strcmp(ptype, "PS4AC")) snprintf(g_job.cat, sizeof(g_job.cat), "ac");
+        else if (!strcmp(ptype, "PS4GD")) snprintf(g_job.cat, sizeof(g_job.cat), "gd");
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
