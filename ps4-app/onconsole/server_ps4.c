@@ -79,6 +79,12 @@
    cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */
 #define POST_BODY_MAX (256 * 1024)
 
+/* How long a remembered answer about what the console has installed stays good for. Defined here
+   rather than beside the cache itself because the install paths - which are earlier in the file -
+   have to drop that cache the moment they change anything. */
+#define TITLES_TTL_MS 5000
+static void titles_cache_drop(void);
+
 /* WHEN THIS PROCESS STARTED SERVING, so "did the shop restart?" is a question with an answer.
  * The PS4 shop lives inside a shared system daemon rather than a process of its own, and the
  * reasonable worry is that something - closing the browser, launching a game, resting the console -
@@ -918,6 +924,21 @@ static int bgft_sweep_ours(OrbisBgftTaskId keep) {
  * fatal (see bgft_sweep_ours). Bytes are not launchability. */
 static int ticket_count_for(const char *tid) {
     if (!tid || !tid[0]) return 0;
+    /* SAME REASON AS console_titles_cached: this reads every task's d0.pdb - a dozen small files -
+       and /api/tile/status is polled. The count only changes when an install does something, and
+       every one of those paths drops the cache. */
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static char  last_tid[16] = {0};
+    static int   last_n = -1;
+    static long long last_at = 0;
+    pthread_mutex_lock(&lk);
+    if (last_n >= 0 && !strcmp(last_tid, tid) && now_ms() - last_at < TITLES_TTL_MS) {
+        int cached = last_n;
+        pthread_mutex_unlock(&lk);
+        return cached;
+    }
+    pthread_mutex_unlock(&lk);
+
     DIR *d = opendir(BGFT_TASK_ROOT);
     if (!d) return 0;
     int n = 0;
@@ -932,6 +953,11 @@ static int ticket_count_for(const char *tid) {
         if (t[0] && !strcmp(t, tid)) n++;
     }
     closedir(d);
+    pthread_mutex_lock(&lk);
+    snprintf(last_tid, sizeof(last_tid), "%s", tid);
+    last_n = n;
+    last_at = now_ms();
+    pthread_mutex_unlock(&lk);
     return n;
 }
 
@@ -972,9 +998,11 @@ static int bgft_release_title(const char *tid) {
         freed++;
     }
     closedir(d);
-    if (freed)
+    if (freed) {
+        titles_cache_drop();
         ilog("install: %s is being installed again - released its %d old task%s first",
              tid, freed, freed == 1 ? "" : "s");
+    }
     return freed;
 }
 
@@ -1185,6 +1213,8 @@ static void job_refresh(void) {
             snprintf(g_job.msg, sizeof(g_job.msg),
                      "The console stopped this install. The install log on the PS4 says why");
     } else if (big_enough) {
+        /* Something just appeared on this console, so a remembered list of what it has is wrong. */
+        titles_cache_drop();
         snprintf(g_job.state, sizeof(g_job.state), "installed");
         snprintf(g_job.msg, sizeof(g_job.msg), "Installed on this PS4");
         /* AND THE CONSOLE HAS TO AGREE THAT IT HAS IT. app.pkg appearing proves the files arrived;
@@ -1640,16 +1670,63 @@ static pthread_mutex_t g_scan_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Does the console's own database list this title? app.db is the console's answer to "what do I
    have", and it is a different question from "are there files on disk" - see job_refresh. */
+/* A SHORT-LIVED ANSWER, BECAUSE THE QUESTION IS ASKED CONSTANTLY.
+ *
+ * read_console_titles() slurps the WHOLE of app.db into memory on every call - the file is megabytes
+ * - and the companion polls /api/tile/status and the install job every few seconds. That is a
+ * multi-megabyte malloc and free several times a minute, for ever, in a system daemon whose heap this
+ * payload does not own and cannot compact.
+ *
+ * What that costs was measured today, and it is not theoretical: after about half an hour of polling,
+ * a 256 KB allocation for the library JSON failed outright, and then accept() began failing on the
+ * listening socket - 47,000 consecutive failures, the port still open, every request answered by a
+ * reset. A kernel that cannot allocate a socket cannot accept one.
+ *
+ * Five seconds of staleness is invisible to a person watching an install and removes almost all of
+ * that traffic. Anything that changes what is installed calls titles_cache_drop() so the next
+ * question is answered from the console rather than from a memory of it. */
+static pthread_mutex_t g_titles_lock = PTHREAD_MUTEX_INITIALIZER;
+static ps4_title_t     g_titles[MAX_TITLES];
+static int             g_titles_n = -1;
+static long long       g_titles_at = 0;
+
+static void titles_cache_drop(void) {
+    pthread_mutex_lock(&g_titles_lock);
+    g_titles_n = -1;
+    pthread_mutex_unlock(&g_titles_lock);
+}
+
+/* Copies into the caller's array so nothing holds g_titles_lock while it works. */
+static int console_titles_cached(ps4_title_t *out, int max) {
+    pthread_mutex_lock(&g_titles_lock);
+    long long now = now_ms();
+    if (g_titles_n < 0 || now - g_titles_at > TITLES_TTL_MS) {
+        pthread_mutex_unlock(&g_titles_lock);
+        static ps4_title_t fresh[MAX_TITLES];
+        pthread_mutex_lock(&g_scan_lock);
+        int n = read_console_titles(fresh, MAX_TITLES);
+        pthread_mutex_unlock(&g_scan_lock);
+        pthread_mutex_lock(&g_titles_lock);
+        if (n > 0 || g_titles_n < 0) {
+            memcpy(g_titles, fresh, sizeof(ps4_title_t) * (size_t)(n > 0 ? n : 0));
+            g_titles_n = n;
+            g_titles_at = now;
+        }
+    }
+    int n = g_titles_n > 0 ? g_titles_n : 0;
+    if (n > max) n = max;
+    if (n > 0 && out) memcpy(out, g_titles, sizeof(ps4_title_t) * (size_t)n);
+    pthread_mutex_unlock(&g_titles_lock);
+    return n;
+}
+
 static int console_lists_title(const char *tid) {
     if (!tid || !tid[0]) return 0;
     static ps4_title_t rows[MAX_TITLES];
-    int found = 0;
-    pthread_mutex_lock(&g_scan_lock);
-    int n = read_console_titles(rows, MAX_TITLES);
+    int n = console_titles_cached(rows, MAX_TITLES);
     for (int i = 0; i < n; i++)
-        if (!strcmp(rows[i].tid, tid)) { found = 1; break; }
-    pthread_mutex_unlock(&g_scan_lock);
-    return found;
+        if (!strcmp(rows[i].tid, tid)) return 1;
+    return 0;
 }
 
 /* The USB scan, remembered briefly. Every /api/library used to walk eight mount points and read
