@@ -75,6 +75,10 @@
 #endif
 #define SHOP_VERSION "3.62.0"
 
+/* The largest POST body this console will take. Bodies here are JSON of a few hundred bytes; the
+   cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */
+#define POST_BODY_MAX (256 * 1024)
+
 /* WHEN THIS PROCESS STARTED SERVING, so "did the shop restart?" is a question with an answer.
  * The PS4 shop lives inside a shared system daemon rather than a process of its own, and the
  * reasonable worry is that something - closing the browser, launching a game, resting the console -
@@ -142,6 +146,36 @@ int sceUserServiceInitialize(void *);
 int sceUserServiceGetForegroundUser(int *);
 int sceUserServiceGetInitialUser(int *);
 int sceAppInstUtilInitialize(void);
+
+/* THE CONSOLE'S OWN LOCAL INSTALLER, and every signature here is COPIED FROM THE TOOLCHAIN'S OWN
+ * HEADER (include/orbis/AppInstUtil.h), not inferred. That distinction is not pedantry: inferring
+ * sceAppInstUtilCancelInstall's shape once crashed a console in this project, and this code runs
+ * inside a SHARED system daemon where a crash takes the shop and the daemon with it.
+ *
+ * WHY THIS LANE EXISTS. Every install this shop has ever started on a PS4 went through BGFT, and
+ * BGFT asks PlayStation Network whether the title has a newer version BEFORE it downloads anything.
+ * When it finds one it builds a task with a SECOND piece in it - the update - fetches our package,
+ * cannot fetch the update, and throws the whole thing away. Measured on this console:
+ *
+ *   Bluey's Quest for the Gold Pen  package 737,869,824 B, BGFT asked for 1,348,665,344, died at 89%
+ *   Castle Crashers Remastered      the same, at 2%, rc 0x80990004, klog "[PATCH MERGE] error"
+ *   Riptide GP2                     installed first time - the Store has no newer version of it
+ *
+ * That is the whole difference between the games that work and the games that do not, and nothing we
+ * pass to BGFT changes it. All 14 of these symbols are present on 13.52 (probed, /api/engine/symprobe),
+ * and none of them involves BGFT - so none of them can patch-check.
+ *
+ * HOLD THE OUTCOME TO THE SAME PROOF AS EVERYTHING ELSE. The PS5 half of this project has a hard-won
+ * warning about the same-named call: there, AppInstallPkg registers metadata and installs no game
+ * data, answering ok while nothing arrives. Whether that is also true on a PS4 is NOT known, so this
+ * lane believes app.pkg CHANGING on disk and nothing else - exactly as the BGFT lane does. */
+typedef int  (*pfn_ai_tid_from_pkg_t)(const char *pkg, char *tid_out, int *is_app);
+typedef int  (*pfn_ai_exists_t)(const char *tid, int *exists);
+typedef int  (*pfn_ai_prep_overwrite_t)(const char *pkg);
+typedef int  (*pfn_ai_install_pkg_t)(const char *pkg, void *reserved);
+typedef int  (*pfn_ai_progress_info_t)(const char *cid, unsigned *state, unsigned *progress,
+                                       unsigned *done_sz, unsigned *total_sz, unsigned *rest_sec);
+typedef int  (*pfn_ai_is_installing_t)(const char *cid);
 
 static void notify(const char *msg) {
     notify_request_t req;
@@ -495,6 +529,7 @@ static int read_console_titles(ps4_title_t *out, int max) {
     return bc.n;
 }
 
+
 /* app.pkg WITH BYTES is the only honest proof. Returns its size, or 0. */
 static long long installed_app_pkg(const char *tid) {
     for (int i = 0; APP_ROOTS[i]; i++) {
@@ -583,6 +618,12 @@ static pfn_bgft_start_t      bgft_start_fn;
 static pfn_bgft_stop_t       bgft_stop_fn;
 static pfn_bgft_unregister_t bgft_unreg_fn;
 static pfn_bgft_progress_t   bgft_progress_fn;
+static pfn_ai_tid_from_pkg_t   ai_tid_from_pkg_fn;
+static pfn_ai_exists_t         ai_exists_fn;
+static pfn_ai_prep_overwrite_t ai_prep_overwrite_fn;
+static pfn_ai_install_pkg_t    ai_install_pkg_fn;
+static pfn_ai_progress_info_t  ai_progress_info_fn;
+static pfn_ai_is_installing_t  ai_is_installing_fn;
 static int  g_bgft_ready = 0;
 static void *g_bgft_heap = NULL;
 #define BGFT_HEAP_SIZE (1 * 1024 * 1024)
@@ -605,6 +646,8 @@ static struct {
     long long base_mtime;  /* there was one at all - the finished check compares against these,   */
     int  base_had;         /* because an update starts with the file already present.             */
     int  released;         /* its BGFT task has been handed back - do it once, not per poll */
+    int  direct;           /* installed with the console's own installer, so it has no BGFT task
+                              and its progress comes from AppInstUtil - see job_refresh */
     char state[24];        /* idle | downloading | installed | error */
     char msg[256];
     unsigned rc;
@@ -645,6 +688,12 @@ static void bgft_bootstrap(void) {
     bgft_stop_fn     = (pfn_bgft_stop_t)      dlsym_any("sceBgftServiceIntDownloadStopTask");
     bgft_unreg_fn    = (pfn_bgft_unregister_t)dlsym_any("sceBgftServiceIntDownloadUnregisterTask");
     bgft_progress_fn = (pfn_bgft_progress_t)  dlsym_any("sceBgftServiceIntDownloadGetProgress");
+    ai_tid_from_pkg_fn   = (pfn_ai_tid_from_pkg_t)  dlsym_any("sceAppInstUtilGetTitleIdFromPkg");
+    ai_exists_fn         = (pfn_ai_exists_t)        dlsym_any("sceAppInstUtilAppExists");
+    ai_prep_overwrite_fn = (pfn_ai_prep_overwrite_t)dlsym_any("sceAppInstUtilAppPrepareOverwritePkg");
+    ai_install_pkg_fn    = (pfn_ai_install_pkg_t)   dlsym_any("sceAppInstUtilAppInstallPkg");
+    ai_progress_info_fn  = (pfn_ai_progress_info_t) dlsym_any("sceAppInstUtilGetInstallProgressInfo");
+    ai_is_installing_fn  = (pfn_ai_is_installing_t) dlsym_any("sceAppInstUtilAppIsInInstalling");
 
     sceUserServiceInitialize(NULL);
     int air = sceAppInstUtilInitialize();
@@ -671,9 +720,21 @@ static void bgft_bootstrap(void) {
     g_bgft_ready = 1;
     if (rc == 0)
         ilog("install: BGFT ready (init rc=0, AppInstUtil rc=0x%08X)", (unsigned)air);
-    else
-        ilog("install: BGFT already initialised in this process (init rc=0x%08X, AppInstUtil rc=0x%08X) - continuing",
-             (unsigned)rc, (unsigned)air);
+    else {
+        /* GIVE THE HEAP BACK WHEN THE SERVICE DID NOT TAKE IT.
+           A non-zero init means BGFT was already initialised by an earlier load of this payload,
+           and it is still using THAT load's heap - so the megabyte just allocated here is dead
+           weight that is never freed, in a SHARED system daemon, once per reload.
+           Measured after roughly fifteen reloads in one session: /api/library began answering
+           "out of memory" because a 256 KB allocation for the library JSON could no longer be
+           satisfied, and a BGFT register failed with 0x8099002C. The payload image and its threads
+           from each reload cannot be reclaimed from inside - a console restart is the only cure for
+           those - but this part is ours to not waste. */
+        free(g_bgft_heap);
+        g_bgft_heap = NULL;
+        ilog("install: BGFT already initialised in this process (init rc=0x%08X, AppInstUtil rc=0x%08X) "
+             "- continuing, and the spare heap was given back", (unsigned)rc, (unsigned)air);
+    }
 }
 
 /* A PS4 PKG's content id sits at 0x40 in the header. We only need it to name the BGFT task. */
@@ -971,6 +1032,9 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
     return 0;
 }
 
+/* Defined below, with the app.db reader it uses. Declared here because job_refresh needs it. */
+static int console_lists_title(const char *tid);
+
 /* Refresh g_job from the console's own progress. Called by /api/engine/job. */
 static void job_refresh(void) {
     pthread_mutex_lock(&g_job_lock);
@@ -986,7 +1050,35 @@ static void job_refresh(void) {
     long long done = 0, total = 0;
     int have = 0;
     unsigned err = 0;
-    if (bgft_progress_fn) {
+    /* A DIRECT INSTALL HAS NO BGFT TASK, so asking BGFT about it answers an error that would be
+       read as a failure. Its progress comes from the console's own installer, and its VERDICT comes
+       from app.pkg changing on disk - the same proof the BGFT lane uses and the only one that has
+       ever been trustworthy here. */
+    int direct = 0;
+    pthread_mutex_lock(&g_job_lock);
+    direct = g_job.direct;
+    char cid_copy[64];
+    snprintf(cid_copy, sizeof(cid_copy), "%s", g_job.cid);
+    unsigned direct_rc = g_job.rc;
+    pthread_mutex_unlock(&g_job_lock);
+    if (direct) {
+        if (ai_progress_info_fn && cid_copy[0]) {
+            unsigned st8 = 0, pc = 0, dsz = 0, tsz = 0, rs = 0;
+            if (ai_progress_info_fn(cid_copy, &st8, &pc, &dsz, &tsz, &rs) == 0 && tsz) {
+                done = (long long)dsz;
+                total = (long long)tsz;
+                have = 1;
+            }
+        }
+        /* ONLY AN SCE-SHAPED CODE IS A FAILURE. sceAppInstUtilAppInstallPkg does not answer 0 for
+           success: it answered 0x00000064 - one hundred - for an install that demonstrably worked,
+           putting all 737,869,824 bytes of the package at /user/app/CUSA58072/app.pkg and the
+           game's artwork under /user/appmeta. Treating non-zero as failure reported a completed
+           install as an error. Every real error this console has produced has the top bit set
+           (0x80020012 when the installer could not see the file, 0x8099xxxx from BGFT), so that is
+           the test - and the verdict still comes from app.pkg changing on disk, not from here. */
+        err = (direct_rc & 0x80000000u) ? direct_rc : 0;
+    } else if (bgft_progress_fn) {
         OrbisBgftTaskProgress pr;
         memset(&pr, 0, sizeof(pr));
         if (bgft_progress_fn(task, &pr) == 0) {
@@ -1007,6 +1099,21 @@ static void job_refresh(void) {
        been seen sitting at 0 for a transfer that had already finished, so it is never the verdict
        on its own. Where we know the size we require it; where we do not, any bytes plus a task
        that BGFT no longer reports is a finished install. */
+    /* A DIRECT INSTALL NEEDS A DEADLINE. It has no task for BGFT to fail, so if the console simply
+       never writes app.pkg - the metadata-only outcome the PS5 side warns about - the job would sit
+       at "installing" until the payload was reloaded, and nothing would ever say why. Twenty minutes
+       is far longer than any local install measured here (the largest so far finished in seconds
+       once the path was right) and short enough that a person is not left staring at it. */
+    if (direct && !err && g_job.started_ms &&
+        now_ms() - g_job.started_ms > 20LL * 60 * 1000) {
+        snprintf(g_job.state, sizeof(g_job.state), "error");
+        snprintf(g_job.msg, sizeof(g_job.msg),
+                 "The console started installing this and never finished. Nothing was changed - "
+                 "try it again, or install it from the PC");
+        g_job.released = 1;
+        pthread_mutex_unlock(&g_job_lock);
+        return;
+    }
     long long want = g_job.expect > 0 ? g_job.expect : 0;
     /* THE FILE HAS TO HAVE CHANGED, not merely be present - see app_pkg_facts. With no file at the
        start (a first install) this is the same test as before: any file of the right size is the
@@ -1054,6 +1161,16 @@ static void job_refresh(void) {
     } else if (big_enough) {
         snprintf(g_job.state, sizeof(g_job.state), "installed");
         snprintf(g_job.msg, sizeof(g_job.msg), "Installed on this PS4");
+        /* AND THE CONSOLE HAS TO AGREE THAT IT HAS IT. app.pkg appearing proves the files arrived;
+           it does not prove the console registered the title, and the two really can disagree - a
+           package written to /user/app with no row in app.db is a title that exists on disk and
+           nowhere else, which is the "phantom install" this project has been caught by before. The
+           state stays "installed" because the install genuinely happened; the sentence stops
+           short of promising it is playable. */
+        if (direct && tid[0] && !console_lists_title(tid))
+            snprintf(g_job.msg, sizeof(g_job.msg),
+                     "The files are on this PS4 but the console has not listed it yet - "
+                     "restart the console, and if it is still missing install it again");
     } else {
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
@@ -1495,6 +1612,20 @@ static int fs_recv_write(int cl, const char *rawpath, const char *req, int heade
  */
 static pthread_mutex_t g_scan_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Does the console's own database list this title? app.db is the console's answer to "what do I
+   have", and it is a different question from "are there files on disk" - see job_refresh. */
+static int console_lists_title(const char *tid) {
+    if (!tid || !tid[0]) return 0;
+    static ps4_title_t rows[MAX_TITLES];
+    int found = 0;
+    pthread_mutex_lock(&g_scan_lock);
+    int n = read_console_titles(rows, MAX_TITLES);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i].tid, tid)) { found = 1; break; }
+    pthread_mutex_unlock(&g_scan_lock);
+    return found;
+}
+
 /* The USB scan, remembered briefly. Every /api/library used to walk eight mount points and read
    the header of every package on them; the companion alone asks twice a minute, and the page asks
    too. A stick plugged in shows up within twenty seconds, which nobody notices - the console does.
@@ -1517,8 +1648,14 @@ static char *build_library_json_locked(void) {
     static ps4_title_t rows[MAX_TITLES];
     int n = read_console_titles(rows, MAX_TITLES);
 
+    /* SMALLER RATHER THAN NOTHING. This runs inside a shared system daemon whose heap this payload
+       does not own, and after enough hot-reloads a 256 KB request can simply fail - which used to
+       turn the whole library into {"ok":false,"error":"out of memory"}, a sentence that sounds like
+       the PC ran out when it was the console. Half a library beats none, and the caller is told. */
     size_t cap = 256 * 1024, len = 0;
     char *buf = (char *)malloc(cap);
+    if (!buf) { cap = 64 * 1024; buf = (char *)malloc(cap); }
+    if (!buf) { cap = 16 * 1024; buf = (char *)malloc(cap); }
     if (!buf) return NULL;
     len += (size_t)snprintf(buf + len, cap - len, "{\"ok\":true,\"platform\":\"ps4\",\"games\":[");
     int wrote = 0;
@@ -1886,6 +2023,197 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
     return 0;
 }
 
+/* ---------------------------------------------------------------- the direct lane
+ *
+ * Install a package that is ALREADY on this console's storage, using the console's own installer
+ * rather than its downloader. No task, no URL, no transfer, and no patch check.
+ *
+ * Reports through the same g_job as every other install so the page and the companion need to know
+ * nothing new; g_job.direct tells job_refresh to read progress from AppInstUtil instead of BGFT.
+ */
+static void *install_direct_thread(void *arg);
+
+/* THE PATH WE WRITE AND THE PATH THE INSTALLER MUST BE GIVEN ARE NOT THE SAME PATH.
+ *
+ * Our process sees the shop's own storage as /data. SceShellCore, which is what actually performs
+ * the install, sees that identical filesystem as /user/data. Hand it our view and it cannot find
+ * the file - measured here as rc=0x80020012 (errno 18) for a package that was demonstrably present
+ * and readable, whose title id the console had just read out of it successfully.
+ *
+ * The PS5 half of this project learned the same lesson and wrote it down (ps5-app/onconsole/server.c,
+ * TILE_PKG_INSTALL): there the wrong path answers 0x80A40029. Different console, different code,
+ * same trap - which is why this is a named function with the reason attached rather than a string
+ * concatenation somewhere in the middle of an install.
+ *
+ * Anything that is not under /data is passed through untouched: /user/... is already the installer's
+ * own view, and a package on USB is somewhere only it knows how to name. */
+static void installer_path(const char *ours, char *out, size_t outsz) {
+    if (!strncmp(ours, "/data/", 6))
+        snprintf(out, outsz, "/user/data/%s", ours + 6);
+    else
+        snprintf(out, outsz, "%s", ours);
+}
+
+static int install_direct_start(const char *local, char *err, size_t errsz) {
+    if (!ai_install_pkg_fn) {
+        snprintf(err, errsz, "This PS4 does not have the direct installer this needs");
+        return -1;
+    }
+    struct stat st;
+    if (stat(local, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 4096) {
+        snprintf(err, errsz, "There is no package at that path on the console");
+        return -2;
+    }
+    /* A PS4 package begins \x7FCNT. Checking here means a truncated or half-copied file is caught
+       before the console's installer is asked to look at it. */
+    int f = open(local, O_RDONLY);
+    if (f < 0) { snprintf(err, errsz, "The console cannot read that file"); return -3; }
+    unsigned char magic[4] = {0};
+    ssize_t got = read(f, magic, 4);
+    close(f);
+    if (got != 4 || magic[0] != 0x7F || magic[1] != 'C' || magic[2] != 'N' || magic[3] != 'T') {
+        snprintf(err, errsz, "That file is not a PS4 package");
+        return -4;
+    }
+
+    /* THE TITLE ID COMES FROM THE CONSOLE, not from our own parsing of the name or the header. */
+    char tid[32] = {0};
+    int is_app = 0;
+    if (ai_tid_from_pkg_fn) {
+        int rc = ai_tid_from_pkg_fn(local, tid, &is_app);
+        if (rc != 0) {
+            ilog("direct: the console could not read a title id from %s (rc=0x%08X)",
+                 local, (unsigned)rc);
+            tid[0] = 0;
+        }
+    }
+
+    /* Same staleness guard as the other lanes: a job that finished but has not been polled still
+       reads "downloading", and refusing on that would block every install after the first. */
+    job_refresh();
+    pthread_mutex_lock(&g_job_lock);
+    int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+    pthread_mutex_unlock(&g_job_lock);
+    if (busy) {
+        snprintf(err, errsz, "An install is already running on this PS4 - wait for it to finish");
+        return -5;
+    }
+
+    /* THE CONTENT ID, for progress. sceAppInstUtilGetInstallProgressInfo is keyed on the content id,
+       not the title id, and pkg_file_facts already reads it straight out of the package header - the
+       same reader the BGFT lane uses. Progress is a nicety; the verdict never depends on it. */
+    char cid[64] = {0}, cat[16] = {0}, title[160] = {0};
+    long long psize = 0;
+    pkg_file_facts(local, cid, sizeof(cid), cat, sizeof(cat), title, sizeof(title), &psize);
+
+    /* AN UPDATE IS NOT A BASE GAME, and this lane will hand either one to the console without an
+       opinion unless it is told to have one.
+       Measured the hard way: a 10,682,368-byte UPDATE package for a game that was not installed was
+       accepted and written to /user/app/CUSA14409/app.pkg - the base-game slot - with artwork under
+       /user/appmeta and NO row in app.db. Two orphaned directories and a title the console did not
+       list. The package's own param.sfo says what it is ('gd' a game, 'gp' a patch, 'ac' additional
+       content), and the rule is the same one the PC companion already enforces: an add-on needs its
+       base game present, because the console has nowhere to put it otherwise. */
+    if (!strcmp(cat, "gp") || !strcmp(cat, "ac")) {
+        char btid[32] = {0};
+        if (tid[0]) snprintf(btid, sizeof(btid), "%s", tid);
+        else        tid_from_cid(cid, btid, sizeof(btid));
+        /* NOT sceAppInstUtilAppExists. It answered "exists" for a title whose /user/app directory
+           had just been deleted by hand and which app.db had never listed - so whatever question it
+           answers, it is not "is this game installed". Measured: the gate below passed on its word
+           and a 10 MB update was written into the base-game slot for the second time.
+           The two proofs this project already trusts are used instead, and both must agree: a row in
+           the console's own database, and app.pkg on disk with bytes in it. */
+        int listed = btid[0] && console_lists_title(btid);
+        long long base_bytes = btid[0] ? installed_app_pkg(btid) : 0;
+        if (!listed || base_bytes <= 0) {
+            snprintf(err, errsz,
+                     "This is %s, and %s is not installed on this PS4 yet. Install the game first, "
+                     "then add this",
+                     !strcmp(cat, "gp") ? "an update" : "extra content",
+                     title[0] ? title : "the game it belongs to");
+            ilog("direct: refused %s - category '%s' for %s, which the console %s and whose "
+                 "app.pkg is %lld bytes", local, cat, btid[0] ? btid : "?",
+                 listed ? "lists" : "does not list", base_bytes);
+            return -7;
+        }
+    }
+
+    pthread_mutex_lock(&g_job_lock);
+    memset(&g_job, 0, sizeof(g_job));
+    g_job.active = 1;
+    g_job.direct = 1;
+    g_job.task = BGFT_INVALID_TASK_ID;
+    g_job.job_id = now_ms();
+    g_job.started_ms = now_ms();
+    g_job.expect = (long long)st.st_size;
+    snprintf(g_job.uri, sizeof(g_job.uri), "%s", local);
+    snprintf(g_job.cid, sizeof(g_job.cid), "%s", cid);
+    /* The console's own title id wins; the content id's is the fallback. */
+    if (tid[0]) snprintf(g_job.tid, sizeof(g_job.tid), "%s", tid);
+    else        tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
+    const char *base = strrchr(local, '/');
+    snprintf(g_job.name, sizeof(g_job.name), "%s", title[0] ? title : (base ? base + 1 : local));
+    job_baseline_locked();
+    snprintf(g_job.state, sizeof(g_job.state), "downloading");
+    snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is installing it from its own storage");
+    pthread_mutex_unlock(&g_job_lock);
+
+    char ipath[1100];
+    installer_path(local, ipath, sizeof(ipath));
+    ilog("direct: installing %s (%lld bytes, title %s, category '%s') with the console's own "
+         "installer%s%s", local, (long long)st.st_size, tid[0] ? tid : "?", cat[0] ? cat : "?",
+         strcmp(ipath, local) ? " - it sees that file as " : "",
+         strcmp(ipath, local) ? ipath : "");
+
+    pthread_t t;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 256 * 1024);
+    char *copy = strdup(ipath);
+    if (!copy || pthread_create(&t, &at, install_direct_thread, copy) != 0) {
+        free(copy);
+        pthread_attr_destroy(&at);
+        pthread_mutex_lock(&g_job_lock);
+        g_job.active = 0;
+        pthread_mutex_unlock(&g_job_lock);
+        snprintf(err, errsz, "The console could not start the install");
+        return -6;
+    }
+    pthread_detach(t);
+    pthread_attr_destroy(&at);
+    return 0;
+}
+
+static void *install_direct_thread(void *arg) {
+    char *local = (char *)arg;
+    char tid[32];
+    pthread_mutex_lock(&g_job_lock);
+    snprintf(tid, sizeof(tid), "%s", g_job.tid);
+    pthread_mutex_unlock(&g_job_lock);
+
+    /* AN EXISTING TITLE HAS TO BE PREPARED FOR OVERWRITE, which is the console's own word for it.
+       Skipped when we could not learn the title id - the installer is then left to decide. */
+    if (tid[0] && ai_prep_overwrite_fn && installed_app_pkg(tid) > 0 && console_lists_title(tid)) {
+        int rc = ai_prep_overwrite_fn(local);
+        ilog("direct: %s is already installed - prepare-overwrite rc=0x%08X", tid, (unsigned)rc);
+    }
+
+    int rc = ai_install_pkg_fn(local, NULL);
+    ilog("direct: the console's installer answered rc=0x%08X for %s", (unsigned)rc, local);
+
+    /* THE VERDICT IS job_refresh'S TO WRITE, NOT THIS THREAD'S. Both of them writing it raced: a
+       refresh that read the return code as zero (because this thread had not stored it yet) then
+       wrote "downloading" over the failure this thread had just recorded, and the job reported a
+       non-zero code beside a running state for ever. So this stores the code and nothing else, and
+       one function turns codes into verdicts - which is how the BGFT lane has always worked. */
+    pthread_mutex_lock(&g_job_lock);
+    g_job.rc = (unsigned)rc;
+    pthread_mutex_unlock(&g_job_lock);
+    free(local);
+    return NULL;
+}
+
 static void install_local_path(int fd, const char *local) {
     char err[320] = {0};
     if (install_local_pkg(local, err, sizeof(err)) != 0) {
@@ -2243,6 +2571,53 @@ static void handle_get(int fd, const char *rawpath) {
         send_json(fd, out);
         return;
     }
+    /* WHICH INSTALL FUNCTIONS THIS FIRMWARE ACTUALLY HAS.
+     *
+     * A diagnostic, and it exists because of a measured problem rather than curiosity. Every install
+     * this shop starts goes through BGFT, and BGFT asks PlayStation Network whether the title has a
+     * newer version BEFORE it downloads: when it finds one it builds a two-part task, fetches our
+     * package, cannot fetch the update, and abandons the whole thing. Measured on this console -
+     * Bluey's Quest for the Gold Pen, a 737,869,824-byte package, BGFT asked for 1,348,665,344 and
+     * gave up at 89%; Castle Crashers Remastered the same at 2%. Riptide GP2 installed first time
+     * because the Store has no newer version of it. That is the difference, and it is not ours.
+     *
+     * klog shows the console finishing an install with two calls of its own, AFTER the download:
+     *     begin AppPrePromotePkgExt(/user/bgft/task/<id>/app.pkg)
+     *     begin sceAppInstaller::AppInstallApp(/user/bgft/task/<id>, 0)
+     * If those are reachable from here, a package already on this console could be installed
+     * directly - no BGFT, no download, and no patch check to fail. This route answers only whether
+     * the symbols exist. It resolves names and reports addresses; it calls nothing. Guessing a
+     * signature and calling it is how this project once crashed a console, so the calling comes
+     * later, from the answer, not from a hunch. */
+    if (!strcmp(path, "/api/engine/symprobe")) {
+        char names[2048] = {0};
+        if (!qparam(rawpath, "names", names, sizeof(names)) || !names[0]) {
+            send_json(fd, "{\"ok\":false,\"error\":\"pass ?names=a,b,c\"}");
+            return;
+        }
+        char out[4096];
+        int len = snprintf(out, sizeof(out), "{\"ok\":true,\"libs\":%d,\"syms\":{", g_dl_n);
+        char *p = names;
+        int first = 1;
+        while (p && *p && len < (int)sizeof(out) - 220) {
+            char *comma = strchr(p, ',');
+            if (comma) *comma = 0;
+            while (*p == ' ') p++;
+            if (*p) {
+                void *a = dlsym_any(p);
+                char esc[200];
+                json_escape(p, esc, sizeof(esc));
+                len += snprintf(out + len, sizeof(out) - len, "%s\"%s\":%s",
+                                first ? "" : ",", esc, a ? "true" : "false");
+                first = 0;
+            }
+            if (!comma) break;
+            p = comma + 1;
+        }
+        snprintf(out + len, sizeof(out) - len, "}}");
+        send_json(fd, out);
+        return;
+    }
     if (!strcmp(path, "/api/engine/state")) {
         char out[700];
         snprintf(out, sizeof(out),
@@ -2264,13 +2639,15 @@ static void handle_get(int fd, const char *rawpath) {
     if (!strcmp(path, "/api/library")) {
         char *j = build_library_json();
         if (j) { send_json(fd, j); free(j); }
-        else send_json(fd, "{\"ok\":false,\"error\":\"out of memory\"}");
+        else send_json(fd, "{\"ok\":false,\"error\":\"This PS4 is low on memory - restart the "
+                            "console, run the jailbreak and load the shop again\"}");
         return;
     }
     if (!strcmp(path, "/api/installed")) {
         char *j = build_installed_json();
         if (j) { send_json(fd, j); free(j); }
-        else send_json(fd, "{\"ok\":false,\"error\":\"out of memory\"}");
+        else send_json(fd, "{\"ok\":false,\"error\":\"This PS4 is low on memory - restart the "
+                            "console, run the jailbreak and load the shop again\"}");
         return;
     }
     if (!strcmp(path, "/api/devices"))  { send_devices(fd); return; }
@@ -2441,6 +2818,34 @@ static void handle_get(int fd, const char *rawpath) {
                  "\"name\":\"%s\",\"message\":\"%s\"}",
                  act ? "true" : "false", done ? "true" : "false", okf ? "true" : "false", en, em);
         send_json(fd, o);
+        return;
+    }
+    /* Install a package the console already holds, with the console's own installer rather than its
+       downloader - the lane that cannot be stopped by a PlayStation Network patch check. */
+    if (!strcmp(path, "/api/engine/install-direct")) {
+        char lp[1024] = {0};
+        if (!qparam(rawpath, "path", lp, sizeof(lp)) || lp[0] != '/') {
+            send_json(fd, "{\"ok\":false,\"error\":\"no package was named\"}");
+            return;
+        }
+        char err[320] = {0};
+        if (install_direct_start(lp, err, sizeof(err)) != 0) {
+            char esc[400], out[600];
+            json_escape(err, esc, sizeof(esc));
+            snprintf(out, sizeof(out), "{\"ok\":false,\"queued\":false,\"error\":\"%s\"}", esc);
+            send_json(fd, out);
+            return;
+        }
+        pthread_mutex_lock(&g_job_lock);
+        long long jid = g_job.job_id;
+        char tid[16];
+        snprintf(tid, sizeof(tid), "%s", g_job.tid);
+        pthread_mutex_unlock(&g_job_lock);
+        char out[300];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"queued\":true,\"direct\":true,\"job_id\":%lld,\"title_id\":\"%s\"}",
+                 jid, tid);
+        send_json(fd, out);
         return;
     }
     if (!strcmp(path, "/api/engine/install-local")) {
@@ -2855,21 +3260,60 @@ static void *conn_thread(void *arg) {
     if (is_get || is_head) {
         handle_get(fd, path);
     } else if (is_post) {
+        /* THE BODY IS BOUNDED BY THE ROOM ACTUALLY LEFT IN buf, NOT BY sizeof(buf).
+         *
+         * This read `blen < (int)sizeof(buf) - 1` and then filled from `body`, which points INSIDE
+         * buf just past the headers. The test never accounted for how far in that was, so a request
+         * with 4 KB of headers and Content-Length: 8000 wrote about 4 KB past the end of an 8 KB
+         * stack buffer - on a 256 KB thread stack, built with no stack protector, as root, inside a
+         * SHARED system daemon, reachable unauthenticated from any machine on the LAN and from any
+         * page open in the console's own browser. It was never reached by anything this project
+         * ships, which is why it survived; that is luck, not a defence.
+         *
+         * A body that does not fit gets its own heap buffer instead of being refused: /api/install
+         * and friends take JSON that is normally a few hundred bytes, but a long library path or a
+         * name with wide characters can push a legitimate request past whatever is left, and a 413
+         * for a valid request would be a new bug in place of an old one. The cap is generous and
+         * finite so a hostile Content-Length cannot ask for a gigabyte. */
         char *hdr_end = strstr(buf, "\r\n\r\n");
         int blen = 0;
         const char *cl_h = strcasestr_local(buf, "content-length:");
         if (cl_h) blen = atoi(cl_h + 15);
+        if (blen < 0) blen = 0;
         char *body = hdr_end ? hdr_end + 4 : NULL;
-        int have = body ? n - (int)(body - buf) : 0;
-        if (blen > 0 && blen < (int)sizeof(buf) - 1 && body) {
+        char *heap = NULL;
+        if (body) {
+            int have = n - (int)(body - buf);
+            int room = (int)sizeof(buf) - 1 - (int)(body - buf);
+            if (room < 0) room = 0;
+            if (blen > POST_BODY_MAX) {
+                send_status(fd, "413 Payload Too Large", "application/json",
+                            "{\"ok\":false,\"error\":\"that request is too large for this console\"}");
+                close(fd);
+                return NULL;
+            }
+            if (blen > room) {
+                /* Move what has already arrived onto the heap and finish reading there. */
+                heap = (char *)malloc((size_t)blen + 1);
+                if (!heap) {
+                    send_status(fd, "503 Service Unavailable", "application/json",
+                                "{\"ok\":false,\"error\":\"the console is out of memory right now\"}");
+                    close(fd);
+                    return NULL;
+                }
+                if (have > 0) memcpy(heap, body, (size_t)have);
+                body = heap;
+            }
             while (have < blen) {
                 int r = (int)read(fd, body + have, (size_t)(blen - have));
                 if (r <= 0) break;
                 have += r;
             }
+            if (have < 0) have = 0;
             body[have] = 0;
         }
         handle_post(fd, path, body ? body : "");
+        free(heap);
     } else {
         send_status(fd, "405 Method Not Allowed", "text/plain", "GET or POST only");
     }
