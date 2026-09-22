@@ -2463,7 +2463,29 @@ static int tile_stage_and_install(char *detail, size_t dsz) {
         snprintf(detail, dsz, "handed over to the download service (%zu bytes)", len);
         return 0;
     }
-    ilog("tile: the download service would not take it (%s) - trying the console's own installer", err);
+    /* THE FALLBACK MUST NOT MAKE THINGS WORSE, and it did.
+     *
+     * The console's own installer writes app.pkg and extracts the artwork, but NOT app.pbm, app.json
+     * or app.xml, and it creates no launch ticket. Measured: it turned a COMPLETE five-file install of
+     * this app into app.pkg alone, and the icon went from opening the shop to CE-32930-7. That is a
+     * downgrade dressed up as a repair.
+     *
+     * So it is only used when there is nothing to lose - the app is not installed, or it is installed
+     * but already unlaunchable. An install that is complete and has a ticket is left exactly as it is,
+     * and the reason is logged, because "the shop declined to touch a working icon" is information and
+     * silence is not. The PC repairs it properly when it can (see the companion's tile watchdog):
+     * BGFT accepts a package served by the PC even when it refuses one this console serves itself. */
+    long long have_bytes = installed_app_pkg(PS4_TILE_TID);
+    int have_ticket = ticket_count_for(PS4_TILE_TID) > 0;
+    if (have_bytes > 0 && have_ticket) {
+        ilog("tile: the download service would not take it (%s) - and the icon on this console is "
+             "already installed and openable, so it is being left alone rather than replaced by an "
+             "install that cannot make a launch ticket", err);
+        snprintf(detail, dsz, "%s - left the working icon alone", err);
+        return -5;
+    }
+    ilog("tile: the download service would not take it (%s) - trying the console's own installer "
+         "(it cannot create a launch ticket, so the icon may need the PC to finish the job)", err);
     char err2[256] = {0};
     if (install_direct_start(TILE_PKG_DISK, err2, sizeof(err2)) == 0) {
         snprintf(detail, dsz, "handed to the console's own installer (%zu bytes) - note that this "

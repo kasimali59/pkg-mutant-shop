@@ -4295,6 +4295,23 @@ class Ps5Bridge:
         except Exception:
             return None
 
+    def ps4_tile_launchable(self):
+        """True / False / None (could not ask). Whether the icon would actually OPEN.
+
+        INSTALLED AND LAUNCHABLE ARE DIFFERENT QUESTIONS, and only the console can answer the second.
+        A PS4 refuses to start a title its download service has no task for - klog says
+        "GameWillStart(...) -> ERROR: task not found" and the television says CE-32930-7 - so an app
+        whose files are all present and correct can still do nothing when pressed. Measured on the
+        hardware repeatedly. The payload reports `launchable` beside `registered` for exactly this."""
+        if not self.is_ps4():
+            return None
+        try:
+            d = self._shop("/api/tile/status", timeout=8) or {}
+        except Exception:
+            return None
+        v = d.get("launchable")
+        return bool(v) if v is not None else None
+
     def install_ps4_tile(self, force=False):
         """Install the dashboard app on this PS4. Returns (ok, info)."""
         if not self.is_ps4():
@@ -8997,6 +9014,47 @@ def main():
         print(" PS5 auto-find skipped: %s" % e)
     dns = DnsBlocker(cfg)
     dns.start()
+
+    # THE ICON REPAIRS ITSELF, because the console cannot always repair it alone.
+    #
+    # A PS4 with PlayStation Network blocked - which is the configuration this app asks for - has a
+    # download service that refuses to register a package the CONSOLE serves to itself: measured
+    # 0x80991404, klog "CDN Auth Expired", for both 127.0.0.1 and the console's own LAN address. The
+    # identical package offered by THIS PC registers first time and installs completely, with the
+    # boot-parameter files and a launch ticket. So the console can install its own icon but cannot
+    # always make it openable, and the PC can.
+    #
+    # Hence this: while a PS4 is reachable, if its icon is not launchable, install it from here. Once
+    # per console per REPAIR_EVERY seconds at most, so a console that cannot be fixed is not hammered,
+    # and only ever when the console itself says the icon will not open.
+    def tile_watchdog():
+        REPAIR_EVERY = 600
+        last = {}
+        while True:
+            time.sleep(45)
+            try:
+                for c0 in list(fleet.consoles):
+                    b = fleet.bridge(c0["id"])
+                    if b is None or not b.is_ps4():
+                        continue
+                    if time.time() - last.get(c0["id"], 0) < REPAIR_EVERY:
+                        continue
+                    ok = b.ps4_tile_launchable()
+                    if ok is not False:            # True, or could not ask - leave it alone
+                        continue
+                    last[c0["id"]] = time.time()
+                    print(" %s: the dashboard icon is installed but will not open - installing it "
+                          "from here so it gets a launch ticket" % b.name)
+                    try:
+                        good, info = b.install_ps4_tile(force=True)
+                        print(" %s: icon repair %s (%s)" % (b.name, "started" if good else "failed",
+                                                            info))
+                    except Exception as e:
+                        print(" %s: icon repair failed: %s" % (b.name, e))
+            except Exception:
+                pass
+
+    threading.Thread(target=tile_watchdog, daemon=True).start()
 
     transfers = {}
     queue = Queue(fleet, transfers, cfg)
