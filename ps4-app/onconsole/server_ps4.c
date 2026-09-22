@@ -2114,8 +2114,25 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
        The token parser on the serving side stops at the dot, so `/pkgfile/0.pkg` is still token 0.
        Loopback rather than our LAN address: both are accepted now, and 127.0.0.1 cannot break if
        the console's address changes under us. */
+    /* THE CONSOLE'S OWN LAN ADDRESS, NOT 127.0.0.1, AND THE DIFFERENCE IS NOT COSMETIC.
+     *
+     * With PlayStation Network unreachable - which is the configuration this shop asks for, because a
+     * reachable PSN refuses to install any title the Store has an update for and deletes fake-signed
+     * retail titles on restart - the download service refuses a LOOPBACK url outright:
+     *
+     *     uri=http://127.0.0.1:8710/pkgfile/0.pkg   register failed rc=0x80991404
+     *     klog: [BGFT] ERROR: [360] status = 404 / [BGFT] [577] !!! CDN Auth Expired !!!
+     *
+     * The identical package offered at a LAN address registered first time and installed completely,
+     * with app.pbm, app.json and app.xml written and a launch ticket created. Two attempts, one
+     * difference. Whatever the service does with a loopback host, it ends in an authentication path
+     * that cannot work with Sony unreachable.
+     *
+     * lan_ip_str() is still THIS console serving THIS package to itself - no PC involved, so the app
+     * still installs itself with everything else switched off. It just says where it is by its
+     * address on the network instead of by loopback. */
     char uri[256];
-    snprintf(uri, sizeof(uri), "http://127.0.0.1:%d/pkgfile/%d.pkg", (int)PORT, tok);
+    snprintf(uri, sizeof(uri), "http://%s:%d/pkgfile/%d.pkg", lan_ip_str(), (int)PORT, tok);
     const char *label = title[0] ? title : local;
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
     if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat), err, errsz, &task) != 0)
