@@ -909,6 +909,32 @@ static int bgft_sweep_ours(OrbisBgftTaskId keep) {
     return freed;
 }
 
+/* How many of our BGFT tasks name this title - i.e. does it still have a launch ticket?
+ *
+ * Needed because a title can be perfectly installed and still refuse to open. Measured after a
+ * console restart: our app's app.pkg, app.pbm, app.json and app.xml were all present and byte-correct
+ * and app.db listed it at 01.04, yet pressing the icon did nothing - because the task table had been
+ * emptied of our tasks and ShellCore's sceBgftNotifyGameWillStart answers "task not found", which is
+ * fatal (see bgft_sweep_ours). Bytes are not launchability. */
+static int ticket_count_for(const char *tid) {
+    if (!tid || !tid[0]) return 0;
+    DIR *d = opendir(BGFT_TASK_ROOT);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char *end = NULL;
+        long id = strtol(e->d_name, &end, 16);
+        if (!end || *end || id < 0) continue;
+        char t[16];
+        bgft_task_title(e->d_name, t, sizeof(t));
+        if (t[0] && !strcmp(t, tid)) n++;
+    }
+    closedir(d);
+    return n;
+}
+
 /* Release the tasks belonging to ONE title, which is what has to happen before that same title is
  * installed again.
  *
@@ -2467,11 +2493,20 @@ static void *tile_thread(void *unused) {
     int hv = tile_ver_num(have), wv = tile_ver_num(PS4_TILE_VER);
 
     if (bytes > 0 && hv >= wv) {
-        if (tile_bytes_match()) {
+        /* A LAUNCH TICKET IS PART OF BEING INSTALLED. Without one the icon is on the home screen and
+           does nothing - the console refuses to start a title BGFT has no task for. Reinstalling is
+           what creates one, and it costs four seconds from a copy this ELF already carries, so an
+           icon that cannot open is always worth that. */
+        int tickets = ticket_count_for(PS4_TILE_TID);
+        if (tile_bytes_match() && tickets > 0) {
             ilog("tile: already installed at %s (carrying %s) - nothing to do",
                  have[0] ? have : "?", PS4_TILE_VER);
             return NULL;
         }
+        if (tile_bytes_match() && tickets == 0) {
+            ilog("tile: installed at %s and correct, but it has no launch ticket - the console would "
+                 "refuse to open it, so installing it again to make one", have[0] ? have : "?");
+        } else {
         if (tile_repair_tried()) {
             ilog("tile: the console's copy still differs from this build after one repair "
                  "- leaving it alone");
@@ -2480,6 +2515,7 @@ static void *tile_thread(void *unused) {
         tile_repair_mark();
         ilog("tile: the console reports %s but its copy is not the package this build carries "
              "- reinstalling it", have[0] ? have : "?");
+        }
     } else if (bytes > 0) {
         ilog("tile: installed at %s, this build carries %s - updating", have[0] ? have : "?",
              PS4_TILE_VER);
@@ -2786,11 +2822,18 @@ static void handle_get(int fd, const char *rawpath) {
            payload that carried it would contain a copy of itself and grow with every build. The PC
            installs it, down the ordinary install lane. */
         long long onDisk = installed_app_pkg(PS4_TILE_TID);
-        char out[220];
+        int tickets = ticket_count_for(PS4_TILE_TID);
+        char out[300];
+        /* `launchable` is reported separately from `registered` on purpose. A title can be installed,
+           byte-correct and listed by the console and STILL refuse to open, because the console will
+           not start a title BGFT has no task for. Anything that shows the icon's state needs to be
+           able to tell those two apart. */
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"platform\":\"ps4\",\"title_id\":\"%s\",\"registered\":%s,"
-                 "\"bytes\":%lld,\"installed_by\":\"companion\"}",
-                 PS4_TILE_TID, onDisk > 0 ? "true" : "false", onDisk);
+                 "\"bytes\":%lld,\"tickets\":%d,\"launchable\":%s,"
+                 "\"installed_by\":\"companion\"}",
+                 PS4_TILE_TID, onDisk > 0 ? "true" : "false", onDisk, tickets,
+                 (onDisk > 0 && tickets > 0) ? "true" : "false");
         send_json(fd, out);
         return;
     }
