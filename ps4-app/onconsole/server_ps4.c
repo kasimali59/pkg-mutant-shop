@@ -1034,7 +1034,6 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
     bgft_sweep_ours(BGFT_INVALID_TASK_ID);
     char want_tid[16] = {0};
     tid_from_cid(cid, want_tid, sizeof(want_tid));
-    if (want_tid[0]) bgft_release_title(want_tid);
 
     OrbisBgftDownloadParam p;
     memset(&p, 0, sizeof(p));
@@ -1052,6 +1051,16 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
 
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
     int rc = bgft_register_fn(&p, &task);
+    /* RELEASE THE TITLE'S OLD TASK ONLY WHEN THAT IS WHAT IS IN THE WAY.
+       This used to release it BEFORE registering, and a register that then failed for some unrelated
+       reason left the title with no task at all - which is to say unlaunchable, because the console
+       will not start a title BGFT has no task for. Measured: with PlayStation Network unreachable,
+       register answers 0x80991404 ("CDN Auth Expired" in klog) and our own app lost the ticket it
+       already had and could not get it back. The conflict codes are the only ones a release can fix,
+       so it is spent on those and nothing else. */
+    if (((unsigned)rc == 0x80990086u || (unsigned)rc == 0x80990088u) && want_tid[0]) {
+        if (bgft_release_title(want_tid) > 0) rc = bgft_register_fn(&p, &task);
+    }
     /* TWO REFUSALS WORTH SAYING IN WORDS, because their codes have been misread here before.
        0x80990086 is CONTENT_ALREADY_DOWNLOADING and 0x80990088 is SAME_APPLICATION_ALREADY_INSTALLED
        - both mean "a task for this content id is in the way", and the release above should already
@@ -2420,13 +2429,32 @@ static int tile_stage_and_install(char *detail, size_t dsz) {
     close(f);
     if (off != len) { snprintf(detail, dsz, "short write %zu/%zu", off, len); return -3; }
 
+    /* TWO LANES, AND THE SECOND ONE IS NOT A CONSOLATION PRIZE.
+     *
+     * The BGFT lane is preferred because a finished BGFT task is what makes the icon openable at all.
+     * But BGFT refuses to register anything when it cannot authenticate with Sony's content network -
+     * measured as 0x80991404, klog "!!! CDN Auth Expired !!!" - and a console with PlayStation Network
+     * blocked is exactly the configuration this shop asks for, because a reachable PSN refuses to
+     * install any title the Store has an update for and deletes fake-signed retail titles on restart.
+     *
+     * So when BGFT will not take it, the console's own installer will: the app is installed and up to
+     * date either way. What the direct lane cannot produce is the launch ticket, and that is said out
+     * loud rather than papered over - an icon that is present but will not open is a different problem
+     * from an icon that is missing, and the log should let someone tell them apart. */
     char err[256] = {0};
-    if (install_local_pkg(TILE_PKG_DISK, err, sizeof(err)) != 0) {
-        snprintf(detail, dsz, "%s", err);
-        return -4;
+    if (install_local_pkg(TILE_PKG_DISK, err, sizeof(err)) == 0) {
+        snprintf(detail, dsz, "handed over to the download service (%zu bytes)", len);
+        return 0;
     }
-    snprintf(detail, dsz, "handed over (%zu bytes)", len);
-    return 0;
+    ilog("tile: the download service would not take it (%s) - trying the console's own installer", err);
+    char err2[256] = {0};
+    if (install_direct_start(TILE_PKG_DISK, err2, sizeof(err2)) == 0) {
+        snprintf(detail, dsz, "handed to the console's own installer (%zu bytes) - note that this "
+                              "lane cannot create a launch ticket", len);
+        return 0;
+    }
+    snprintf(detail, dsz, "%s, and the console's own installer said: %s", err, err2);
+    return -4;
 }
 
 /* IS THE CONSOLE'S COPY THE PACKAGE THIS ELF CARRIES?
