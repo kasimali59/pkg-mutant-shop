@@ -8151,11 +8151,33 @@ class Handler(BaseHTTPRequestHandler):
             if not b:
                 continue
             try:
+                # `ps5` here is the CONSOLE's own answer about ITSELF - a PS4 fills the same key
+                # with its own drives - so this is not the fleet-wide legacy key and is correct.
                 devs = (b._shop("/api/devices", timeout=8) or {}).get("ps5") or []
             except Exception:
                 return None                          # cannot ask -> do not stand in the way
             live = [x for x in devs if x.get("detected") and x.get("free")]
-            if pkg_only:
+            # THE USB FILTER IS A PS5 RULE AND IT MUST NOT RUN ON A PS4.
+            #
+            # On a PS5 a stick is exFAT and can never be an Installation Location, so dropping usbN
+            # is right. On a PS4 extended storage IS a usbN mount - that is how the PS4 presents the
+            # drive most owners install everything to. Dropping them left the internal HDD alone,
+            # and an owner whose internal drive is nearly full (the normal arrangement when you
+            # have extended storage) was refused instantly, before the console was asked, for a
+            # game that had room waiting for it.
+            #
+            # Worse with two consoles: the loop below returns on the FIRST target that does not
+            # fit, so one phantom refusal on the PS4 also cancelled the PS5's half of an "All
+            # consoles" install.
+            #
+            # THE HONEST COST, stated rather than glossed: the PS4 reports a thumb drive and a
+            # PS4-formatted extended drive identically - same id shape, same "USB%d" label, no
+            # filesystem or role field - so this can now let a package through against a stick it
+            # could never install to. That is the right way round for this function, whose own
+            # rule is that a preflight which guesses is worse than none: a wrong allow hands the
+            # decision back to the console, a wrong refusal is a dead end with no force button.
+            # Telling the two apart needs the PS4 payload to say which usbN is extended storage.
+            if pkg_only and not b.is_ps4():
                 live = [x for x in live if not str(x.get("id") or "").lower().startswith("usb")]
             if not live:
                 return None                          # nothing to compare against -> say nothing
@@ -8165,9 +8187,12 @@ class Handler(BaseHTTPRequestHandler):
                 continue                             # it fits somewhere - the console picks where
             # Both halves of the sentence now agree: it fits nowhere, so the way out is space.
             # It used to end "or send it to a drive with room" right after saying no drive had any.
-            return ("%s needs %s and no drive on the PS5 has that much free. The most room is %s "
+            # NAME THE CONSOLE THAT RAN OUT OF ROOM. It said "the PS5" whichever console this was
+            # about - wrong on a PS4 even when the refusal itself is correct, and useless with two
+            # consoles connected, where the whole question is which one is full.
+            return ("%s needs %s and no drive on the %s has that much free. The most room is %s "
                     "on %s - free some space there, or plug in a drive with room."
-                    % (body.get("name") or "This game", human_size(need),
+                    % (body.get("name") or "This game", human_size(need), b.name,
                        human_size(roomiest.get("free")), roomiest.get("label") or roomiest.get("id")))
         return None
 

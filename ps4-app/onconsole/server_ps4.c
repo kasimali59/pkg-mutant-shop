@@ -771,6 +771,19 @@ static struct {
     char state[24];        /* idle | downloading | installed | error */
     char msg[256];
     unsigned rc;
+    int  held;             /* "+ Queue" put it here and it has not been started yet. The PS5 build
+                              has had this since the day the queue existed; this one ignored
+                              mode:"queued" entirely and installed on the spot, so the button that
+                              exists to POSTPONE an install started one. */
+    long long want_size;   /* WHAT BGFT WILL ASK FOR WHEN THIS IS RELEASED, kept beside the url.
+                              A task needs the CONTENT id and the REAL size: a title id alone is
+                              refused with 0x80990008 and a size of 0 is refused outright. The
+                              on-console install route passed neither - it derived an id from the
+                              package's FILE NAME, which yields a title id for any file named
+                              "<Game>-CUSA#####.pkg", so every start answered "the console refused
+                              this package". Measured: rc=0x80990008 id=CUSA02365 size=0. */
+    char want_cid[64];
+    char want_type[8];
 } g_job;
 
 /* Handles from dlopen, kept so we can search them by name.
@@ -2207,6 +2220,26 @@ static void json_str_field(const char *body, const char *key, char *out, size_t 
     out[j] = 0;
 }
 
+/* One NUMBER out of the same small JSON body. json_str_field only reads quoted values, and the
+   fields BGFT actually needs - size above all - arrive unquoted. There was no reader for them, so
+   the on-console install route passed 0 and the console refused the task. Returns 0 when absent,
+   which is what the callers already treat as "not stated". */
+static long long json_num_field(const char *body, const char *key) {
+    if (!body || !key) return 0;
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *k = strstr(body, pat);
+    if (!k) return 0;
+    const char *c = strchr(k + strlen(pat), ':');
+    if (!c) return 0;
+    c++;
+    while (*c == ' ' || *c == '\t' || *c == '"') c++;
+    long long v = 0;
+    int any = 0;
+    while (*c >= '0' && *c <= '9') { v = v * 10 + (*c - '0'); c++; any = 1; }
+    return any ? v : 0;
+}
+
 /* Install a package that is already on this console. Returns nothing - it answers `fd` itself. */
 /* Install a package that is ALREADY on this console. Returns 0 when the console has taken it;
    `err` carries a sentence either way. Split out from the route below so the ELF's own dashboard-app
@@ -3220,6 +3253,88 @@ static void handle_get(int fd, const char *rawpath) {
         install_local_path(fd, lp);
         return;
     }
+    /* ---------------- THE QUEUE, AS THE DOCK EXPECTS IT ----------------------------------------
+     *
+     * This build served no /api/queue at all, and handle_get answers an unknown /api/ path with
+     * 200 and an empty object - so on a console with no PC the dock did not merely stay empty, it
+     * actively said "Nothing is installing. Pick a game and press Install." while a multi-gigabyte
+     * install was writing to the drive. That is the failure the PS5 build's own comment warns
+     * about: indistinguishable from a hang, and what makes someone power-cycle a console mid-write.
+     *
+     * One slot, because the console installs one package at a time. The shape is the PS5's, with
+     * one difference in our favour: BGFT reports real byte counts, so `pct` is a measurement here
+     * rather than the PS5's honest -1. */
+    if (!strcmp(path, "/api/queue")) {
+        job_refresh();
+        pthread_mutex_lock(&g_job_lock);
+        int show = g_job.held || g_job.active;
+        char en[400], em[400], o[1000];
+        json_escape(g_job.name[0] ? g_job.name : g_job.tid, en, sizeof(en));
+        json_escape(g_job.msg, em, sizeof(em));
+        const char *st = g_job.held ? "held"
+                       : !strcmp(g_job.state, "installed") ? "playable"
+                       : !strcmp(g_job.state, "error") ? "error"
+                       : g_job.active ? "transferring" : "queued";
+        int pct = g_job.held ? 0
+                : !strcmp(g_job.state, "installed") ? 100
+                : !strcmp(g_job.state, "error") ? 0
+                : (g_job.total > 0 ? (int)((g_job.done * 100) / g_job.total) : -1);
+        if (pct > 100) pct = 100;
+        if (show)
+            snprintf(o, sizeof(o),
+                     "{\"tasks\":[{\"id\":\"console-local\",\"name\":\"%s\",\"state\":\"%s\","
+                     "\"pct\":%d,\"msg\":\"%s\",\"lane\":\"console-local\",\"kind\":\"base\","
+                     "\"title_id\":\"%s\",\"done\":%lld,\"total\":%lld}]}",
+                     en, st, pct, em, g_job.tid, g_job.done, g_job.total);
+        else
+            snprintf(o, sizeof(o), "{\"tasks\":[]}");
+        pthread_mutex_unlock(&g_job_lock);
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/queue/start")) {
+        /* Release the held install. Everything needed to start it is already in the slot. */
+        pthread_mutex_lock(&g_job_lock);
+        int can = g_job.held && !g_job.active;
+        char uri[1024], qcid[64], qtype[8], qnm[160];
+        long long qsize = g_job.want_size;
+        snprintf(uri, sizeof(uri), "%s", g_job.uri);
+        snprintf(qcid, sizeof(qcid), "%s", g_job.want_cid);
+        snprintf(qtype, sizeof(qtype), "%s", g_job.want_type);
+        snprintf(qnm, sizeof(qnm), "%s", g_job.name);
+        pthread_mutex_unlock(&g_job_lock);
+        if (!can || !uri[0]) { send_json(fd, "{\"ok\":true,\"started\":0}"); return; }
+        char err[256] = {0};
+        OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
+        if (bgft_install_url(uri, qnm, qcid, qsize, qtype, err, sizeof(err), &task) != 0) {
+            char esc[300], out[420];
+            json_escape(err, esc, sizeof(esc));
+            snprintf(out, sizeof(out), "{\"ok\":false,\"started\":0,\"error\":\"%s\"}", esc);
+            send_json(fd, out);
+            return;
+        }
+        pthread_mutex_lock(&g_job_lock);
+        g_job.held = 0; g_job.active = 1; g_job.task = task;
+        g_job.job_id = now_ms(); g_job.started_ms = now_ms();
+        job_baseline_locked();
+        snprintf(g_job.state, sizeof(g_job.state), "downloading");
+        snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
+        pthread_mutex_unlock(&g_job_lock);
+        send_json(fd, "{\"ok\":true,\"started\":1}");
+        return;
+    }
+    if (!strcmp(path, "/api/queue/clear")) {
+        /* "Clear done" - only ever the finished row. Clearing the slot under a running install
+           would throw away the verdict that says whether it worked. */
+        pthread_mutex_lock(&g_job_lock);
+        int running = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+        if (!running) memset(&g_job, 0, sizeof(g_job));
+        pthread_mutex_unlock(&g_job_lock);
+        send_json(fd, running ? "{\"ok\":false,\"error\":\"That install is still running. "
+                                "Let it finish, then this row will clear.\"}"
+                              : "{\"ok\":true,\"cleared\":true}");
+        return;
+    }
     if (!strcmp(path, "/api/engine/job")) {
         job_refresh();
         pthread_mutex_lock(&g_job_lock);
@@ -3508,6 +3623,80 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
     char *q = strchr(path, '?');
     if (q) *q = 0;
 
+    /* THE DOCK'S PER-ROW BUTTONS. Without these the X, the retry arrow and the cancel cross were
+       requests nothing answered - handle_post's fall-through sends 200 {}, which the page reads as
+       a reply that simply did nothing. */
+    if (!strncmp(path, "/api/queue/", 11) && strstr(path, "/cancel")) {
+        pthread_mutex_lock(&g_job_lock);
+        int held = g_job.held;
+        if (held) memset(&g_job, 0, sizeof(g_job));
+        pthread_mutex_unlock(&g_job_lock);
+        if (held) { send_json(fd, "{\"ok\":true,\"cancelled\":true}"); return; }
+        /* A running one is stopped the same way /api/engine/cancel stops it: tell BGFT to stop,
+           hand the task back, and mark the slot. Written out rather than shared with that route
+           because that one is a GET branch in another function; two short copies of six lines beat
+           a refactor of the dispatch while the console is in the middle of a release. */
+        pthread_mutex_lock(&g_job_lock);
+        OrbisBgftTaskId qt = g_job.task;
+        int qact = g_job.active;
+        pthread_mutex_unlock(&g_job_lock);
+        int qrc = -1;
+        if (qact && bgft_stop_fn) qrc = bgft_stop_fn(qt);
+        if (qact) bgft_release(qt);
+        pthread_mutex_lock(&g_job_lock);
+        if (qact) { g_job.released = 1;
+                    snprintf(g_job.state, sizeof(g_job.state), "error");
+                    snprintf(g_job.msg, sizeof(g_job.msg), "Stopped from the shop"); }
+        pthread_mutex_unlock(&g_job_lock);
+        char qo[160];
+        snprintf(qo, sizeof(qo), "{\"ok\":%s,\"stopped\":%s}",
+                 qact ? "true" : "false", (qrc == 0) ? "true" : "false");
+        send_json(fd, qo);
+        return;
+    }
+    if (!strncmp(path, "/api/queue/", 11) && strstr(path, "/dismiss")) {
+        pthread_mutex_lock(&g_job_lock);
+        int running = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+        if (!running) memset(&g_job, 0, sizeof(g_job));
+        pthread_mutex_unlock(&g_job_lock);
+        send_json(fd, running ? "{\"ok\":false,\"error\":\"That install is still running. "
+                                "Let it finish, then this row will clear.\"}"
+                              : "{\"ok\":true,\"dismissed\":true}");
+        return;
+    }
+    if (!strncmp(path, "/api/queue/", 11) && strstr(path, "/retry")) {
+        /* The slot still holds the url from the attempt that failed, which is the whole point of
+           retry on a console with no PC: there is nothing to re-send from anywhere. */
+        pthread_mutex_lock(&g_job_lock);
+        int can = !g_job.active && g_job.uri[0];
+        if (!can) can = (!strcmp(g_job.state, "error")) && g_job.uri[0];
+        char uri[1024], rcid[64], rtype[8], rnm[160];
+        long long rsize = g_job.want_size;
+        snprintf(uri, sizeof(uri), "%s", g_job.uri);
+        snprintf(rcid, sizeof(rcid), "%s", g_job.want_cid);
+        snprintf(rtype, sizeof(rtype), "%s", g_job.want_type);
+        snprintf(rnm, sizeof(rnm), "%s", g_job.name);
+        pthread_mutex_unlock(&g_job_lock);
+        if (!can) { send_json(fd, "{\"ok\":false,\"error\":\"There is nothing here to try again\"}"); return; }
+        char err[256] = {0};
+        OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
+        if (bgft_install_url(uri, rnm, rcid, rsize, rtype, err, sizeof(err), &task) != 0) {
+            char esc[300], out[420];
+            json_escape(err, esc, sizeof(esc));
+            snprintf(out, sizeof(out), "{\"ok\":false,\"error\":\"%s\"}", esc);
+            send_json(fd, out);
+            return;
+        }
+        pthread_mutex_lock(&g_job_lock);
+        g_job.held = 0; g_job.active = 1; g_job.task = task;
+        g_job.job_id = now_ms(); g_job.started_ms = now_ms();
+        job_baseline_locked();
+        snprintf(g_job.state, sizeof(g_job.state), "downloading");
+        snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
+        pthread_mutex_unlock(&g_job_lock);
+        send_json(fd, "{\"ok\":true,\"retried\":true}");
+        return;
+    }
     if (!strcmp(path, "/api/install")) {
         /* The companion normally drives /api/engine/install-spawn; this exists so the on-console
            page can install too, and takes the same {"url": "..."} the PS5 build takes. */
@@ -3538,9 +3727,56 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             if (lk[0] == '/') { install_local_path(fd, lk); return; }
         }
         if (!uri[0]) { send_json(fd, "{\"ok\":false,\"error\":\"no package was named\"}"); return; }
+
+        /* "+ QUEUE" MEANS LATER. This build ignored `mode` and installed on the spot, so the one
+           button whose whole purpose is to postpone an install started one - and since
+           install_local_pkg refuses a second while the first runs, every further queue press then
+           answered with a red error on a console that was doing exactly what it was told. */
+        char mode[24] = {0};
+        json_str_field(body ? body : "", "mode", mode, sizeof(mode));
+        char nm[160] = {0};
+        json_str_field(body ? body : "", "name", nm, sizeof(nm));
+        /* The companion and the page both send these; without them BGFT refuses the task. Falling
+           back to the file name is what the old code did ALONE, and it is only ever right when the
+           name happens to carry a full content id. */
+        char cid[64] = {0}, ptype[8] = {0};
+        json_str_field(body ? body : "", "content_id", cid, sizeof(cid));
+        json_str_field(body ? body : "", "type", ptype, sizeof(ptype));
+        long long psize = json_num_field(body ? body : "", "size");
+        if (!cid[0]) pkg_content_id_from_url_name(uri, cid, sizeof(cid));
+        if (!strcmp(mode, "queued")) {
+            pthread_mutex_lock(&g_job_lock);
+            int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+            if (!busy) {
+                memset(&g_job, 0, sizeof(g_job));
+                g_job.held = 1;
+                g_job.job_id = now_ms();
+                snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
+                snprintf(g_job.name, sizeof(g_job.name), "%s", nm);
+                snprintf(g_job.want_cid, sizeof(g_job.want_cid), "%s", cid);
+                snprintf(g_job.want_type, sizeof(g_job.want_type), "%s", ptype);
+                g_job.want_size = psize;
+                pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
+                snprintf(g_job.state, sizeof(g_job.state), "idle");
+                snprintf(g_job.msg, sizeof(g_job.msg), "Waiting to start");
+            }
+            pthread_mutex_unlock(&g_job_lock);
+            if (busy) {
+                send_json(fd, "{\"ok\":false,\"busy\":true,"
+                              "\"error\":\"An install is already running on this PS4\"}");
+                return;
+            }
+            send_json(fd, "{\"ok\":true,\"queued\":true,\"held\":true,"
+                          "\"message\":\"Added to the queue - press Start queue when you are ready\"}");
+            return;
+        }
+
         char err[256] = {0};
         OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
-        if (bgft_install_url(uri, "", "", 0, "", err, sizeof(err), &task) != 0) {
+        /* The content id, the size and the package type, not four empty arguments. This call
+           passed "" and 0 and then reported the console's refusal as if the package were at
+           fault. */
+        if (bgft_install_url(uri, nm, cid, psize, ptype, err, sizeof(err), &task) != 0) {
             char esc[300], out[500];
             json_escape(err, esc, sizeof(esc));
             snprintf(out, sizeof(out), "{\"ok\":false,\"error\":\"%s\"}", esc);
@@ -3550,6 +3786,8 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         pthread_mutex_lock(&g_job_lock);
         memset(&g_job, 0, sizeof(g_job));
         g_job.active = 1; g_job.task = task; g_job.job_id = now_ms(); g_job.started_ms = now_ms();
+        g_job.expect = psize;
+        snprintf(g_job.name, sizeof(g_job.name), "%s", nm);
         snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
         pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
@@ -3710,7 +3948,9 @@ static int route_changes_state(const char *rawpath, int is_post) {
         "/api/quit", "/api/notify", "/api/open", "/api/register-pc", "/api/install",
         "/api/engine/cancel", "/api/engine/spawn-cleanup", "/api/fs/write", "/api/fs/mkdir",
         "/api/move", "/api/game/delete", "/api/game/delete-backup",
-        "/api/rest/prepare", "/api/payloads/autostart", NULL
+        "/api/rest/prepare", "/api/payloads/autostart",
+        /* The queue's own controls: start releases a held install, clear throws a row away. */
+        "/api/queue/start", "/api/queue/clear", NULL
     };
     char path[1024];
     snprintf(path, sizeof(path), "%s", rawpath);
@@ -3720,6 +3960,8 @@ static int route_changes_state(const char *rawpath, int is_post) {
     /* install-spawn, install-url, install-direct, install-local: every one of them hands a package
        to the console. */
     if (!strncmp(path, "/api/engine/install-", 20)) return 1;
+    /* The per-row POST verbs: cancel, dismiss, retry. Same rule the PS5 build uses. */
+    if (is_post && !strncmp(path, "/api/queue", 10)) return 1;
     return 0;
 }
 
