@@ -2987,7 +2987,13 @@ static void handle_get(int fd, const char *rawpath) {
                  "\"state\":\"%s\",\"detail\":\"%s\",\"how\":\"%s\"}",
                  PORT, SHOP_VERSION, g_bgft_ready ? "true" : "false",
                  g_job.active ? "true" : "false", lan_ip_str(),
-                 g_bgft_ready ? (g_job.active ? "busy" : "ready") : "shop-down",
+                 /* "engine-down", NOT "shop-down". The shop is plainly up - it is serving the
+                    page this sentence is read on. What did not start is the console's transfer
+                    service, and saying "shop-down" sent the reader off to re-run the jailbreak
+                    instead of closing and reopening the app, which is the thing that would help.
+                    The page has had an engine-down branch since the engine panel learned about
+                    the PS4; this route was still answering the old word. */
+                 g_bgft_ready ? (g_job.active ? "busy" : "ready") : "engine-down",
                  g_bgft_ready ? (g_job.active ? "An install is running on the console right now."
                                               : "Ready - installs can start straight away.")
                               : "The background transfer service did not start on this PS4.",
@@ -3549,11 +3555,85 @@ static void handle_get(int fd, const char *rawpath) {
         return;
     }
     if (!strcmp(path, "/api/network")) {
-        char out[900];
-        snprintf(out, sizeof(out),
-                 "{\"ok\":true,\"console\":{\"ip\":\"%s\",\"name\":\"PS4\",\"online\":true,"
-                 "\"platform\":\"ps4\"},\"peers\":[],\"this_pc\":null}", lan_ip_str());
-        send_json(fd, out);
+        /* THE DEVICES CARD WAS BOTH INVENTING A MACHINE AND DENYING THE REAL ONES.
+         *
+         * this_pc was null and peers was always empty, so on a PS4-served page the card showed a
+         * green light beside "this PC - 0 titles" (there is no PC; the reader is on a PS4) and
+         * "No other PCs found yet", even while a PC was registered with this console and serving
+         * the very library being browsed. The PS5 build fills both in, so the same card was right
+         * on one console and wrong on the other.
+         *
+         * `this_pc` is THIS CONSOLE, which is what the card means by it on a console-served page -
+         * the machine you are reading on. The peers are the PCs that have announced themselves,
+         * with the same ten-minute staleness rule /api/companion applies, so a PC that has gone
+         * quiet stops being listed here too rather than sitting there with a green light. */
+        char o[1400];
+        size_t l = 0;
+        l += (size_t)snprintf(o + l, sizeof(o) - l,
+                              "{\"ok\":true,\"this_pc\":{\"id\":\"console\",\"name\":\"This PS4\","
+                              "\"lan_ip\":\"%s\",\"port\":%d,\"url\":\"http://%s:%d\","
+                              "\"os\":\"PS4\",\"version\":\"" SHOP_VERSION "\",\"local\":true},"
+                              "\"console\":{\"ip\":\"%s\",\"name\":\"PS4\",\"online\":true,"
+                              "\"platform\":\"ps4\"},\"peers\":[",
+                              lan_ip_str(), PORT, lan_ip_str(), PORT, lan_ip_str());
+        pcpeer_t pcs[PC_MAX];
+        pthread_mutex_lock(&g_pcs_lock);
+        memcpy(pcs, g_pcs, sizeof(pcs));
+        pthread_mutex_unlock(&g_pcs_lock);
+        long long now = now_ms();
+        int first = 1;
+        for (int i = 0; i < PC_MAX && l < sizeof(o) - 220; i++) {
+            if (!pcs[i].ip[0]) continue;
+            if ((now - pcs[i].last_ms) > PC_STALE_MS) continue;
+            l += (size_t)snprintf(o + l, sizeof(o) - l,
+                                  "%s{\"id\":\"%s\",\"name\":\"%s\",\"lan_ip\":\"%s\","
+                                  "\"url\":\"http://%s:%d\",\"online\":true,\"os\":\"PC\"}",
+                                  first ? "" : ",", pcs[i].ip,
+                                  pcs[i].name[0] ? pcs[i].name : pcs[i].ip, pcs[i].ip,
+                                  pcs[i].ip, pcs[i].port);
+            first = 0;
+        }
+        snprintf(o + l, sizeof(o) - l, "]}");
+        send_json(fd, o);
+        return;
+    }
+    /* "SAVED" WAS A GREEN LIE. Settings posts its form and then reads the answer; the PS5 build
+       replies {"saved":false,"on_console":true}, which is what makes the page paint its read-only
+       banner and leave the fields alone. This build had no such route, so handle_get fell through
+       to 200 {} - no `saved`, no `on_console` - and the page took that for a successful save,
+       showed a green tick, and then the next poll refilled every field from a config that had
+       never changed. Nothing is lost, but the app said it had done something it had not.
+       A console genuinely cannot save these: they live in the PC's config.json. Saying so is the
+       whole job. */
+    if (!strcmp(path, "/api/config")) {
+        send_json(fd, "{\"ok\":true,\"saved\":false,\"on_console\":true,\"platform\":\"ps4\"}");
+        return;
+    }
+    /* The header's source bar reads sources / best / local_paths, and with none of them present it
+       printed "(none configured) · 0 sources" on a console that is serving the page it is printed
+       on. With no PC there are no mirrors - the source IS this console, and its own drives. The
+       helper flags are the ones a PS4 can honestly answer: FTP is ours and is up whenever we are;
+       ShadowMount is a PS5 service and is stated as absent rather than left for the page to guess. */
+    if (!strcmp(path, "/api/sources")) {
+        char pcsrc[420] = {0};
+        size_t pl = 0;
+        pthread_mutex_lock(&g_pcs_lock);
+        for (int i = 0; i < PC_MAX && pl < sizeof(pcsrc) - 90; i++) {
+            if (!g_pcs[i].ip[0]) continue;
+            pl += (size_t)snprintf(pcsrc + pl, sizeof(pcsrc) - pl,
+                                   ",{\"name\":\"%s\",\"ok\":true,\"kind\":\"peer\"}",
+                                   g_pcs[i].name[0] ? g_pcs[i].name : g_pcs[i].ip);
+        }
+        pthread_mutex_unlock(&g_pcs_lock);
+        char o[1200];
+        snprintf(o, sizeof(o),
+                 "{\"sources\":[{\"name\":\"this PS4\",\"ok\":true,\"latency_ms\":0,"
+                 "\"kind\":\"local\"}%s],\"best\":\"on-console\","
+                 "\"local_paths\":[\"/user/app\",\"/mnt/usb0..usb7\"],"
+                 "\"helpers\":{\"shadowmount\":false,\"shadowmount_port\":0,"
+                 "\"ftp\":true,\"ftp_port\":2121},"
+                 "\"on_console\":true,\"platform\":\"ps4\"}", pcsrc);
+        send_json(fd, o);
         return;
     }
     if (!strcmp(path, "/api/consoles")) {
@@ -3768,6 +3848,21 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             }
             send_json(fd, "{\"ok\":true,\"queued\":true,\"held\":true,"
                           "\"message\":\"Added to the queue - press Start queue when you are ready\"}");
+            return;
+        }
+
+        /* ONE INSTALL AT A TIME, and this route did not check. A second request overwrote the
+           job slot wholesale, so the BGFT task the FIRST one started was orphaned: it carried on
+           downloading while the shop's progress, its finished check and its cancel button all
+           described the second package. install_local_pkg has had this guard for a while; the url
+           branch never got it. The PS5 build refuses the second request outright, and so does
+           this now - with the same sentence the local lane uses. */
+        pthread_mutex_lock(&g_job_lock);
+        int inst_busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+        pthread_mutex_unlock(&g_job_lock);
+        if (inst_busy) {
+            send_json(fd, "{\"ok\":false,\"busy\":true,"
+                          "\"error\":\"An install is already running on this PS4\"}");
             return;
         }
 

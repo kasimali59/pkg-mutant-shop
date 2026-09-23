@@ -126,6 +126,27 @@ def used_keys(s):
             if after and after[0] not in "?:":
                 continue
             keys.add(lm.group(1))
+
+    # A KEY REACHED THROUGH A VARIABLE IS STILL A KEY.
+    #
+    # errText() looks a code up in a table of KEY NAMES and calls t() on the result -
+    # t(ERR_KEY[raw]) - so not one of those nineteen sentences appears as a literal inside a t(
+    # call. They read here as "never used", which invites deleting them and, worse, excuses every
+    # language from carrying them: the --check that gates a build would have printed 100% while a
+    # PS4 owner in Spanish got every failure message in English.
+    #
+    # So a key-shaped literal that names a DEFINED key counts as used wherever it appears in the
+    # script. It cannot invent a key - it only matches names the English dictionary already has -
+    # and the cost of being wrong in this direction is a language carrying one sentence it does
+    # not need, against a build gate that silently passes.
+    # AN UNDERSCORE IS WHAT MAKES IT KEY-SHAPED. Matching any literal that happens to equal a key
+    # name pulled in "rescan" - an ordinary word that appears in the page as a plain string and
+    # also, by coincidence, names a key. Every key this family cares about is prefixed
+    # (msg_*, tm_*, gp_*, ui_*), so requiring the underscore keeps the real ones and drops words.
+    defined = set(languages(dict_block(s)).get("en", {}))
+    for m in re.finditer(r'"([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]{2,})"', s):
+        if m.group(1) in defined:
+            keys.add(m.group(1))
     return keys
 
 
