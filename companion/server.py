@@ -7033,6 +7033,19 @@ class Handler(BaseHTTPRequestHandler):
                                "shadowmount_port": int(_helpers.get("shadowmount_port") or 10101),
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", []),
                                "companion_port": srv.cfg["companion"]["port"], "consoles": len(cons),
+                               # THE CONSOLE'S OWN PORT, stated rather than guessed at.
+                               #
+                               # Settings prints "File transfer: <console ip>:<port>" and worked
+                               # that port out as shop_port-or-companion_port - and health never
+                               # sent a shop_port, so it landed on companion_port: THIS PC's
+                               # listening port, printed against the console's address. It reads
+                               # correct only because both default to 8710. Move the companion to
+                               # another port - which its own settings offer - and the panel starts
+                               # naming a port on the console that nothing there is listening on.
+                               # The owner spotted exactly this shape of fault from a browser
+                               # reaching for a port that did not belong to the machine it was
+                               # aimed at.
+                               "shop_port": int(srv.cfg.get("console", {}).get("shop_port", 8710)),
                                # EVERY CONSOLE, not just the one the ps5_* keys describe.
                                #
                                # `consoles` stays an integer. It has shipped as one, the page and
