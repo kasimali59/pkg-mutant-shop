@@ -7687,7 +7687,7 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.match(r"^/api/mods/([^/]+)/(select|toggle|apply|disable-all)$", path)
         if mm:
             tid, act = unquote(mm.group(1)), mm.group(2)
-            b = _bridge_for(srv, self, want="ps5")
+            b = _bridge_for(srv, self, body, want="ps5")
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             body = body or {}
@@ -7813,13 +7813,13 @@ class Handler(BaseHTTPRequestHandler):
                     print("[open-folder] %s" % e)
             return self._json({"ok": True, "opened": opened})
         if path == "/api/notify":
-            b = _bridge_for(srv, self)
+            b = _bridge_for(srv, self, body)
             return self._json({"ok": bool(b and b.notify(body.get("text", "")))})
         if path == "/api/move":
             # A console-owned operation: it copies the container between the console's OWN drives,
             # verifies, then removes the original. The companion only forwards - it has no business
             # knowing console paths, and the console can finish the job with this PC switched off.
-            b = _bridge_for(srv, self)
+            b = _bridge_for(srv, self, body)
             if b is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             try:
@@ -7839,7 +7839,7 @@ class Handler(BaseHTTPRequestHandler):
             # console owns the scan that knows where the container is, and keeping the lookup there
             # means this PC never sends a path - so there is nothing here that could be pointed at
             # the local library by accident.
-            b = _bridge_for(srv, self)
+            b = _bridge_for(srv, self, body)
             if b is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             tid = (body.get("title_id") or "").strip()
@@ -7866,7 +7866,7 @@ class Handler(BaseHTTPRequestHandler):
                 srv.library.scan()
             return self._json(r)
         if path == "/api/open-ps5":
-            b = _bridge_for(srv, self)
+            b = _bridge_for(srv, self, body)
             if b is None:
                 return self._json({"ok": False,
                                    "error": "no console configured"}, 400)
@@ -7941,7 +7941,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/install":
             return self._install(body)
         if path == "/api/hosts/cleanup":             # kept as a no-op: see the reply
-            bridge = _bridge_for(srv, self, want="ps5")
+            bridge = _bridge_for(srv, self, body, want="ps5")
             if bridge is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             # There is nothing to clean up. This used to stop Elf Arsenal and the daemons it
@@ -7954,7 +7954,7 @@ class Handler(BaseHTTPRequestHandler):
                                "message": "Nothing to do - this app does not use a separate "
                                           "install payload any more."})
         if path == "/api/cheats/sync":               # push only what the console is missing
-            bridge = _bridge_for(srv, self)
+            bridge = _bridge_for(srv, self, body)
             if bridge is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             return self._json(bridge.sync_cheat_library(
@@ -7990,7 +7990,7 @@ class Handler(BaseHTTPRequestHandler):
         the time anyone presses this. What CAN be stale is the hand-over state, so that is what it
         clears - and it says so, rather than reporting a reload that did not happen."""
         srv = self.server
-        b = _bridge_for(srv, self, want="ps5")
+        b = _bridge_for(srv, self, body, want="ps5")
         if b is None:
             return self._json({"ok": False, "error": "no console configured"}, 400)
 
@@ -8303,7 +8303,7 @@ class Handler(BaseHTTPRequestHandler):
             # goes through the QUEUE like every other install, so "+ Queue" holds it instead of
             # starting it immediately and the job is visible with the rest.
             local_path = str(key)[len("local:"):]
-            if not (srv.fleet.bridge(targets[0]) if targets else _bridge_for(srv, self, want="ps5")):
+            if not (srv.fleet.bridge(targets[0]) if targets else _bridge_for(srv, self, body, want="ps5")):
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             jobs = [srv.queue.add({"name": body.get("name") or os.path.basename(local_path),
                                    "title_id": body.get("title_id"),

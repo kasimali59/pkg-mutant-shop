@@ -10214,6 +10214,13 @@ function setConn(cls,text){
   var p=$("#conn");p.className="pill "+cls;$("#connText").textContent=text;
 }
 function consoleName(id){return (state.consoleById[id]&&state.consoleById[id].name)||id;}
+/* "PS4" or "PS5" for the console currently chosen in the picker - what to CALL it on screen.
+   Unknown reads as PS5, the same rule the companion and the health handler follow. */
+function consolePlat(id){
+  var c=state.consoleById[id||state.console];
+  return (c&&String(c.platform||"").toLowerCase()==="ps4")?"ps4":"ps5";
+}
+function consoleLabel(id){return consolePlat(id)==="ps4"?"PS4":"PS5";}
 function loadConsoles(){
   if(API===null)return;
   api("/api/consoles").then(function(r){
@@ -10848,15 +10855,21 @@ $("#openFolder").onclick=function(){
 $("#openPs5").onclick=function(){
   if(API===null){toast("This needs the PC companion running");return;}
   var b=this; b.disabled=true;
-  api("/api/open-ps5",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})})
+  /* NAME THE CONSOLE THE BUTTON IS ABOUT, and send it. Both halves were wrong with two consoles:
+     the body was empty, so the PC picked for us, and every sentence below said "PS5" - so pressing
+     it with the PS4 chosen in the picker either opened the wrong television or told the owner that
+     a console they were not looking at was opening the shop. */
+  var dev=consoleLabel(state.console);
+  api("/api/open-ps5",{method:"POST",headers:{"Content-Type":"application/json"},
+                       body:JSON.stringify({console:state.console||""})})
     .then(function(r){
       /* ok:true or nothing. The console answers this route with a bare {} - not ok:false - and that
          used to walk into the green toast below and tell the person looking at the TV that the TV
          was opening. */
-      if(!r||r.ok!==true){toast(errText(r,"Nothing confirmed it opened — on the PS5, open the shop from Media or its dashboard tile"),"err");return;}
+      if(!r||r.ok!==true){toast(errText(r,"Nothing confirmed it opened — on the "+dev+", open the shop from Media or its home screen icon"),"err");return;}
       /* Three different outcomes, and they used to collapse into one word. Whether the browser
          opened by itself and whether the address is merely on screen are not the same thing. */
-      toast(r.launched?"The PS5 is opening the shop — look at your TV"
+      toast(r.launched?("The "+dev+" is opening the shop — look at your TV")
                       :(r.message||"The address is on your TV — or open the shop from Media"),
             r.launched?"ok":"ok");
     })
