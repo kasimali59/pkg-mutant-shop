@@ -39,7 +39,7 @@ from urllib.parse import urlparse, unquote, quote, parse_qs
 import pkg_meta
 import sources as source_engine
 
-VERSION = "3.62.0"
+VERSION = "3.63.0"
 
 if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
     HERE = os.path.dirname(sys.executable)

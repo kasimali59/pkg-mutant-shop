@@ -9,10 +9,50 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
-## [Unreleased] - two consoles, told apart `[VERIFIED]`
+## [3.63.0] - 2026-09-23 - "Both consoles, told apart" `[VERIFIED]`
 
 Measured with a PS5 (12.70) and a PS4 (13.52) both awake on the same network, and the desktop app
-talking to both at once. The PS5's ELF was not rebuilt and not touched.
+talking to both at once. The PS5's payload source changed by exactly one token - the version
+stamp - as every release does; the rebuilt ELF is staged but was not deployed to the owner's
+console, at their request.
+
+### Found by a 143-agent read of the whole app, then adversarially verified
+
+151 findings raised, 136 survived verification, 15 refuted by reading the code they described.
+Everything below is from that pass and was fixed in this release.
+
+**Two dead buttons, and my own regression.** Both "reload the install engine" controls answered
+HTTP 500 with a NameError on every press. A mechanical rewrite earlier the same day added the
+request body to every `_bridge_for` call from `_do_POST` downwards *by position in the file* and
+swept up `_dpi_reload()`, which is a method - `body` was not a name there. `tools/lint_python.py`
+now fails a build on an undefined name or a duplicate dict key, and is a gate in the exe spec.
+
+**Fifty checks that had never run.** It immediately found fifty lines of `ready_check.py` sitting
+after a `return`, unreachable since the day they were pasted there - fourteen undefined reads -
+including the guard for the rule that `lane` may only be read inside `isBackupTitle()`, which is
+the exact regression that block exists to catch.
+
+**Per-console install state.** A title's install state was a fleet fact. On this hardware: 117
+installed titles, 106 PS5-only, 7 PS4-only, 4 on both - so for 113 of them the game panel described
+the wrong machine as soon as the other was chosen. The library now carries `console_state` per
+title beside the existing scalars, which keep meaning exactly what they meant.
+
+**`/api/installed` was deleting the other console's memory.** It asked one console and pruned
+`installed.json` - the only record of what is installed when every console is off - down to that
+console's titles. Now it prunes against the union, and only when every console answered.
+
+**The PS4 had no request-origin guard.** The PS5 build has had one for a long time. Any page the
+console's own browser opened could start an install, take the shop down, write a file as root, and
+read the reply (the payload sends `Access-Control-Allow-Origin: *`). Ported verbatim, with the
+route list re-derived for the PS4's own dispatch. Every branch measured on the console.
+
+**The PS4 had no queue.** Its server answers unknown `/api/` paths with `200 {}`, so the drawer did
+not stay blank during a standalone install - it said "Nothing is installing" while gigabytes were
+being written. `+ Queue` also installed immediately, because `mode:"queued"` was ignored.
+
+**Installing from the PS4's own page was broken for most packages.** It called BGFT with no content
+id and no size, deriving an id from the file name - which yields a *title* id for any file called
+`<Game>-CUSA#####.pkg`, refused with `0x80990008`.
 
 ### The console the app is talking about is now chosen, not assumed
 

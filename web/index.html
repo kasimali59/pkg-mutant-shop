@@ -1417,7 +1417,7 @@ function led(on){return '<span class="led '+(on?"on":"")+'" style="display:inlin
    callback, and the whole class of bug is gone. */
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return c==="&"?"&amp;":c==="<"?"&lt;":c===">"?"&gt;":c==="'"?"&#39;":"&quot;";});}
 /* Fallback UI version if the companion /api/health version isn't reachable (e.g. on-console/demo). */
-var APP_VERSION="3.62.0";
+var APP_VERSION="3.63.0";
 function verNewer(a,b){var A=String(a).split("."),B=String(b).split(".");
   for(var i=0;i<Math.max(A.length,B.length);i++){var x=parseInt(A[i]||0,10)||0,y=parseInt(B[i]||0,10)||0;
     if(x!==y) return x>y;} return false;}
