@@ -46,11 +46,47 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <orbis/libkernel.h>
 #include <orbis/SystemService.h>
 
 #define SHOP_PORT 8710
+
+/* A WRITE TO A SOCKET THE OTHER END HAS CLOSED KILLS THIS PROCESS, and that is very probably the
+ * black screen followed by CE-34878-0.
+ *
+ * SIGPIPE's default action is to terminate. Every byte of the payload - 1.7 MB of it - goes out
+ * through write() on a socket owned by the jailbreak's payload loader, and the moment that loader
+ * decides it has enough (it saves the body to a temp file and then goes off to find and patch the
+ * process it injects into) our next write lands on a closed pipe and this program is gone. No
+ * message, no log line, no chance to notify: the signal is delivered and the process ends.
+ *
+ * The symptom matches exactly. The console showed the loader's own "payload received" notice - it
+ * had the bytes - and then nothing at all, because the program that was supposed to wait for the
+ * shop and open the browser had already been killed. And it is a race, which is why the same
+ * build launched perfectly one day and died the next: the timing depends on what the console is
+ * doing, and a reboot changes that.
+ *
+ * TWO LAYERS, because one of them may be refused:
+ *   1. SIG_IGN for SIGPIPE, process-wide, before any socket exists. write() then returns -1/EPIPE,
+ *      which every write_all() in here already handles as a failure.
+ *   2. SO_NOSIGPIPE on each socket. FreeBSD's per-socket form of the same thing, and the PS4's
+ *      network stack is FreeBSD. Defined here because the toolchain's headers may not carry it;
+ *      the value is the FreeBSD one, and a kernel that does not know the option simply refuses
+ *      the setsockopt, which is why its return value is deliberately not checked.
+ *
+ * This project has been bitten by SIGPIPE on this console before, in the payload. The payload
+ * ignores it. This program - which does the single largest write anything here performs - did not.
+ */
+#ifndef SO_NOSIGPIPE
+#define SO_NOSIGPIPE 0x0800
+#endif
+
+static void sock_no_sigpipe(int s) {
+    int one = 1;
+    (void)setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+}
 
 /* ------------------------------------------------- calling things, and leaving without crashing
  *
@@ -140,6 +176,7 @@ static _Noreturn void leave(void) {
 static int shop_is_up(void) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return 0;
+    sock_no_sigpipe(s);
     struct timeval tv;
     tv.tv_sec = 2; tv.tv_usec = 0;
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -169,6 +206,7 @@ static int write_all(int fd, const char *buf, size_t len);   /* defined with the
 static int ask_shop_to_open(void) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return -1;
+    sock_no_sigpipe(s);
     struct timeval tv;
     tv.tv_sec = 15; tv.tv_usec = 0;
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -224,6 +262,7 @@ static int send_payload(int port, int http) {
 
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) { close(f); return -1; }
+    sock_no_sigpipe(s);
     struct timeval tv;
     tv.tv_sec = 30; tv.tv_usec = 0;
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -255,15 +294,35 @@ static int send_payload(int port, int http) {
     }
     free(buf);
     close(f);
-    char rep[256];
-    if (!bad) (void)read(s, rep, sizeof(rep));
+    /* The loader is not an HTTP server and usually just closes, so a long wait here buys nothing
+       and costs the user a black screen - this program draws nothing once the splash is hidden.
+       Five seconds is long enough for a reply that is coming and short enough not to be felt. */
+    struct timeval rtv;
+    rtv.tv_sec = 5; rtv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+    char rep[256] = {0};
+    if (!bad) {
+        ssize_t rn = read(s, rep, sizeof(rep) - 1);
+        if (rn > 0) {
+            for (ssize_t i = 0; i < rn; i++)
+                if (rep[i] == '\r' || rep[i] == '\n') { rep[i] = 0; break; }
+            printf("[PMS] loader :%d replied: %.80s\n", port, rep);
+        }
+    }
     close(s);
-    printf("[PMS] loader :%d took the payload: %s\n", port, bad ? "no" : "yes");
+    /* SENT, not "started". All this can know is that every byte left this program; whether the
+       loader could do anything with them is answered by the shop coming up, below. Calling this
+       "took the payload" read as success and hid a hand-over that had gone nowhere. */
+    printf("[PMS] loader :%d - payload sent in full: %s (%lld bytes)\n",
+           port, bad ? "no" : "yes", (long long)st.st_size);
     return bad ? -1 : 0;
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* BEFORE ANY SOCKET EXISTS. See the note beside sock_no_sigpipe: an unhandled SIGPIPE ends
+       this process instantly and silently, part-way through handing over the payload. */
+    signal(SIGPIPE, SIG_IGN);
     printf("[PMS] PKG MUTANT SHOP app starting\n");
     /* WITHOUT THIS THE CONSOLE SHOWS THE LOADING SCREEN AND NOTHING ELSE, which from the sofa is
        indistinguishable from an app that does not work. The toolchain's own samples call it first
@@ -295,6 +354,10 @@ int main(void) {
     notify("Starting PKG MUTANT SHOP");
 
     int handed = (send_payload(LOADER_HTTP, 1) == 0) || (send_payload(LOADER_RAW, 0) == 0);
+    /* THE TELEVISION IS THE ONLY DISPLAY THIS PROGRAM HAS. The splash is hidden and it draws
+       nothing, so between here and the browser coming forward the screen is black - and a black
+       screen is what a crash looks like too. One line, once, so the wait is visibly a wait. */
+    if (handed) notify("PKG MUTANT SHOP is starting\nThis takes a few seconds");
     if (handed) {
         for (int i = 0; i < 30; i++) {
             sceKernelUsleep(1000 * 1000);

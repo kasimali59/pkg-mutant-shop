@@ -3081,17 +3081,42 @@ static void handle_get(int fd, const char *rawpath) {
            installs it, down the ordinary install lane. */
         long long onDisk = installed_app_pkg(PS4_TILE_TID);
         int tickets = ticket_count_for(PS4_TILE_TID);
-        char out[300];
+        /* IS IT THE RIGHT BUILD? Separate from both "installed" and "will it open", and the state
+           this console spent a day in: the icon was present, had its launch ticket and opened -
+           and was an older build than the one this ELF carries. Nothing was looking for that.
+           This ELF tries to replace it and the download service refuses a package the console
+           serves to itself (0x80991404, PlayStation Network being blocked - which is the
+           configuration the shop asks for), and the direct lane cannot make a launch ticket, so
+           replacing a working icon with it would be a downgrade. The PC has no such problem: the
+           download service takes a package served from the PC. So the honest thing this end can
+           do is SAY the copy is old and let the PC act on it.
+
+           -1 means "cannot tell": the lite build carries no package to compare against, and a
+           lite payload must never report "stale" and send the PC into a repair loop over a
+           comparison it could not make. */
+#ifdef PMS_LITE
+        int stale = -1;
+#else
+        int stale = (onDisk > 0) ? (tile_bytes_match() ? 0 : 1) : -1;
+#endif
+        char out[420];
         /* `launchable` is reported separately from `registered` on purpose. A title can be installed,
            byte-correct and listed by the console and STILL refuse to open, because the console will
            not start a title BGFT has no task for. Anything that shows the icon's state needs to be
            able to tell those two apart. */
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"platform\":\"ps4\",\"title_id\":\"%s\",\"registered\":%s,"
-                 "\"bytes\":%lld,\"tickets\":%d,\"launchable\":%s,"
-                 "\"installed_by\":\"companion\"}",
+                 "\"bytes\":%lld,\"tickets\":%d,\"launchable\":%s,\"stale\":%s,"
+                 "\"carries_package\":%s,\"installed_by\":\"companion\"}",
                  PS4_TILE_TID, onDisk > 0 ? "true" : "false", onDisk, tickets,
-                 (onDisk > 0 && tickets > 0) ? "true" : "false");
+                 (onDisk > 0 && tickets > 0) ? "true" : "false",
+                 stale < 0 ? "null" : (stale ? "true" : "false"),
+#ifdef PMS_LITE
+                 "false"
+#else
+                 "true"
+#endif
+                 );
         send_json(fd, out);
         return;
     }

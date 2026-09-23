@@ -1260,7 +1260,7 @@ html{scroll-behavior:smooth}
           <h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg></span><span data-i18n="sec_installing">Installing</span></h3>
           <div class="svc"><span class="k"><span class="led" id="ledEngine"></span><span data-i18n="ui_ready_to_install">Ready to install</span></span><span class="v" id="engState">-</span></div>
           <div class="svc"><span class="k"><span class="led" id="ledShop"></span><span data-i18n="ui_shop_on_ps5">Shop on the PS5</span></span><span class="v mono ell" id="engShop">-</span></div>
-          <div class="svc"><span class="k"><span class="led" id="ledPld"></span>Payload Manager</span><span class="v mono ell" id="engPld">-</span></div>
+          <div class="svc"><span class="k"><span class="led" id="ledPld"></span><span id="engPldK" data-i18n="msg_eng_row_pldmgr">Payload Manager</span></span><span class="v mono ell" id="engPld">-</span></div>
           <div class="hint" id="engDetail"></div>
           <div class="hint" id="engHow" style="opacity:.72"></div>
           <div class="svc" style="margin-top:8px"><span class="k" data-i18n="ui_install_at_once">Install at once</span>
@@ -1897,6 +1897,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP is not answering on the PS5. Load it from Payload Manager, then reopen this panel.",
     msg_eng_detail_no_console:"No PS5 is set up yet - add its address above.",
     msg_eng_how_spawn:"A fresh installer is started for every install and exits when the console has accepted the package. Nothing stays running, so nothing can wedge.",
+    msg_eng_how_bgft:"Installs are handed to the PS4's own download-and-install service, so a finished install is a real one the console can launch.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Install service",
+    msg_eng_ps4_svc_ready:"the console's own installer · ready",
+    msg_eng_ps4_svc_down:"the console's own installer · not started",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP is not answering on the PS4. Run the jailbreak, then open PKG MUTANT SHOP on the console.",
+    msg_eng_detail_engine_down_ps4:"The PS4 install service did not start. Close PKG MUTANT SHOP on the console and open it again.",
+    msg_eng_detail_ready_ps4:"Ready - PS4 games can be installed straight away.",
+    msg_eng_detail_no_console_any:"No console is set up yet - add one above.",
+    msg_svc_backups_not_ps4:"not on the PS4 - games are installed, not mounted",
     msg_ver_older_than_page:" · older than this page",
     msg_ver_newer_than_page:" · newer than this page",
     msg_helpers_autostart_on:"Helpers auto-start: on",
@@ -2383,6 +2393,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP no responde en la PS5. Cárgalo desde Payload Manager y vuelve a abrir este panel.",
     msg_eng_detail_no_console:"Aún no hay ninguna PS5 configurada - añade su dirección arriba.",
     msg_eng_how_spawn:"Se inicia un instalador nuevo para cada instalación y termina cuando la consola ha aceptado el paquete. Nada queda en ejecución, así que nada puede atascarse.",
+    msg_eng_how_bgft:"Las instalaciones se entregan al propio servicio de descarga e instalación de la PS4, así que una instalación terminada es real y la consola puede abrirla.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Servicio de instalación",
+    msg_eng_ps4_svc_ready:"el instalador de la propia consola · listo",
+    msg_eng_ps4_svc_down:"el instalador de la propia consola · no se inició",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP no responde en la PS4. Ejecuta el jailbreak y luego abre PKG MUTANT SHOP en la consola.",
+    msg_eng_detail_engine_down_ps4:"El servicio de instalación de la PS4 no se inició. Cierra PKG MUTANT SHOP en la consola y vuelve a abrirlo.",
+    msg_eng_detail_ready_ps4:"Listo: los juegos de PS4 se pueden instalar de inmediato.",
+    msg_eng_detail_no_console_any:"Aún no hay ninguna consola configurada: añade una arriba.",
+    msg_svc_backups_not_ps4:"no existe en la PS4: los juegos se instalan, no se montan",
     msg_ver_older_than_page:" · más antigua que esta página",
     msg_ver_newer_than_page:" · más nueva que esta página",
     msg_helpers_autostart_on:"Ayudantes al inicio: activado",
@@ -2869,6 +2889,16 @@ var I18N={
     msg_eng_detail_shop_down:"O PKG MUTANT SHOP não responde na PS5. Carrega-o a partir do Payload Manager e volta a abrir este painel.",
     msg_eng_detail_no_console:"Ainda não há nenhuma PS5 configurada - adiciona o endereço acima.",
     msg_eng_how_spawn:"Um instalador novo é iniciado em cada instalação e termina quando a consola aceita o pacote. Nada fica a correr, por isso nada pode encravar.",
+    msg_eng_how_bgft:"As instalações são entregues ao próprio serviço de transferência e instalação da PS4, por isso uma instalação terminada é real e a consola consegue abri-la.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Serviço de instalação",
+    msg_eng_ps4_svc_ready:"o instalador da própria consola · pronto",
+    msg_eng_ps4_svc_down:"o instalador da própria consola · não arrancou",
+    msg_eng_detail_shop_down_ps4:"O PKG MUTANT SHOP não responde na PS4. Executa o jailbreak e depois abre o PKG MUTANT SHOP na consola.",
+    msg_eng_detail_engine_down_ps4:"O serviço de instalação da PS4 não arrancou. Fecha o PKG MUTANT SHOP na consola e abre-o outra vez.",
+    msg_eng_detail_ready_ps4:"Pronto: os jogos de PS4 podem ser instalados de imediato.",
+    msg_eng_detail_no_console_any:"Ainda não há nenhuma consola configurada: adiciona uma acima.",
+    msg_svc_backups_not_ps4:"não existe na PS4: os jogos são instalados, não montados",
     msg_ver_older_than_page:" · mais antiga que esta página",
     msg_ver_newer_than_page:" · mais recente que esta página",
     msg_helpers_autostart_on:"Ajudantes no arranque: ligado",
@@ -3355,6 +3385,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP ne répond pas sur la PS5. Chargez-le depuis Payload Manager, puis rouvrez ce panneau.",
     msg_eng_detail_no_console:"Aucune PS5 n'est encore configurée - ajoutez son adresse ci-dessus.",
     msg_eng_how_spawn:"Un nouvel installateur est lancé à chaque installation et se termine dès que la console a accepté le paquet. Rien ne reste en cours, donc rien ne peut se bloquer.",
+    msg_eng_how_bgft:"Les installations sont confiées au service de téléchargement et d'installation de la PS4 elle-même, donc une installation terminée est réelle et la console peut la lancer.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Service d'installation",
+    msg_eng_ps4_svc_ready:"l'installateur de la console · prêt",
+    msg_eng_ps4_svc_down:"l'installateur de la console · non démarré",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP ne répond pas sur la PS4. Lance le jailbreak, puis ouvre PKG MUTANT SHOP sur la console.",
+    msg_eng_detail_engine_down_ps4:"Le service d'installation de la PS4 n'a pas démarré. Ferme PKG MUTANT SHOP sur la console et rouvre-le.",
+    msg_eng_detail_ready_ps4:"Prêt : les jeux PS4 peuvent être installés tout de suite.",
+    msg_eng_detail_no_console_any:"Aucune console n'est encore configurée : ajoutes-en une ci-dessus.",
+    msg_svc_backups_not_ps4:"n'existe pas sur la PS4 : les jeux sont installés, pas montés",
     msg_ver_older_than_page:" · plus ancienne que cette page",
     msg_ver_newer_than_page:" · plus récente que cette page",
     msg_helpers_autostart_on:"Démarrage auto des assistants : activé",
@@ -3841,6 +3881,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP antwortet auf der PS5 nicht. Lade es über Payload Manager und öffne dieses Panel erneut.",
     msg_eng_detail_no_console:"Noch keine PS5 eingerichtet - trage oben ihre Adresse ein.",
     msg_eng_how_spawn:"Für jede Installation startet ein frischer Installer, der endet, sobald die Konsole das Paket angenommen hat. Nichts bleibt laufen, also kann nichts hängen bleiben.",
+    msg_eng_how_bgft:"Installationen werden dem eigenen Download- und Installationsdienst der PS4 übergeben, eine fertige Installation ist also echt und die Konsole kann sie starten.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Installationsdienst",
+    msg_eng_ps4_svc_ready:"der Installer der Konsole selbst · bereit",
+    msg_eng_ps4_svc_down:"der Installer der Konsole selbst · nicht gestartet",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP antwortet auf der PS4 nicht. Führe den Jailbreak aus und öffne dann PKG MUTANT SHOP auf der Konsole.",
+    msg_eng_detail_engine_down_ps4:"Der Installationsdienst der PS4 ist nicht gestartet. Schließe PKG MUTANT SHOP auf der Konsole und öffne es erneut.",
+    msg_eng_detail_ready_ps4:"Bereit – PS4-Spiele können sofort installiert werden.",
+    msg_eng_detail_no_console_any:"Es ist noch keine Konsole eingerichtet – füge oben eine hinzu.",
+    msg_svc_backups_not_ps4:"gibt es auf der PS4 nicht – Spiele werden installiert, nicht eingehängt",
     msg_ver_older_than_page:" · älter als diese Seite",
     msg_ver_newer_than_page:" · neuer als diese Seite",
     msg_helpers_autostart_on:"Helfer-Autostart: an",
@@ -4327,6 +4377,16 @@ var I18N={
     msg_eng_detail_shop_down:"PS5 上の PKG MUTANT SHOP が応答しません。Payload Manager から読み込み、このパネルを開き直してください。",
     msg_eng_detail_no_console:"PS5 がまだ設定されていません - 上にアドレスを入力してください。",
     msg_eng_how_spawn:"インストールごとに新しいインストーラーが起動し、コンソールがパッケージを受け付けると終了します。何も常駐しないので、詰まることはありません。",
+    msg_eng_how_bgft:"インストールはPS4自身のダウンロード・インストール機能に渡されるので、完了したインストールは本物で、そのまま起動できます。",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"インストール機能",
+    msg_eng_ps4_svc_ready:"本体のインストーラー · 準備完了",
+    msg_eng_ps4_svc_down:"本体のインストーラー · 起動していません",
+    msg_eng_detail_shop_down_ps4:"PS4でPKG MUTANT SHOPが応答しません。ジェイルブレイクを実行してから、本体でPKG MUTANT SHOPを開いてください。",
+    msg_eng_detail_engine_down_ps4:"PS4のインストール機能が起動しませんでした。本体のPKG MUTANT SHOPを閉じて、もう一度開いてください。",
+    msg_eng_detail_ready_ps4:"準備完了 — PS4のゲームをすぐにインストールできます。",
+    msg_eng_detail_no_console_any:"本体がまだ設定されていません。上で追加してください。",
+    msg_svc_backups_not_ps4:"PS4にはありません — ゲームはマウントではなくインストールされます",
     msg_ver_older_than_page:" · このページより古い",
     msg_ver_newer_than_page:" · このページより新しい",
     msg_helpers_autostart_on:"ヘルパー自動起動: オン",
@@ -4813,6 +4873,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP لا يستجيب على PS5. حمّله من Payload Manager ثم أعد فتح هذه اللوحة.",
     msg_eng_detail_no_console:"لم يتم إعداد أي PS5 بعد - أضف عنوانه أعلاه.",
     msg_eng_how_spawn:"يبدأ مثبّت جديد مع كل عملية تثبيت وينتهي عندما يقبل الجهاز الحزمة. لا يبقى شيء قيد التشغيل، لذا لا شيء يمكن أن يتعطّل.",
+    msg_eng_how_bgft:"تُسلَّم عمليات التثبيت إلى خدمة التنزيل والتثبيت الخاصة بجهاز PS4 نفسه، لذا فإن التثبيت المكتمل حقيقي ويمكن للجهاز تشغيله.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"خدمة التثبيت",
+    msg_eng_ps4_svc_ready:"مثبِّت الجهاز نفسه · جاهز",
+    msg_eng_ps4_svc_down:"مثبِّت الجهاز نفسه · لم يبدأ",
+    msg_eng_detail_shop_down_ps4:"‏PKG MUTANT SHOP لا يستجيب على PS4. شغّل الجيلبريك ثم افتح PKG MUTANT SHOP على الجهاز.",
+    msg_eng_detail_engine_down_ps4:"لم تبدأ خدمة التثبيت في PS4. أغلق PKG MUTANT SHOP على الجهاز ثم افتحه من جديد.",
+    msg_eng_detail_ready_ps4:"جاهز — يمكن تثبيت ألعاب PS4 فورًا.",
+    msg_eng_detail_no_console_any:"لم يتم إعداد أي جهاز بعد — أضف واحدًا بالأعلى.",
+    msg_svc_backups_not_ps4:"غير موجود على PS4 — الألعاب تُثبَّت ولا تُركَّب",
     msg_ver_older_than_page:" · أقدم من هذه الصفحة",
     msg_ver_newer_than_page:" · أحدث من هذه الصفحة",
     msg_helpers_autostart_on:"التشغيل التلقائي للمساعدات: مفعّل",
@@ -5115,6 +5185,16 @@ var I18N={
     msg_eng_detail_shop_down:"PS5 上的 PKG MUTANT SHOP 没有响应。请从 Payload Manager 加载它，然后重新打开此面板。",
     msg_eng_detail_no_console:"尚未设置 PS5 - 请在上方填写它的地址。",
     msg_eng_how_spawn:"每次安装都会启动一个全新的安装器，主机接受软件包后它就退出。没有任何东西常驻运行，因此不会卡住。",
+    msg_eng_how_bgft:"安装会交给 PS4 自己的下载安装服务，所以装完就是真正装好了，主机可以直接启动。",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"安装服务",
+    msg_eng_ps4_svc_ready:"主机自带的安装程序 · 就绪",
+    msg_eng_ps4_svc_down:"主机自带的安装程序 · 未启动",
+    msg_eng_detail_shop_down_ps4:"PS4 上的 PKG MUTANT SHOP 没有响应。请先运行越狱，然后在主机上打开 PKG MUTANT SHOP。",
+    msg_eng_detail_engine_down_ps4:"PS4 的安装服务没有启动。请在主机上关闭 PKG MUTANT SHOP 再重新打开。",
+    msg_eng_detail_ready_ps4:"就绪 — PS4 游戏可以立即安装。",
+    msg_eng_detail_no_console_any:"还没有设置任何主机 — 请在上方添加一台。",
+    msg_svc_backups_not_ps4:"PS4 上没有这项 — 游戏是安装的，不是挂载的",
     msg_ver_older_than_page:" · 比此页面旧",
     msg_ver_newer_than_page:" · 比此页面新",
     msg_helpers_autostart_on:"辅助程序自动启动：开",
@@ -5468,6 +5548,16 @@ var I18N={
     msg_eng_detail_shop_down:"PS5 पर PKG MUTANT SHOP जवाब नहीं दे रहा। इसे Payload Manager से लोड करें, फिर यह पैनल दोबारा खोलें।",
     msg_eng_detail_no_console:"अभी कोई PS5 सेट नहीं है - ऊपर उसका पता जोड़ें।",
     msg_eng_how_spawn:"हर इंस्टॉल के लिए एक नया इंस्टॉलर शुरू होता है और कंसोल के पैकेज स्वीकार करते ही बंद हो जाता है। कुछ भी चलता नहीं रहता, इसलिए कुछ अटक नहीं सकता।",
+    msg_eng_how_bgft:"इंस्टॉल PS4 की अपनी डाउनलोड-और-इंस्टॉल सेवा को सौंपे जाते हैं, इसलिए पूरा हुआ इंस्टॉल असली होता है और कंसोल उसे चला सकता है।",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"इंस्टॉल सेवा",
+    msg_eng_ps4_svc_ready:"कंसोल का अपना इंस्टॉलर · तैयार",
+    msg_eng_ps4_svc_down:"कंसोल का अपना इंस्टॉलर · शुरू नहीं हुआ",
+    msg_eng_detail_shop_down_ps4:"PS4 पर PKG MUTANT SHOP जवाब नहीं दे रहा। जेलब्रेक चलाएँ, फिर कंसोल पर PKG MUTANT SHOP खोलें।",
+    msg_eng_detail_engine_down_ps4:"PS4 की इंस्टॉल सेवा शुरू नहीं हुई। कंसोल पर PKG MUTANT SHOP बंद करके दोबारा खोलें।",
+    msg_eng_detail_ready_ps4:"तैयार — PS4 गेम तुरंत इंस्टॉल किए जा सकते हैं।",
+    msg_eng_detail_no_console_any:"अभी कोई कंसोल सेट नहीं है — ऊपर एक जोड़ें।",
+    msg_svc_backups_not_ps4:"PS4 पर यह नहीं है — गेम इंस्टॉल होते हैं, माउंट नहीं",
     msg_ver_older_than_page:" · इस पेज से पुराना",
     msg_ver_newer_than_page:" · इस पेज से नया",
     msg_helpers_autostart_on:"हेल्पर ऑटो-स्टार्ट: चालू",
@@ -5821,6 +5911,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP не отвечает на PS5. Загрузите его через Payload Manager и снова откройте эту панель.",
     msg_eng_detail_no_console:"PS5 ещё не настроена - укажите её адрес выше.",
     msg_eng_how_spawn:"Для каждой установки запускается новый установщик, который завершается, как только консоль приняла пакет. Ничего не остаётся запущенным, поэтому ничего не может зависнуть.",
+    msg_eng_how_bgft:"Установка передаётся собственной службе загрузки и установки PS4, поэтому завершённая установка настоящая и консоль может её запустить.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Служба установки",
+    msg_eng_ps4_svc_ready:"собственный установщик консоли · готов",
+    msg_eng_ps4_svc_down:"собственный установщик консоли · не запущен",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP не отвечает на PS4. Запустите джейлбрейк, затем откройте PKG MUTANT SHOP на консоли.",
+    msg_eng_detail_engine_down_ps4:"Служба установки PS4 не запустилась. Закройте PKG MUTANT SHOP на консоли и откройте снова.",
+    msg_eng_detail_ready_ps4:"Готово — игры PS4 можно устанавливать сразу.",
+    msg_eng_detail_no_console_any:"Консоль ещё не настроена — добавьте её выше.",
+    msg_svc_backups_not_ps4:"на PS4 этого нет — игры устанавливаются, а не монтируются",
     msg_ver_older_than_page:" · старее этой страницы",
     msg_ver_newer_than_page:" · новее этой страницы",
     msg_helpers_autostart_on:"Автозапуск помощников: вкл",
@@ -6174,6 +6274,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP non risponde sulla PS5. Caricalo da Payload Manager, poi riapri questo pannello.",
     msg_eng_detail_no_console:"Nessuna PS5 configurata - aggiungi il suo indirizzo qui sopra.",
     msg_eng_how_spawn:"Per ogni installazione parte un installer nuovo, che termina quando la console ha accettato il pacchetto. Nulla resta in esecuzione, quindi nulla può incepparsi.",
+    msg_eng_how_bgft:"Le installazioni vengono affidate al servizio di download e installazione della PS4 stessa, quindi un'installazione completata è reale e la console può avviarla.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Servizio di installazione",
+    msg_eng_ps4_svc_ready:"l'installer della console · pronto",
+    msg_eng_ps4_svc_down:"l'installer della console · non avviato",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP non risponde sulla PS4. Esegui il jailbreak, poi apri PKG MUTANT SHOP sulla console.",
+    msg_eng_detail_engine_down_ps4:"Il servizio di installazione della PS4 non è partito. Chiudi PKG MUTANT SHOP sulla console e riaprilo.",
+    msg_eng_detail_ready_ps4:"Pronto: i giochi PS4 si possono installare subito.",
+    msg_eng_detail_no_console_any:"Non è ancora configurata nessuna console: aggiungine una qui sopra.",
+    msg_svc_backups_not_ps4:"sulla PS4 non c'è: i giochi si installano, non si montano",
     msg_ver_older_than_page:" · più vecchia di questa pagina",
     msg_ver_newer_than_page:" · più recente di questa pagina",
     msg_helpers_autostart_on:"Avvio automatico helper: attivo",
@@ -6527,6 +6637,16 @@ var I18N={
     msg_eng_detail_shop_down:"PS5에서 PKG MUTANT SHOP이 응답하지 않습니다. Payload Manager에서 불러온 뒤 이 패널을 다시 여세요.",
     msg_eng_detail_no_console:"아직 설정된 PS5가 없습니다 - 위에 주소를 추가하세요.",
     msg_eng_how_spawn:"설치할 때마다 새 설치 프로그램이 시작되고, 콘솔이 패키지를 받아들이면 종료됩니다. 아무것도 계속 실행되지 않으므로 멈출 것도 없습니다.",
+    msg_eng_how_bgft:"설치는 PS4 자체의 다운로드·설치 기능에 맡겨지므로, 끝난 설치는 진짜이고 본체에서 바로 실행할 수 있습니다.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"설치 서비스",
+    msg_eng_ps4_svc_ready:"본체 자체 설치 프로그램 · 준비됨",
+    msg_eng_ps4_svc_down:"본체 자체 설치 프로그램 · 시작되지 않음",
+    msg_eng_detail_shop_down_ps4:"PS4에서 PKG MUTANT SHOP이 응답하지 않습니다. 탈옥을 실행한 뒤 본체에서 PKG MUTANT SHOP을 여세요.",
+    msg_eng_detail_engine_down_ps4:"PS4 설치 서비스가 시작되지 않았습니다. 본체에서 PKG MUTANT SHOP을 닫았다가 다시 여세요.",
+    msg_eng_detail_ready_ps4:"준비됨 — PS4 게임을 바로 설치할 수 있습니다.",
+    msg_eng_detail_no_console_any:"아직 설정된 본체가 없습니다 — 위에서 추가하세요.",
+    msg_svc_backups_not_ps4:"PS4에는 없습니다 — 게임은 마운트가 아니라 설치됩니다",
     msg_ver_older_than_page:" · 이 페이지보다 오래됨",
     msg_ver_newer_than_page:" · 이 페이지보다 최신",
     msg_helpers_autostart_on:"도우미 자동 시작: 켜짐",
@@ -6880,6 +7000,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP PS5'te yanıt vermiyor. Payload Manager'dan yükleyin, sonra bu paneli yeniden açın.",
     msg_eng_detail_no_console:"Henüz bir PS5 ayarlanmadı - adresini yukarıya ekleyin.",
     msg_eng_how_spawn:"Her kurulum için yeni bir yükleyici başlatılır ve konsol paketi kabul ettiğinde kapanır. Hiçbir şey çalışır durumda kalmaz, bu yüzden hiçbir şey takılamaz.",
+    msg_eng_how_bgft:"Kurulumlar PS4'ün kendi indirme ve kurulum hizmetine devredilir, bu yüzden biten bir kurulum gerçektir ve konsol onu başlatabilir.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Kurulum hizmeti",
+    msg_eng_ps4_svc_ready:"konsolun kendi yükleyicisi · hazır",
+    msg_eng_ps4_svc_down:"konsolun kendi yükleyicisi · başlamadı",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP PS4'te yanıt vermiyor. Jailbreak'i çalıştır, sonra konsolda PKG MUTANT SHOP'u aç.",
+    msg_eng_detail_engine_down_ps4:"PS4'ün kurulum hizmeti başlamadı. Konsolda PKG MUTANT SHOP'u kapatıp yeniden aç.",
+    msg_eng_detail_ready_ps4:"Hazır — PS4 oyunları hemen kurulabilir.",
+    msg_eng_detail_no_console_any:"Henüz kurulu bir konsol yok — yukarıdan bir tane ekle.",
+    msg_svc_backups_not_ps4:"PS4'te yok — oyunlar bağlanmaz, kurulur",
     msg_ver_older_than_page:" · bu sayfadan eski",
     msg_ver_newer_than_page:" · bu sayfadan yeni",
     msg_helpers_autostart_on:"Yardımcıları otomatik başlat: açık",
@@ -7233,6 +7363,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP nie odpowiada na PS5. Wczytaj go z Payload Manager, a potem otwórz ten panel ponownie.",
     msg_eng_detail_no_console:"Nie skonfigurowano jeszcze PS5 - wpisz jej adres powyżej.",
     msg_eng_how_spawn:"Do każdej instalacji uruchamiany jest nowy instalator, który kończy pracę, gdy konsola przyjmie pakiet. Nic nie działa w tle, więc nic nie może się zaciąć.",
+    msg_eng_how_bgft:"Instalacje trafiają do własnej usługi pobierania i instalowania PS4, więc ukończona instalacja jest prawdziwa i konsola może ją uruchomić.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Usługa instalacji",
+    msg_eng_ps4_svc_ready:"własny instalator konsoli · gotowy",
+    msg_eng_ps4_svc_down:"własny instalator konsoli · nie wystartował",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP nie odpowiada na PS4. Uruchom jailbreak, a potem otwórz PKG MUTANT SHOP na konsoli.",
+    msg_eng_detail_engine_down_ps4:"Usługa instalacji PS4 nie wystartowała. Zamknij PKG MUTANT SHOP na konsoli i otwórz go ponownie.",
+    msg_eng_detail_ready_ps4:"Gotowe — gry PS4 można instalować od razu.",
+    msg_eng_detail_no_console_any:"Nie ustawiono jeszcze żadnej konsoli — dodaj ją powyżej.",
+    msg_svc_backups_not_ps4:"na PS4 tego nie ma — gry się instaluje, a nie montuje",
     msg_ver_older_than_page:" · starsza niż ta strona",
     msg_ver_newer_than_page:" · nowsza niż ta strona",
     msg_helpers_autostart_on:"Autostart pomocników: włączony",
@@ -7586,6 +7726,16 @@ var I18N={
     msg_eng_detail_shop_down:"PKG MUTANT SHOP antwoordt niet op de PS5. Laad het via Payload Manager en open dit paneel opnieuw.",
     msg_eng_detail_no_console:"Er is nog geen PS5 ingesteld - vul hierboven het adres in.",
     msg_eng_how_spawn:"Voor elke installatie start een nieuwe installer, die stopt zodra de console het pakket heeft aangenomen. Er blijft niets draaien, dus er kan niets vastlopen.",
+    msg_eng_how_bgft:"Installaties worden overgedragen aan de eigen download- en installatiedienst van de PS4, dus een voltooide installatie is echt en de console kan hem starten.",
+    msg_eng_row_pldmgr:"Payload Manager",
+    msg_eng_row_installsvc:"Installatiedienst",
+    msg_eng_ps4_svc_ready:"de eigen installer van de console · klaar",
+    msg_eng_ps4_svc_down:"de eigen installer van de console · niet gestart",
+    msg_eng_detail_shop_down_ps4:"PKG MUTANT SHOP reageert niet op de PS4. Voer de jailbreak uit en open daarna PKG MUTANT SHOP op de console.",
+    msg_eng_detail_engine_down_ps4:"De installatiedienst van de PS4 is niet gestart. Sluit PKG MUTANT SHOP op de console en open het opnieuw.",
+    msg_eng_detail_ready_ps4:"Klaar — PS4-games kunnen meteen worden geïnstalleerd.",
+    msg_eng_detail_no_console_any:"Er is nog geen console ingesteld — voeg er hierboven een toe.",
+    msg_svc_backups_not_ps4:"bestaat niet op de PS4 — games worden geïnstalleerd, niet gemount",
     msg_ver_older_than_page:" · ouder dan deze pagina",
     msg_ver_newer_than_page:" · nieuwer dan deze pagina",
     msg_helpers_autostart_on:"Helpers automatisch starten: aan",
@@ -7733,7 +7883,13 @@ var API = (typeof window.PMS_API === "string") ? window.PMS_API : ((location.pro
                      proves WebP support either way, so we ask the browser directly.
    Until the probe answers, PROFILE.webp is null = unknown, and we optimistically use
    thumbnails; if it comes back false we fall back to PNG and repaint the grid once. */
-var PROFILE = {ps5:false, onConsole:false, webp:null, phone:false, consoleApi:""};
+/* PROFILE.platform - WHICH CONSOLE THIS PAGE IS BEING READ ON. "" until something says.
+   Not sniffed: the console asserts it in its own /api/health, the same server fact onConsole
+   comes from. A PS4 says platform:"ps4"; the PS5's health has no platform key at all and must
+   never be made to grow one - it is finished software - so ABSENT means PS5, which is the rule
+   the companion follows too. On a PC it stays "", and the page asks about a named console
+   instead of about "here". */
+var PROFILE = {ps5:false, onConsole:false, webp:null, phone:false, consoleApi:"", platform:""};
 try{ PROFILE.ps5 = /PlayStation/i.test(navigator.userAgent||""); }catch(e){}
 /* A phone, by its own word. Used for ONE thing: not offering a control that opens a window on the
    PC's own screen (Open folder), which no phone can ever see. If the sniff misses, the button
@@ -9855,12 +10011,29 @@ function setTxt(id,v){var e=$("#"+id);if(!e)return;var txt=(v===null||v===undefi
   else e.textContent=txt;}
 /* Both service blocks in Settings, painted from one health document. Called from the on-console
    path and the PC path so the two can never again show different sets of rows. */
+/* "ps4" / "ps5" / "" - the console the page is ABOUT. PROFILE.platform when the page is being
+   read on a console; otherwise whatever the PC says about the requester, which is how a console
+   that reloaded straight against the PC still gets the right words. */
+function herePlatform(h){
+  if(PROFILE.platform) return PROFILE.platform;
+  if(h&&h.platform) return String(h.platform).toLowerCase();
+  if(h&&h.viewer_platform) return String(h.viewer_platform).toLowerCase();
+  return "";
+}
 function paintServices(h,selfIp){
   var ip=selfIp||h.lan_ip||h.ps5_ip||"";
   /* THREE states, not two. ShadowMount binds loopback-only, so the PC genuinely cannot see it -
      null means "cannot tell from here", and painting that as a red "not running" is how a working
      service got reported as down six seconds after this panel opened. */
-  if(h.shadowmount===null||h.shadowmount===undefined){
+  /* A FOURTH STATE: not applicable. Game backups are mounted containers, which is a PS5
+     arrangement - the PS4 has no such service and never will, and our PS4 payload reports
+     shadowmount:false because false is the truthful answer to "is it running". The row read
+     that as a fault and painted a red alarm light on a console that was working perfectly,
+     every time Settings was opened on the PS4. Grey, and a sentence that says why. */
+  if(herePlatform(h)==="ps4"){
+    setTxt("setSmp",t("msg_svc_backups_not_ps4"));
+    setLed("ledSmp","");
+  }else if(h.shadowmount===null||h.shadowmount===undefined){
     setTxt("setSmp",t("msg_svc_port_prefix")+(h.shadowmount_port||10101)+t("msg_svc_cannot_tell_from_pc"));
     setLed("ledSmp","warn");
   }else{
@@ -9955,14 +10128,24 @@ function refreshHealth(){
       fillLibPath(h);
       return;
     }
-    if(h.connected){
+    // WHICH CONSOLE THE PILL IS ABOUT. This said "PS5" and printed ps5_ip unconditionally, so a
+    // PS4 owner reading the shop on their PS4 was told, in the one place the app reports where it
+    // is connected, about a console that may be switched off in another room - or, before the
+    // health fix, about their own PS4 under the wrong name. The PC says who is asking; when the
+    // asker is the PS4, the pill is about the PS4.
+    var _hp=herePlatform(h), _p4=(_hp==="ps4");
+    var _nm=_p4?"PS4 ":"PS5 ";
+    var _ip=(_p4?(h.ps4_ip||""):(h.ps5_ip||""));
+    var _on=_p4?!!h.ps4_online:!!h.connected;
+    var _rdy=_p4?!!h.ps4_online:!!h.engine_ready;
+    if(_on){
       // Our own engine is spawned per install, so there is no daemon to be "off" - the header
       // says whether the engine is ready, which is the thing that decides whether an install can
       // start. The old fallback branch here reported a third-party daemon's port.
-      setConn("online","PS5 "+h.ps5_ip+
-        (h.engine_ready?t("msg_conn_install_ready"):t("msg_conn_engine_not_ready")));
+      setConn("online",_nm+_ip+
+        (_rdy?t("msg_conn_install_ready"):t("msg_conn_engine_not_ready")));
     } else {
-      setConn("offline","PS5 "+h.ps5_ip+" · offline");
+      setConn("offline",_nm+_ip+" · offline");
     }
     fillLibPath(h);
     paintServices(h,h.ps5_ip);
@@ -10316,9 +10499,18 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape")dismissPanel
 /* The server's engine sentences are English. The page keys the same five states to its own
    dictionary and only falls back to the server's words for a state it does not know. */
 function engineDetailText(e){
-  var st=e&&e.state, k=st==="ready"?"msg_eng_detail_ready":st==="busy"?"msg_eng_detail_busy"
-        :st==="no-pldmgr"?"msg_eng_detail_no_pldmgr":st==="shop-down"?"msg_eng_detail_shop_down"
-        :st==="no-console"?"msg_eng_detail_no_console":"";
+  /* Which console this answer is about - the server says so, because on a PC the page cannot
+     know. Unknown means PS5, the same rule everything else here follows. */
+  var p4=!!(e&&e.platform==="ps4");
+  var st=e&&e.state,
+      k=st==="ready"?(p4?"msg_eng_detail_ready_ps4":"msg_eng_detail_ready")
+       :st==="busy"?"msg_eng_detail_busy"
+       :st==="no-pldmgr"?"msg_eng_detail_no_pldmgr"
+       :st==="shop-down"?(p4?"msg_eng_detail_shop_down_ps4":"msg_eng_detail_shop_down")
+       :st==="engine-down"?"msg_eng_detail_engine_down_ps4"
+       :st==="no-console"?"msg_eng_detail_no_console_any":"";
+  /* A state this page has no sentence for falls back to the server's own words rather than to
+     silence - the panel exists to say what is missing, and an empty line says nothing. */
   return k?tsub(k,{port:(e&&e.pldmgr_port)||8084}):((e&&e.detail)||"");
 }
 function refreshEngine(){
@@ -10341,15 +10533,26 @@ function refreshEngine(){
     state.engine=e;
     /* The server describes the lane in English. This page knows the lane by its mode code and
        says the same thing in its own language; an unknown mode is printed as the server sent it. */
-    setTxt("engHow", e.mode==="spawn"?t("msg_eng_how_spawn"):(e.how||""));
+    var _e4=(e.platform==="ps4");
+    setTxt("engHow", e.mode==="spawn"?t("msg_eng_how_spawn")
+                    :e.mode==="bgft"?t("msg_eng_how_bgft"):(e.how||""));
     setTxt("engState", e.state==="ready"?t("msg_eng_state_yes"):e.state==="busy"?t("msg_eng_state_busy"):t("msg_eng_state_no"));
     setLed("ledEngine", e.state==="ready"?"on":e.state==="busy"?"warn":"off");
     setTxt("engShop", e.shop_ok?((e.console_ip||"")+":"+(e.shop_port||8710)+
                                  (e.shop_version?(" · v"+e.shop_version):""))
                               :t("msg_eng_not_answering"));
     setLed("ledShop", e.shop_ok?"on":"off");
-    setTxt("engPld", e.ready?(t("msg_svc_port_prefix")+(e.pldmgr_port||8084)+t("msg_eng_pld_answering"))
-                            :(t("msg_svc_port_prefix")+(e.pldmgr_port||8084)+t("msg_eng_pld_no_answer")));
+    /* THE ROW IS ABOUT WHATEVER STARTS AN INSTALL ON THIS CONSOLE, and that is not the same
+       thing on both. On a PS5 it is Payload Manager on :8084. On a PS4 there is no such program,
+       no such port and nothing of ours listening - the console's own installer does the work -
+       yet this row printed "port 8084 · answering" beside a green light whenever the PS4 was
+       ready. An invented port is worse than a blank row: it is a specific, checkable claim, and
+       it sent someone looking for a fault on a machine that had none. */
+    var _pk=$("#engPldK");
+    if(_pk) _pk.textContent=t(_e4?"msg_eng_row_installsvc":"msg_eng_row_pldmgr");
+    setTxt("engPld", _e4?t(e.ready?"msg_eng_ps4_svc_ready":"msg_eng_ps4_svc_down")
+                        :(t("msg_svc_port_prefix")+(e.pldmgr_port||8084)+
+                          t(e.ready?"msg_eng_pld_answering":"msg_eng_pld_no_answer")));
     setLed("ledPld", e.ready?"on":"off");
     var d=$("#engDetail");
     if(d){
@@ -10417,10 +10620,15 @@ function repaintSettingsWords(){
 function openSettings(){
   var c=state.config||{};
   var h=state.health||{};
+  /* The health fallback is safe now and was not before: /api/health used to report consoles[0]
+     as ps5_ip, so on a machine with only a PS4 this box filled itself with the PS4's address and
+     a single Save wrote the PS4 into the PS5 setting. Health now picks the PS5 by platform, so
+     what lands here is either a configured PS5 or one this PC discovered - both of which are the
+     right thing to offer. */
   $("#setIp").value=(c.ps5_ip)||h.ps5_ip||"";
-  /* No health fallback for the PS4 on purpose: an empty box has to stay empty. ps5_ip has a shipped
-     default address behind it, so falling back reads as "configured"; ps4_ip has none, and showing
-     a guess there would invite saving an address nobody has. */
+  /* No health fallback for the PS4 on purpose: an empty box has to stay empty. A discovered
+     address is worth offering for the console the app was built around; for the second console
+     the risk runs the other way - a guess in this box invites saving an address nobody has. */
   var _i4=$("#setIp4"); if(_i4) _i4.value=(c.ps4_ip)||"";
   refreshPs4App();
   /* THE PORT BOX USED TO BE dpi.port_v2 - 12800 - which is the port of a daemon this app no longer
@@ -10838,6 +11046,11 @@ function resolveApi(done){
     if(h&&h.on_console){
       PROFILE.onConsole=true;
       PROFILE.consoleApi=API;                 /* the base to fall back to if the PC goes quiet */
+      /* Captured HERE, from the console's own answer, before tryUpgrade() repoints API at a PC.
+         After that upgrade every health document comes from the PC and describes the PS5, so this
+         is the only moment the page is told what it is running on. */
+      PROFILE.platform=(h.platform==="ps4")?"ps4":"ps5";
+      try{document.documentElement.classList.add(PROFILE.platform);}catch(e){}
       /* "served" - not "ps5". The .ps5 class drives the console's hover/focus cosmetics and comes
          from the UA sniff above; putting it here as well followed a phone that opened the
          console's page, which then lost the coarse-pointer chip reveal it exists for. */

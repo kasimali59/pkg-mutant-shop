@@ -61,6 +61,14 @@ VOLATILE = {
     # a decision the code makes. A snapshot that flags these is a snapshot nobody will trust.
     "last_scan_ms", "library_gen", "scanning", "latency_ms", "tasks", "jobs", "generation",
     "started", "finished", "updated", "age", "uptime", "queued", "active", "running",
+    # log_bytes grows with every install. "bytes" was already here and did not cover it - the set
+    # matches whole key names, not substrings.
+    #
+    # NOT "local": /api/network reports a BOOLEAN under that name (is this PC the one serving),
+    # which is a decision and has to stay in the snapshot, while /api/cheats/library uses the same
+    # word for a count. One flat name-set cannot tell them apart, so the cheat counters stay in and
+    # a diff on them means "the scan had not finished when one of these was taken", not a change.
+    "log_bytes",
 }
 
 

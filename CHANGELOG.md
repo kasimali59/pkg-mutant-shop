@@ -9,6 +9,92 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [Unreleased] - two consoles, told apart `[VERIFIED]`
+
+Measured with a PS5 (12.70) and a PS4 (13.52) both awake on the same network, and the desktop app
+talking to both at once. The PS5's ELF was not rebuilt and not touched.
+
+### The console the app is talking about is now chosen, not assumed
+
+`/api/health` described `consoles[0]` and called it the PS5. That is the PS5 only because
+`reconcile_consoles` happens to sort it first — so on a PS4-only setup `ps5_ip` carried the PS4's
+address, `ps5_online` its readiness, and the header of the shop, running on the PS4, named it as a
+PS5 that was ready to install PS5 games.
+
+The PS5 is now selected by `platform != "ps4"` — deliberately not `== "ps5"`, because a config
+written before PS4 support existed names no platform at all and a strict match would report an empty
+address for a PS5 that is sitting there working.
+
+Two additions beside it, both new keys rather than changed ones:
+
+* `console_list` — every configured console with its platform, address and reachability. `consoles`
+  stays the integer it has always been; peers read it.
+* `viewer_platform` — which console is *reading* the page, answered from the requesting address. The
+  UI is one file served by the PC and by both consoles while the data always comes from the PC, so
+  the page could not tell where it was. Extracted as `viewer_platform_for()` and covered by
+  `tools/test_viewer_platform.py` (9 checks).
+
+### The engine panel stops inventing a PS5 on a PS4
+
+It printed **"Payload Manager · Port 8084 · answering"** beside a green light on a console that has
+no Payload Manager, no port 8084 and no spawned installer. An invented green light is worse than no
+light: it is a specific, checkable claim, and it sends someone hunting for a fault somewhere else.
+
+`/api/engine/state` now reports `platform`, `mode: "bgft"` on a PS4, and no port; the row retitles
+itself to *Install service*, and the sentences under it name the PS4's own recovery steps instead of
+Payload Manager. Ten new strings, in all fifteen languages.
+
+### "Game backups" no longer paints a red alarm on a working PS4
+
+Mounted game backups are a PS5 arrangement. The PS4 payload reports `shadowmount:false` because that
+is the truthful answer to "is it running", and the row read it as a fault. There is now a fourth
+state — grey, with a sentence saying why — beside on, off and cannot-tell.
+
+### The dashboard app could be killed part-way through starting the shop
+
+`ps4-app/tile-pkg/pms/main.c` had no SIGPIPE guard anywhere, and every byte of the 1.7 MB payload
+goes out through `write()` on a socket owned by the jailbreak's payload loader. SIGPIPE's default
+action is to terminate: the moment that loader hangs up, the program that was supposed to wait for
+the shop and open the browser is gone — no message, no log line. It is a race, which is why the same
+build launched perfectly one day and died the next.
+
+`SIG_IGN` process-wide before any socket exists, `SO_NOSIGPIPE` on each socket, the post-write wait
+cut from 30 s to 5 s (this program draws nothing once the splash is hidden, so every second of it is
+a black screen), one notification so the wait is visibly a wait, and the hand-over logged as *sent*
+rather than *taken* — all this end can honestly know.
+
+### A launchable icon can still be the wrong build, and nothing was looking
+
+Measured on this console: the icon was installed, had its launch ticket, opened — and was the
+previous day's build. The ELF tries to replace it and cannot, and the reason is now proven twice in
+one log, thirteen seconds apart, with the same package, size and content id:
+
+```
+register failed rc=0x80991404 ... uri=http://10.0.0.87:8710/pkgfile/0.pkg   console serving itself: refused
+install: started task=140    ... uri=http://10.0.0.76:8710/library/...pkg   PC serving it: accepted
+```
+
+`0x80991404` is the download service refusing to authenticate with Sony's content network, and
+PlayStation Network being blocked is the configuration this shop asks for. The console's only other
+lane cannot create a launch ticket, so it correctly declines to replace a working icon with a worse
+one — and then had no way to say the copy was old.
+
+`/api/tile/status` now reports `stale` (and `carries_package`, so a lite payload never claims a
+comparison it could not make), and the companion's watchdog repairs on *stale* as well as on *will
+not open*. Installed from the PC afterwards: `AppInstallApp = 0`, `error=0x0`, four seconds.
+
+### Also
+
+* `tools/snapshot_api.py` records `log_bytes` as volatile. Not `local`: `/api/network` uses that
+  name for a boolean decision while `/api/cheats/library` uses it for a count, and one flat name-set
+  cannot tell them apart.
+* `tools/test_psn_blocker.py` says which blocker answered it instead of failing over a port 53 the
+  running companion already owns. The refusals and forwards are still checked.
+* The settings PS5 address box keeps its health fallback, now that health can no longer offer the
+  PS4's address for it.
+
+---
+
 ## [3.62.0] - 2026-09-21 - "The PS4 joins the fleet" `[VERIFIED]`
 
 ### What this release is

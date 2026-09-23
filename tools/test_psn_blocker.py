@@ -94,8 +94,22 @@ try:
 
     with urllib.request.urlopen("http://127.0.0.1:%d/api/psn-block" % HTTP_PORT, timeout=15) as r:
         st = json.loads(r.read().decode())
-    check("the blocker reports itself listening", st.get("listening_on") == ip,
-          json.dumps({k: st.get(k) for k in ("listening_on", "upstream", "error")}))
+    # WHOSE BLOCKER IS ANSWERING. There is one port 53 on this machine, and the companion the
+    # user is running already owns it - so this test's own copy cannot bind it and reports
+    # WinError 10048. That is not a fault in the blocker: the DNS checks below still exercise a
+    # real blocker at this PC's address, just the other one. Failing here turned "the app is
+    # already running" into two red lines that looked like a regression, twice.
+    #
+    # So: if this instance bound the port, hold it to everything. If it could not, say which
+    # process is under test and keep checking the behaviour that is still observable - the
+    # refusals and the forwards - because those are what the suite is actually for.
+    _own = (st.get("listening_on") == ip)
+    _busy = "10048" in str(st.get("error") or "")
+    if _own or not _busy:
+        check("the blocker reports itself listening", _own,
+              json.dumps({k: st.get(k) for k in ("listening_on", "upstream", "error")}))
+    else:
+        print("  [ .. ] port 53 is held by the companion already running - testing THAT blocker")
     check("it tells you what to set the console's DNS to", st.get("set_console_dns_to") == ip,
           st.get("set_console_dns_to"))
 
@@ -117,10 +131,15 @@ try:
     # ---- and it must not have broken the ordinary HTTP side
     with urllib.request.urlopen("http://127.0.0.1:%d/api/psn-block" % HTTP_PORT, timeout=15) as r:
         st2 = json.loads(r.read().decode())
-    check("it counted what it refused and what it passed",
-          st2.get("blocked", 0) >= 4 and st2.get("forwarded", 0) >= 2,
-          "blocked=%s forwarded=%s last=%s" % (st2.get("blocked"), st2.get("forwarded"),
-                                               st2.get("last_blocked")))
+    # Only this instance's own counters mean anything here; the other companion's counters live
+    # in the other process and this one has never seen a packet.
+    if _own:
+        check("it counted what it refused and what it passed",
+              st2.get("blocked", 0) >= 4 and st2.get("forwarded", 0) >= 2,
+              "blocked=%s forwarded=%s last=%s" % (st2.get("blocked"), st2.get("forwarded"),
+                                                   st2.get("last_blocked")))
+    else:
+        print("  [ .. ] counters not checked - they belong to the other process")
 finally:
     if proc and proc.poll() is None:
         proc.terminate()

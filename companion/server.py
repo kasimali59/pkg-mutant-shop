@@ -316,6 +316,28 @@ class ShopHTTPError(Exception):
 # (the console's own /api/devices labels). Dead words that disagree are worse than none.
 
 
+def viewer_platform_for(consoles, peer):
+    """Which console is READING the page - "ps4", "ps5", or "" for a PC.
+
+    The shop's UI is one file, served by the PC and by both consoles, but the data always comes
+    from the PC. So the page cannot tell on its own what it is being read on, and it has to know:
+    a PS4 must not be offered PS5 games, the header has to name the right console, and the row
+    about mounted game backups is a PS5 row that has no meaning on a PS4.
+
+    The answer is the requesting address, which is free and exact - the console asking is the
+    console being read on. A console that names no platform is a PS5, the rule this file follows
+    everywhere, because a config written before PS4 support existed carries no platform at all.
+
+    Split out of the health handler so it can be tested without two consoles and a television.
+    """
+    if not peer:
+        return ""
+    for c in (consoles or []):
+        if str((c or {}).get("ip") or "") == str(peer):
+            return str(c.get("platform") or "").lower() or "ps5"
+    return ""
+
+
 def _bridge_for(srv, handler=None, body=None, want=None):
     """The console a request actually means.
 
@@ -4419,6 +4441,31 @@ class Ps5Bridge:
         v = d.get("launchable")
         return bool(v) if v is not None else None
 
+    def ps4_tile_stale(self):
+        """True / False / None (cannot tell). Is the installed icon an OLDER BUILD than the one
+        the console's own ELF carries?
+
+        A THIRD QUESTION, and the one that went unasked. "Installed" and "will it open" were both
+        true of this console while the icon it opened was a build from the day before, because
+        nothing compared the bytes from this side and the console could not fix it alone: the
+        download service refuses a package the console serves to itself once PlayStation Network
+        is blocked, and the only other lane it has cannot create a launch ticket, so it correctly
+        declines to replace a working icon with a worse one. It reports the mismatch instead.
+
+        None whenever the console does not answer, is not a PS4, or is running the lite payload -
+        which carries no package and so has nothing to compare. Never guessed: a wrong `True` here
+        reinstalls the icon on a timer for ever."""
+        if not self.is_ps4():
+            return None
+        try:
+            d = self._shop("/api/tile/status", timeout=8) or {}
+        except Exception:
+            return None
+        if not d.get("carries_package"):
+            return None
+        v = d.get("stale")
+        return bool(v) if v is not None else None
+
     def install_ps4_tile(self, force=False):
         """Install the dashboard app on this PS4. Returns (ok, info)."""
         if not self.is_ps4():
@@ -6804,7 +6851,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(srv.transfers.get(raw) or srv.transfers.get(quote(raw)) or {"max": 0, "total": 0})
         if path == "/api/health":
             cons = srv.fleet.consoles
-            b = srv.fleet.bridge(cons[0]["id"]) if cons else None
+            # THE ps5_* KEYS DESCRIBE THE PS5 - not whichever console happens to sort first.
+            #
+            # This read cons[0]. That is the PS5 only because reconcile_consoles orders it there,
+            # and PS4-only is an ordinary way to run this app: with no PS5 configured, cons[0] IS
+            # the PS4, so ps5_ip carried the PS4's address and ps5_online its readiness, and the
+            # header painted the PS4 as a PS5 that was ready to install PS5 games.
+            #
+            # The test is `platform != "ps4"`, deliberately, NOT `== "ps5"`. A config written
+            # before PS4 support existed names no platform at all, and consoles_from_cfg leaves
+            # the field empty rather than inventing one; a strict "ps5" match would find nothing
+            # and report an empty address for a PS5 that is sitting there working. The rule this
+            # file follows throughout: a console that does not say what it is, is a PS5.
+            _ps5 = next((c for c in cons
+                         if str(c.get("platform") or "").lower() != "ps4"), None)
+            b = srv.fleet.bridge(_ps5["id"]) if _ps5 else None
             # THE PS4 IS A SECOND CONSOLE, NOT A REPLACEMENT FOR THE FIRST. Everything below that
             # says ps5_* keeps meaning the PS5, because the whole UI and every peer reads those keys;
             # the PS4 gets its own pair beside them. A machine with no PS4 configured sends an empty
@@ -6890,10 +6951,17 @@ class Handler(BaseHTTPRequestHandler):
                 _helpers = (b.helper_status() if (b and reachable) else {}) or {}
             except Exception:
                 _helpers = {}
+            # The address this request came from, matched against the configured consoles. A plain
+            # walk over at most a handful of entries; no probe, no timeout.
+            try:
+                _peer = (self.client_address or ("",))[0] or ""
+            except Exception:
+                _peer = ""
+            _viewer_plat = viewer_platform_for(cons, _peer)
             return self._json({"ok": True, "version": VERSION,
                                "running_title": _run.get("titleId") or "",
                                "running_name": _run.get("titleName") or "",
-                               "ps5_ip": cons[0]["ip"] if cons else srv.cfg.get("ps5_ip"),
+                               "ps5_ip": (_ps5 or {}).get("ip") or srv.cfg.get("ps5_ip") or "",
                                # Reachability means OUR lane is usable: the ELF answers and
                                # Payload Manager can spawn the installer.
                                "ps5_online": engine_ready,
@@ -6917,6 +6985,41 @@ class Handler(BaseHTTPRequestHandler):
                                "shadowmount_port": int(_helpers.get("shadowmount_port") or 10101),
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", []),
                                "companion_port": srv.cfg["companion"]["port"], "consoles": len(cons),
+                               # EVERY CONSOLE, not just the one the ps5_* keys describe.
+                               #
+                               # `consoles` stays an integer. It has shipped as one, the page and
+                               # peers read it as one, and changing a shipped key's type breaks
+                               # them silently - so the list arrives as a NEW key beside it.
+                               #
+                               # Built entirely from probes that have ALREADY happened higher up:
+                               # the PS5's readiness and the PS4's memoised answer. Nothing here
+                               # opens a connection. Health is polled every 6 s by the page, again
+                               # by this PC's own window and again by each peer, and on the console
+                               # those round trips are paid for in the frames of whatever the user
+                               # is scrolling. A console that is neither of those two - a third one
+                               # someone added by hand - reports online: null, meaning "not asked",
+                               # which the UI must paint as unknown rather than as a fault.
+                               "console_list": [
+                                   {"id": c.get("id"),
+                                    "name": c.get("name") or c.get("ip") or "",
+                                    "ip": c.get("ip") or "",
+                                    "platform": str(c.get("platform") or "").lower() or "ps5",
+                                    "online": (_ps4_on
+                                               if (_ps4 and c.get("id") == _ps4.get("id"))
+                                               else (bool(engine_ready or ftp_on)
+                                                     if (_ps5 and c.get("id") == _ps5.get("id"))
+                                                     else None))}
+                                   for c in cons],
+                               # WHO IS READING THIS PAGE. The shop's UI is one file served by the
+                               # PC and by both consoles, but the DATA always comes from here - so
+                               # the page cannot tell on its own whether it is being read on a PS4,
+                               # on a PS5 or on a PC, and it has to know: a PS4 must not be offered
+                               # PS5 games, and the on-screen keyboard, the button hints and the
+                               # focus ring differ per device.
+                               #
+                               # Answered from the requesting address, which is free and exact:
+                               # the console asking is the console being read on. "" means a PC.
+                               "viewer_platform": _viewer_plat,
                                "library_gen": srv.library.gen, "last_scan_ms": srv.library.last_scan_ms,
                                # Surfaced so the UI can warn instead of silently running on
                                # defaults while refusing to persist anything the user changes.
@@ -6952,15 +7055,35 @@ class Handler(BaseHTTPRequestHandler):
             # from dpi.mode with a default of "v2" - a key DEFAULT_CONFIG never carried - so a
             # fresh install reported ours:false, a "third-party install host" and never filled
             # busy/busy_for, while every install went through our engine regardless.
-            mode, ours = "spawn", True
+            # TWO CONSOLES, TWO ENGINES, AND THE PANEL MUST NAME THE RIGHT ONE.
+            #
+            # Every field below was written when a PS5 was the only thing this could describe, and
+            # each one was wrong on a PS4 in a way that read as authoritative: the panel said
+            # "Payload Manager - Port 8084 - answering" beside a green light, on a console that has
+            # no Payload Manager, no port 8084 and no spawned installer. An invented green light is
+            # worse than no light, because it sends someone hunting for the fault somewhere else.
+            #
+            # The PS4 installs through BGFT - the console's own download-and-install service, the
+            # one the Debug Package Installer drives. There is no separate process to be ready and
+            # nothing of ours listening on a port; what has to be true is that our payload resolved
+            # the BGFT symbols, which is exactly what the PS4's own health calls engine_ready.
+            _is4 = bool(b is not None and b.is_ps4())
+            mode, ours = ("bgft" if _is4 else "spawn"), True
             pl_port = int((srv.cfg.get("dpi", {}) or {}).get("pldmgr_port", 8084))
             shop_port = int(srv.cfg.get("console", {}).get("shop_port", 8710))
             out = {
                 "ok": True, "mode": mode, "ours": ours,
-                "name": "PKG MUTANT SHOP engine",
-                "how": ("A fresh installer is started for every install and exits when the console "
-                        "has accepted the package. Nothing stays running, so nothing can wedge."),
-                "shop_port": shop_port, "pldmgr_port": pl_port,
+                "platform": (b.platform_id() if b else ""),
+                "name": ("PKG MUTANT SHOP engine (PS4)" if _is4 else "PKG MUTANT SHOP engine"),
+                "how": (("Installs are handed to the PS4's own download-and-install service, so a "
+                         "finished install is a real one the console can launch.") if _is4 else
+                        ("A fresh installer is started for every install and exits when the console "
+                         "has accepted the package. Nothing stays running, so nothing can wedge.")),
+                "shop_port": shop_port,
+                # ZERO FOR A PS4, and the row hides it rather than printing ":0". The settings panel
+                # prints this port whenever it has one, and a port number is a thing a person will
+                # try to connect to before they doubt the panel.
+                "pldmgr_port": (0 if _is4 else pl_port),
                 "shop_ok": False, "shop_version": "", "ready": False,
                 "busy": False, "busy_for": 0, "log_bytes": 0,
                 "console_ip": (b.ip if b else srv.cfg.get("ps5_ip", "")),
@@ -6978,28 +7101,40 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     out["error"] = "PKG MUTANT SHOP on the PS5 did not answer (%s)" % str(e)[:80]
                 if out["shop_ok"]:
+                    # BOTH consoles answer this. The PS4 has no spawned installer, but it
+                    # implements /api/engine/spawn-status against its own BGFT job and reports the
+                    # same busy/busy_for - so "is an install running" is one question with one
+                    # answer here. (It does not report log_bytes; 0 is then the truth, not a
+                    # failure, and the panel shows the log button either way because
+                    # /api/engine/log exists on both.)
                     st = b.spawn_status() or {}
                     out["busy"] = bool(st.get("busy"))
                     out["busy_for"] = int(st.get("busy_for") or 0)
                     out["log_bytes"] = int(st.get("log_bytes") or 0)
             # What the panel should SAY, decided once here rather than in three places in the UI.
+            _dev = "PS4" if _is4 else "PS5"
             if not b:
                 out["state"] = "no-console"
-                out["detail"] = "No PS5 is set up yet - add its address above."
+                out["detail"] = "No console is set up yet - add one above."
             elif not out["shop_ok"]:
                 out["state"] = "shop-down"
-                out["detail"] = ("PKG MUTANT SHOP is not answering on the PS5. Load it from "
-                                 "Payload Manager, then reopen this panel.")
+                out["detail"] = (("PKG MUTANT SHOP is not answering on the PS4. Run the jailbreak, "
+                                  "then open PKG MUTANT SHOP on the console.") if _is4 else
+                                 ("PKG MUTANT SHOP is not answering on the PS5. Load it from "
+                                  "Payload Manager, then reopen this panel."))
             elif not out["ready"]:
-                out["state"] = "no-pldmgr"
-                out["detail"] = ("Payload Manager is not answering on :%d, and our engine needs it "
-                                 "to start each install. Reload it on the PS5." % pl_port)
+                out["state"] = ("engine-down" if _is4 else "no-pldmgr")
+                out["detail"] = (("The PS4 install service did not start. Close PKG MUTANT SHOP on "
+                                  "the console and open it again.") if _is4 else
+                                 ("Payload Manager is not answering on :%d, and our engine needs "
+                                  "it to start each install. Reload it on the PS5." % pl_port))
             elif out["busy"]:
                 out["state"] = "busy"
-                out["detail"] = "An install is being handed to the console right now."
+                out["detail"] = "An install is being handed to the %s right now." % _dev
             else:
                 out["state"] = "ready"
-                out["detail"] = "Ready - installs can start straight away."
+                out["detail"] = ("Ready - PS4 games can be installed straight away." if _is4
+                                 else "Ready - installs can start straight away.")
             return self._json(out)
         if path == "/api/move/status":
             # Progress lives on the console (it is doing the copying), so this is a straight
@@ -9212,12 +9347,20 @@ def main():
                         continue
                     if time.time() - last.get(c0["id"], 0) < REPAIR_EVERY:
                         continue
+                    # TWO REASONS TO STEP IN, and the second one is new. An icon that will not
+                    # open is the obvious one. An icon that opens but is the WRONG BUILD is the
+                    # one that kept this console on yesterday's app: everything the watchdog
+                    # looked at said "fine", and the console cannot replace it by itself.
                     ok = b.ps4_tile_launchable()
-                    if ok is not False:            # True, or could not ask - leave it alone
+                    stale = b.ps4_tile_stale()
+                    why = ("will not open" if ok is False
+                           else ("is an older build than the console's own copy of the shop"
+                                 if stale is True else ""))
+                    if not why:                    # fine, or could not ask - leave it alone
                         continue
                     last[c0["id"]] = time.time()
-                    print(" %s: the dashboard icon is installed but will not open - installing it "
-                          "from here so it gets a launch ticket" % b.name)
+                    print(" %s: the dashboard icon %s - installing it from here, which is the one "
+                          "lane the console's download service accepts" % (b.name, why))
                     try:
                         good, info = b.install_ps4_tile(force=True)
                         print(" %s: icon repair %s (%s)" % (b.name, "started" if good else "failed",
