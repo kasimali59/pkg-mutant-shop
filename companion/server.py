@@ -7004,9 +7004,18 @@ class Handler(BaseHTTPRequestHandler):
                                     "name": c.get("name") or c.get("ip") or "",
                                     "ip": c.get("ip") or "",
                                     "platform": str(c.get("platform") or "").lower() or "ps5",
+                                    # ONE MEANING OF "ONLINE" IN THIS DOCUMENT, and it is the one
+                                    # /api/consoles already uses: OUR shop answers. This read
+                                    # `engine_ready or ftp_on`, and it disagreed with ps5_online
+                                    # three keys above it within minutes of being written - the
+                                    # PS5's payload stopped while its FTP, which belongs to the
+                                    # jailbreak and outlives anything we load, kept answering. A
+                                    # document that contradicts itself is worse than one that is
+                                    # simply wrong: whichever half the UI believes, the other half
+                                    # is on the screen beside it.
                                     "online": (_ps4_on
                                                if (_ps4 and c.get("id") == _ps4.get("id"))
-                                               else (bool(engine_ready or ftp_on)
+                                               else (bool(engine_ready)
                                                      if (_ps5 and c.get("id") == _ps5.get("id"))
                                                      else None))}
                                    for c in cons],
@@ -8145,6 +8154,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "This is a PS5 game, and the console it "
                                                          "was sent to is a PS4"}, 400)
             targets = keep
+
+        # DRY RUN: decide, answer, touch nothing.
+        #
+        # Everything above this line is the TARGETING decision - which console or consoles a
+        # request means, and whether the package can go there at all. Everything below it acts on a
+        # console. The two-console test suite needs the first and must never cause the second, and
+        # it did: it POSTed real installs at whichever consoles were awake, with force:true so that
+        # "already installed" could not even short-circuit them, and the owner's PS5 stopped
+        # answering twice in one hour immediately after the suite ran. A test that breaks the
+        # machine it is run beside is not a test.
+        #
+        # So the decision is available on its own. No queue row, no hand-over, no console contacted
+        # beyond the readiness probes the decision itself needs.
+        if body.get("dry_run"):
+            return self._json({"ok": True, "dry_run": True, "consoles": targets,
+                               "title_id": tid, "kind": kind})
 
         # An add-on has to go where its base game already lives — installing a patch to a
         # different drive than the game is a guaranteed failure, and the user should not have to

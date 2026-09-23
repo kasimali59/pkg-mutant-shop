@@ -159,28 +159,36 @@ try:
               len(ps4row[0].get("devices") or []) if ps4row else 0)
 
         st, r = req("/api/install", {"install_key": REAL_KEY, "title_id": "CUSA02365",
-                                     "name": "Regression Probe", "kind": "base", "mode": "queued", "force": True})
-        # Riptide GP2 really is installed on the PS4, so the honest answer is a skip - and the skip
-        # NAMES the console, which is itself the proof that the PS4 was the chosen target and that
-        # install state is known per console.
+                                     "name": "Regression Probe", "kind": "base", "mode": "queued", "dry_run": True})
+        # EVERY INSTALL PROBE BELOW IS A DRY RUN, and that is not a convenience.
+        #
+        # This suite used to POST real installs at whichever consoles were awake - with force:true,
+        # so that "already installed" could not even short-circuit them - and the owner's PS5
+        # stopped answering twice in one hour, each time within minutes of this file running. A
+        # test that breaks the machine it is run beside is not a test, and these checks never
+        # needed the install: what they are about is TARGETING, which /api/install decides and
+        # reports before it touches anything.
+        #
+        # No console is named here on purpose: the answer has to come from the resolver rather than
+        # from the caller, which is the whole point of the check.
         check("no console named -> exactly one console is chosen",
               isinstance(r.get("consoles"), list) and len(r.get("consoles") or []) == 1,
               json.dumps(r)[:160])
 
         st, r = req("/api/install", {"install_key": REAL_KEY, "title_id": "CUSA02365",
                                      "name": "Regression Probe", "kind": "base", "mode": "queued",
-                                     "console": "ps5", "force": True})
+                                     "console": "ps5", "dry_run": True})
         check("explicit console=ps5 is honoured", r.get("consoles") == ["ps5"], json.dumps(r)[:160])
 
         st, r = req("/api/install", {"install_key": REAL_KEY, "title_id": "PPSA00000",
                                      "name": "PS5 Probe", "kind": "base", "mode": "queued",
-                                     "console": "ps4", "force": True})
+                                     "console": "ps4", "dry_run": True})
         check("a PS5 package aimed at the PS4 is refused with a reason",
               r.get("ok") is False and "PS4" in str(r.get("error", "")), json.dumps(r)[:200])
 
         st, r = req("/api/install", {"install_key": REAL_KEY, "title_id": "CUSA02365",
                                      "name": "Both Probe", "kind": "base", "mode": "queued",
-                                     "console": "all", "force": True})
+                                     "console": "all", "dry_run": True})
         check("console=all targets both", sorted(r.get("consoles") or []) == ["ps4", "ps5"],
               json.dumps(r)[:160])
 
