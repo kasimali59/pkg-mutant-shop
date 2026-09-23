@@ -2952,6 +2952,22 @@ class Ps5Bridge:
         now = time.time()
         if now - getattr(self, "_run_ts", 0) < ttl:
             return getattr(self, "_run_cache", {})
+        # NOT ON A PS4, and this costs real time rather than merely being wrong.
+        #
+        # Both answers below are PS5 machinery. /api/cheat/running is our cheat engine, which walks
+        # process memory through a kernel read/write the PS4 port does not have - the PS4's server
+        # answers that path with 200 and an empty body, so it looks like "no game running" rather
+        # than "cannot be asked". Falling through, the next attempt is CheatRunner on :9999, which
+        # nothing on a PS4 is listening on: on Windows a refused connect to a live host is measured
+        # at ~2 s, and this sits on the health path.
+        #
+        # The memo below hides it most of the time and then pays it again every ten minutes, on
+        # whichever poll happens to land after the timer expires. There is nothing to ask a PS4
+        # here, so ask it nothing. When the PS4 payload can report its own foreground title this is
+        # where that goes.
+        if self.is_ps4():
+            self._run_cache, self._run_ts = {}, now
+            return {}
         r = self.mutant_running()          # our engine first
         if r:
             r = {"titleId": r.get("title_id"), "titleName": "", "pid": r.get("pid"),
