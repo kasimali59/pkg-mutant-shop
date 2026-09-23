@@ -36,7 +36,13 @@
  *   - Asking the payload instead (GET /api/open) worked first time. The payload is not sandboxed.
  *     That fallback is the only reason anything reached the television.
  *   - Returning from main() raises SIGSYS - a system call this sandbox does not permit, from the
- *     toolchain's own exit path - which is the error dialog the user has to dismiss.
+ *     toolchain's own exit path. That is ONE of the two ways out of here that ends in an error
+ *     dialog, and the _Exit override below removes it.
+ *   - THE OTHER ONE, and the one measured to be firing now, is the exit itself:
+ *     sceSystemServiceLoadExec("exit", NULL) has the system kill this process and then FAIL to
+ *     spawn the exit helper (0x80aa001a). See the long note above leave(). Do not read the SIGSYS
+ *     paragraph as the explanation for a CE-34878-0 seen today without checking klog first - the
+ *     same code on the television has had two different causes.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,7 +133,8 @@ static void notify(const char *text) {
 /* ---- WHY THIS APP USED TO CRASH ON THE WAY OUT, and the two things that stop it
  *
  * The television showed an error to dismiss (CE-34878-0) every time, AFTER the shop had already
- * opened. klog:
+ * opened. This was ONE of its two causes and it is fixed; the other is the exit spawn, and the
+ * note above leave() has that one with its own klog. klog for THIS one:
  *
  *     # A user thread receives a fatal signal
  *     # signal: 12 (SIGSYS)   thread name: eboot.bin
@@ -157,17 +164,53 @@ static void park_forever(void) {
     for (;;) sceKernelUsleep(60 * 1000000);
 }
 
+/* ---- CE-34878-0 IS THE EXIT, AND NOW IT IS MEASURED RATHER THAN REASONED ABOUT
+ *
+ * klog, captured on a real press of the icon (2026-09-23), immediately after the shop answered
+ * /api/open and the browser came forward - so the app had already done its whole job:
+ *
+ *     [Syscore App] Kill for LoadExec(0x6c)
+ *     [Syscore App] Kill for LoadExec(0x6c) => 0
+ *     [AppMgr Trace]: pid=0x6c, deleted.
+ *     [AppMgr] Executing next spawn
+ *     [Syscore App] processParam: elfPath = exit, fullPath = .../PKGM00001-app0-patch0-union/eboot.bin
+ *     [Syscore App] processSpawn() error: 0x80aa001a
+ *     [AppMgr] Exit spawn failed : 0x80aa001a  ELF path=exit
+ *
+ * So `sceSystemServiceLoadExec("exit", NULL)` does not fail politely and return a code we can act
+ * on. The system KILLS this process first and only then fails to spawn the exit helper - which is
+ * the error on the television. Both of the fallbacks written below it were therefore dead code:
+ * neither the printf nor park_forever() can run, because by then there is no process left.
+ *
+ * WHAT IS BEING TRIED, AND WHY IT IS NOT A GUESSED SIGNATURE. The toolchain's own
+ * include/orbis/SystemService.h declares `void sceSystemServiceKillLocalProcess();` - no
+ * arguments, nothing to get wrong, and it says in its name exactly what is wanted here: end THIS
+ * process, without asking AppMgr to spawn anything in its place.
+ *
+ * The risk is bounded in a way that matters on this project. This runs in an APPLICATION SANDBOX,
+ * not in the shared host process the shop's payload lives in - so the worst case is this app
+ * closing badly, which is already what happens every single time. It also runs last, after the
+ * browser is on screen, so nothing the owner is waiting for depends on it.
+ *
+ * LoadExec stays as the second attempt: it is what a title is documented to use, and if a future
+ * firmware makes the exit spawn work it is still the right call. Parking stays third. If the icon
+ * ever starts leaving a suspended black app behind instead of an error dialog, this order is where
+ * to look - park is quiet but it is not an exit. */
 _Noreturn void _Exit(int ec) {
     (void)ec;
     /* No printf: stdio has already been torn down by the time exit() reaches here. */
+    sceSystemServiceKillLocalProcess();
     sceSystemServiceLoadExec("exit", NULL);
     park_forever();
 }
 
 static _Noreturn void leave(void) {
     fflush(stdout);
+    printf("[PMS] done - closing this app\n");
+    sceSystemServiceKillLocalProcess();
+    /* Only reached if that did not close us. */
     int rc = (int)sceSystemServiceLoadExec("exit", NULL);
-    printf("[PMS] LoadExec(exit) rc=0x%08x - parking instead\n", (unsigned)rc);
+    printf("[PMS] still here: LoadExec(exit) rc=0x%08x - parking instead\n", (unsigned)rc);
     park_forever();
 }
 
