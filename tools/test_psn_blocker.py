@@ -75,8 +75,10 @@ try:
         "consoles": [], "library": {}, "device": {"id": "psntest00000001"},
     }, open(CFG, "w"), indent=2)
 
+    # Announces itself to nothing - see the note in test_fleet_two_consoles.py.
     proc = subprocess.Popen([sys.executable, os.path.join(REPO, "companion", "server.py")],
                             cwd=os.path.join(REPO, "companion"),
+                            env=dict(os.environ, PMS_TEST_MODE="1"),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     up = False
     for _ in range(40):

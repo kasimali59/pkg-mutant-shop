@@ -196,7 +196,14 @@ ICON_DIR = os.path.join(CACHE_DIR, "icons")
 # card size. Originals are kept untouched for the detail panel.
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
 HASH_CACHE_PATH = os.path.join(CACHE_DIR, "hashes.json")
-CONFIG_PATH = os.path.join(HERE, "config.json")
+# CONFIG_PATH: beside this file, or beside the exe when frozen - and overridable by PMS_CONFIG.
+#
+# The override exists because the test suites had to WRITE OVER the repo's own config.json to run,
+# then put it back afterwards. That works until one of them is interrupted, and then the owner's
+# settings are whatever the test left behind. A second instance for a UI check had the same
+# problem: there was no way to start one on another port without editing the file the real one
+# reads. An environment variable costs nothing and removes both.
+CONFIG_PATH = os.environ.get("PMS_CONFIG") or os.path.join(HERE, "config.json")
 EXAMPLE_PATH = os.path.join(HERE, "config.example.json")
 INSTALLED_PATH = os.path.join(HERE, "installed.json")
 
@@ -462,10 +469,26 @@ def build_library(srv):
                 g.setdefault("installed_on", [])
                 if cid not in g["installed_on"]:
                     g["installed_on"].append(cid)
-                # The scalar fields describe ONE console, and there is no way to widen them without
-                # changing what every reader of them means. The first console that has the title
-                # wins, which is the PS5 on a machine that has both (reconcile_consoles orders them),
-                # so nothing that read these before sees a different answer.
+                # WHICH CONSOLE, AND WHAT IT HAS THERE.
+                #
+                # installed_on already said WHERE a title is. It did not say what is there, and the
+                # page needs that: the drive it sits on and the version installed are different
+                # facts on each console, and the game panel was showing the first console's answer
+                # whichever console the owner had chosen. Measured on the owner's fleet: 117 titles
+                # with install state, 106 on the PS5 alone, 7 on the PS4 alone, 4 on both - so for
+                # 113 of them the panel could name a drive that belongs to the other machine.
+                #
+                # A NEW key beside the scalars, never instead of them. The scalar fields keep
+                # meaning exactly what they meant - the first console that has the title, which is
+                # the PS5 on a fleet with both - so every existing reader, including an older page
+                # served by a console that has not been rebuilt, sees no change at all.
+                g.setdefault("console_state", {})[cid] = {
+                    "drive": a.get("drive") or "",
+                    "version": a.get("app_ver") or "",
+                    "size": csize,
+                    "backup_path": a.get("backup_path"),
+                    "source": a.get("source") or "",
+                }
                 if first:
                     g["installed_drive"] = a["drive"]
                     g["installed_version"] = a.get("app_ver") or ""   # lets the UI hide applied patches
@@ -480,6 +503,15 @@ def build_library(srv):
                 games.append({"title_id": a["title_id"], "content_id": a.get("content_id", ""),
                               "name": a["name"], "platform": a["platform"],
                               "region": a.get("region", "—"), "lane": "installed", "on_console": True,
+                              # Same two keys as the enrich branch above. A title that exists only
+                              # on a console and not in any PC folder is still a title the panel
+                              # has to describe per console.
+                              "installed_on": [cid],
+                              "console_state": {cid: {"drive": a.get("drive") or "",
+                                                      "version": a.get("app_ver") or "",
+                                                      "size": csize,
+                                                      "backup_path": a.get("backup_path"),
+                                                      "source": a.get("source") or ""}},
                               "installed_drive": a["drive"], "installed_version": a.get("app_ver") or "",
                               "size": csize, "console_size": csize,
                               "size_known": csize > 0,
@@ -8961,7 +8993,28 @@ def start_ps5_log_listener(host="0.0.0.0", port=9097):
     threading.Thread(target=serve, daemon=True).start()
 
 
+# A COMPANION THAT IS NOT THE REAL ONE MUST LEAVE THE CONSOLES ALONE.
+#
+# The two-console test suite starts a whole companion on its own port so it can drive real routes.
+# That companion also did everything a companion does in the background - and one of those things
+# is to tell every console "the PC is at 10.0.0.76:8791", every eight seconds.
+#
+# The console keeps that address. The suite then exits, 8791 dies, and the console goes on handing
+# the page a PC that is not there: measured on the owner's PS5, which was still offering
+# http://10.0.0.76:8791 long after the test that put it there had gone. The page only notices when
+# the real PC is briefly unavailable - during a rebuild, say - and then walks its candidate list
+# into the dead one, which is exactly what the owner saw in the console's browser.
+#
+# So a test instance announces nothing, installs nothing and repairs nothing. It still serves every
+# route, which is all a test needs. One environment variable, read once, because a flag that has to
+# be threaded through six call sites is a flag someone will forget at the seventh.
+PMS_TEST_MODE = bool(os.environ.get("PMS_TEST_MODE"))
+
+
 def start_pc_register_thread(cfg, fleet):
+    if PMS_TEST_MODE:
+        print(" test mode: not announcing this PC to any console")
+        return
     """Push our LAN address to the on-console shop server so the PS5 auto-finds the PC (2-way connect).
     Fire-and-forget; harmless when the on-console server isn't running."""
     port = cfg["companion"]["port"]
@@ -9361,6 +9414,10 @@ def main():
     # per console per REPAIR_EVERY seconds at most, so a console that cannot be fixed is not hammered,
     # and only ever when the console itself says the icon will not open.
     def tile_watchdog():
+        # Installing the dashboard app is a real change to a real console. A test instance does not
+        # get to make it - see PMS_TEST_MODE.
+        if PMS_TEST_MODE:
+            return
         REPAIR_EVERY = 600
         last = {}
         while True:

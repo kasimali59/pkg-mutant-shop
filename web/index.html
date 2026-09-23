@@ -1172,6 +1172,10 @@ html{scroll-behavior:smooth}
          <select> to its longest option and push it across the other column. When the chosen text
          does not fit, an overlay scrolls it (syncDriveMarquee); the <select> keeps its id, its
          handlers and its value - the overlay is display-only and ignores the pointer. -->
+    <!-- WHICH CONSOLE. Hidden whenever there is nothing to choose - one console, or a PS5 game,
+         which can only ever go on a PS5. It appears only when the answer is genuinely the owner's
+         to give: a PS4 game with both consoles connected, since a PS4 game runs on either. -->
+    <div class="selwrap" id="panelConsoleWrap" style="display:none"><select id="panelConsoleSel" aria-label="Install on which console" data-i18n-aria="ui_aria_install_console"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
     <div class="selwrap"><select id="driveSel" aria-label="Install destination" data-i18n-aria="ui_aria_install_dest"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
     <button class="btn ghost tip" id="sendPkg"
             data-tip="Copy the package onto the PS5's own drive first, then install it from there. Useful when you want the console to hold the file rather than stream it over the network." data-i18n-tip="ui_tip_send_pkg">📥 Send to PS5</button>
@@ -1648,6 +1652,12 @@ var I18N={
     gp_dest_addon_tip:"Patches and reinstalls must go to the same drive as the game, so this is chosen automatically.",
     gp_dest_console_default:"Installs to: console default",
     gp_dest_default_tip:"PS4/PS5 PKG installs follow the PS5's own Installation Location setting (Settings > Storage). Change it on the console to install to Extended Storage.",
+    ui_aria_install_console:"Install on which console",
+    gp_install_on:"Install on {console}",
+    gp_console_offline:" · offline",
+    gp_tip_install_base:"Install this game on the {console}. It goes to whichever drive that console's own installation-location setting points at.",
+    gp_tip_install_update:"Install the newest update for this game.",
+    gp_tip_reinstall:"Install this game again over the copy already on the {console}. Saves are not touched.",
     gp_btn_install_update_only:"Install update only",
     gp_btn_base_game_missing:"Base game missing",
     gp_updonly_tip:"The base game PKG is not in your library - only a patch. Add the base game to install this title.",
@@ -2144,6 +2154,12 @@ var I18N={
     gp_dest_addon_tip:"Los parches y las reinstalaciones tienen que ir al mismo disco que el juego, así que se elige automáticamente.",
     gp_dest_console_default:"Se instala en: destino de la consola",
     gp_dest_default_tip:"Las instalaciones de PKG de PS4/PS5 siguen el ajuste de Ubicación de instalación de la propia PS5 (Ajustes > Almacenamiento). Cámbialo en la consola para instalar en el Almacenamiento ampliado.",
+    ui_aria_install_console:"Instalar en qué consola",
+    gp_install_on:"Instalar en {console}",
+    gp_console_offline:" · apagada",
+    gp_tip_install_base:"Instala este juego en la {console}. Va a la unidad que indique el ajuste de ubicación de instalación de esa consola.",
+    gp_tip_install_update:"Instala la actualización más reciente de este juego.",
+    gp_tip_reinstall:"Vuelve a instalar este juego sobre la copia que ya está en la {console}. No se tocan las partidas guardadas.",
     gp_btn_install_update_only:"Solo actualización",
     gp_btn_base_game_missing:"Falta el juego base",
     gp_updonly_tip:"El PKG del juego base no está en tu biblioteca, solo un parche. Añade el juego base para instalar este título.",
@@ -2640,6 +2656,12 @@ var I18N={
     gp_dest_addon_tip:"Os patches e as reinstalações têm de ir para a mesma unidade do jogo, por isso isto é escolhido automaticamente.",
     gp_dest_console_default:"Instala em: predefinição da consola",
     gp_dest_default_tip:"As instalações de PKG de PS4/PS5 seguem a definição de Localização de Instalação da própria PS5 (Definições > Armazenamento). Altera-a na consola para instalar no Armazenamento Expandido.",
+    ui_aria_install_console:"Instalar em que consola",
+    gp_install_on:"Instalar na {console}",
+    gp_console_offline:" · desligada",
+    gp_tip_install_base:"Instala este jogo na {console}. Vai para a unidade que a definição de localização de instalação dessa consola indicar.",
+    gp_tip_install_update:"Instala a atualização mais recente deste jogo.",
+    gp_tip_reinstall:"Instala este jogo outra vez por cima da cópia que já está na {console}. Os saves não são tocados.",
     gp_btn_install_update_only:"Instalar só a atualização",
     gp_btn_base_game_missing:"Falta o jogo base",
     gp_updonly_tip:"O PKG do jogo base não está na tua biblioteca - só um patch. Junta o jogo base para instalares este título.",
@@ -3136,6 +3158,12 @@ var I18N={
     gp_dest_addon_tip:"Les patchs et les réinstallations doivent aller sur le même disque que le jeu : le choix est donc automatique.",
     gp_dest_console_default:"Installation sur : emplacement par défaut de la console",
     gp_dest_default_tip:"Les installations de PKG PS4/PS5 suivent le réglage Emplacement d'installation de la PS5 (Paramètres > Stockage). Modifiez-le sur la console pour installer sur le stockage étendu.",
+    ui_aria_install_console:"Installer sur quelle console",
+    gp_install_on:"Installer sur {console}",
+    gp_console_offline:" · éteinte",
+    gp_tip_install_base:"Installe ce jeu sur la {console}. Il ira sur le disque indiqué par le réglage d'emplacement d'installation de cette console.",
+    gp_tip_install_update:"Installe la mise à jour la plus récente de ce jeu.",
+    gp_tip_reinstall:"Réinstalle ce jeu par-dessus la copie déjà présente sur la {console}. Les sauvegardes ne sont pas touchées.",
     gp_btn_install_update_only:"Installer la mise à jour seule",
     gp_btn_base_game_missing:"Jeu de base absent",
     gp_updonly_tip:"Le PKG du jeu de base n'est pas dans votre bibliothèque — seulement un patch. Ajoutez le jeu de base pour installer ce titre.",
@@ -3632,6 +3660,12 @@ var I18N={
     gp_dest_addon_tip:"Patches und Neuinstallationen müssen auf dasselbe Laufwerk wie das Spiel, deshalb wird das automatisch gewählt.",
     gp_dest_console_default:"Installiert auf: Standard der Konsole",
     gp_dest_default_tip:"PS4-/PS5-PKG-Installationen folgen der Einstellung „Installationsort“ der PS5 (Einstellungen > Speicher). Ändere sie auf der Konsole, um auf den erweiterten Speicher zu installieren.",
+    ui_aria_install_console:"Auf welcher Konsole installieren",
+    gp_install_on:"Auf {console} installieren",
+    gp_console_offline:" · aus",
+    gp_tip_install_base:"Installiert dieses Spiel auf der {console}. Es landet auf dem Laufwerk, auf das die Installationsort-Einstellung dieser Konsole zeigt.",
+    gp_tip_install_update:"Installiert das neueste Update für dieses Spiel.",
+    gp_tip_reinstall:"Installiert dieses Spiel erneut über die Kopie, die schon auf der {console} liegt. Spielstände bleiben unberührt.",
     gp_btn_install_update_only:"Nur Update installieren",
     gp_btn_base_game_missing:"Basisspiel fehlt",
     gp_updonly_tip:"Das PKG des Basisspiels ist nicht in deiner Bibliothek – nur ein Patch. Füge das Basisspiel hinzu, um diesen Titel zu installieren.",
@@ -4128,6 +4162,12 @@ var I18N={
     gp_dest_addon_tip:"パッチと再インストールはゲームと同じドライブに入れる必要があるため、自動で選ばれます。",
     gp_dest_console_default:"インストール先: 本体の設定どおり",
     gp_dest_default_tip:"PS4/PS5 の PKG は、PS5 本体のインストール先の設定 (設定 > ストレージ) に従います。拡張ストレージに入れたいときは本体で変更してください。",
+    ui_aria_install_console:"どの本体にインストールするか",
+    gp_install_on:"{console} にインストール",
+    gp_console_offline:" · オフライン",
+    gp_tip_install_base:"このゲームを {console} にインストールします。その本体のインストール先設定が指すドライブに入ります。",
+    gp_tip_install_update:"このゲームの最新アップデートをインストールします。",
+    gp_tip_reinstall:"{console} にすでにあるコピーに上書きしてインストールします。セーブデータはそのままです。",
     gp_btn_install_update_only:"アップデートのみインストール",
     gp_btn_base_game_missing:"本編がありません",
     gp_updonly_tip:"ライブラリにあるのはパッチだけで、本編の PKG がありません。このタイトルをインストールするには本編を追加してください。",
@@ -4624,6 +4664,12 @@ var I18N={
     gp_dest_addon_tip:"الرقع وإعادة التثبيت يجب أن تذهب إلى القرص نفسه الذي عليه اللعبة، فيُختار تلقائيًا.",
     gp_dest_console_default:"يُثبَّت على: الوجهة الافتراضية للجهاز",
     gp_dest_default_tip:"تثبيت حزم PS4/PS5 يتبع إعداد موقع التثبيت في PS5 نفسه (الإعدادات > التخزين). غيّره على الجهاز للتثبيت على التخزين الموسّع.",
+    ui_aria_install_console:"التثبيت على أي جهاز",
+    gp_install_on:"التثبيت على {console}",
+    gp_console_offline:" · مطفأ",
+    gp_tip_install_base:"يثبّت هذه اللعبة على {console}. ستذهب إلى القرص الذي يشير إليه إعداد مكان التثبيت في ذلك الجهاز.",
+    gp_tip_install_update:"يثبّت أحدث تحديث لهذه اللعبة.",
+    gp_tip_reinstall:"يثبّت هذه اللعبة فوق النسخة الموجودة على {console}. لا تُمس بيانات الحفظ.",
     gp_btn_install_update_only:"ثبّت التحديث فقط",
     gp_btn_base_game_missing:"اللعبة الأساسية مفقودة",
     gp_updonly_tip:"حزمة اللعبة الأساسية ليست في مكتبتك — الرقعة فقط. أضف اللعبة الأساسية لتثبيت هذا العنوان.",
@@ -4933,6 +4979,12 @@ var I18N={
     gp_dest_console_default:"安装到：主机默认位置",
     gp_dest_console_only_tip:"选择硬盘需要电脑端应用。只用主机时，请在 ⋯ 菜单里用“移动到其他硬盘”把游戏放到你想要的位置。",
     gp_dest_default_tip:"PS4/PS5 的 PKG 安装遵循 PS5 自己的安装位置设置（设置 > 存储）。要装到扩展存储，请在主机上改这项设置。",
+    ui_aria_install_console:"安装到哪台主机",
+    gp_install_on:"安装到 {console}",
+    gp_console_offline:" · 已关机",
+    gp_tip_install_base:"把这个游戏装到 {console}。它会装到那台主机自己的安装位置设置所指向的硬盘。",
+    gp_tip_install_update:"安装这个游戏的最新更新。",
+    gp_tip_reinstall:"在 {console} 上已有的副本之上重新安装。存档不会被动。",
     gp_dest_installed_drive:"已安装的那个硬盘",
     gp_dest_installs_to:"安装到：{drive}",
     gp_dlc_none:"你的库文件夹里没有这个游戏的 DLC 文件。",
@@ -5296,6 +5348,12 @@ var I18N={
     gp_dest_console_default:"यहाँ इंस्टॉल होगा: कंसोल की डिफ़ॉल्ट जगह",
     gp_dest_console_only_tip:"ड्राइव चुनने के लिए PC ऐप चाहिए। सिर्फ़ कंसोल पर, ⋯ मेनू के “दूसरी ड्राइव पर ले जाएँ” से गेम को अपनी पसंद की जगह रखें।",
     gp_dest_default_tip:"PS4/PS5 PKG इंस्टॉल PS5 की अपनी Installation Location सेटिंग (Settings > Storage) के अनुसार होते हैं। एक्सटेंडेड स्टोरेज पर इंस्टॉल करना हो तो इसे कंसोल पर बदलें।",
+    ui_aria_install_console:"किस कंसोल पर इंस्टॉल करें",
+    gp_install_on:"{console} पर इंस्टॉल करें",
+    gp_console_offline:" · बंद",
+    gp_tip_install_base:"इस गेम को {console} पर इंस्टॉल करता है। यह उसी ड्राइव पर जाएगा जो उस कंसोल की इंस्टॉल-लोकेशन सेटिंग बताती है।",
+    gp_tip_install_update:"इस गेम का सबसे नया अपडेट इंस्टॉल करता है।",
+    gp_tip_reinstall:"{console} पर पहले से मौजूद कॉपी के ऊपर इसे दोबारा इंस्टॉल करता है। सेव डेटा को नहीं छुआ जाता।",
     gp_dest_installed_drive:"जिस ड्राइव पर इंस्टॉल है",
     gp_dest_installs_to:"यहाँ इंस्टॉल होगा: {drive}",
     gp_dlc_none:"आपके लाइब्रेरी फ़ोल्डर में इस टाइटल के लिए कोई DLC फ़ाइल नहीं है।",
@@ -5659,6 +5717,12 @@ var I18N={
     gp_dest_console_default:"Установка на: диск по умолчанию",
     gp_dest_console_only_tip:"Выбор диска доступен только в приложении на ПК. На самой консоли перенесите игру куда нужно через «Перенести на другой диск» в меню ⋯.",
     gp_dest_default_tip:"Установка PKG для PS4/PS5 подчиняется настройке места установки на самой PS5 («Настройки» > «Хранилище»). Измените её на консоли, чтобы ставить на расширенное хранилище.",
+    ui_aria_install_console:"На какую консоль установить",
+    gp_install_on:"Установить на {console}",
+    gp_console_offline:" · выключена",
+    gp_tip_install_base:"Установит эту игру на {console}. Она попадёт на тот диск, на который указывает настройка места установки этой консоли.",
+    gp_tip_install_update:"Установит последнее обновление для этой игры.",
+    gp_tip_reinstall:"Установит игру поверх копии, которая уже есть на {console}. Сохранения не затрагиваются.",
     gp_dest_installed_drive:"диск с игрой",
     gp_dest_installs_to:"Установка на: {drive}",
     gp_dlc_none:"Файлов DLC для этой игры в папке библиотеки нет.",
@@ -6022,6 +6086,12 @@ var I18N={
     gp_dest_console_default:"Si installa su: unità predefinita della console",
     gp_dest_console_only_tip:"Per scegliere l'unità serve l'app sul PC. Sulla sola console, metti il gioco dove vuoi con “Sposta su un'altra unità” nel menu ⋯.",
     gp_dest_default_tip:"Le installazioni dei PKG PS4/PS5 seguono l'impostazione Posizione di installazione della PS5 (Impostazioni > Archiviazione). Cambiala sulla console per installare sull'archiviazione estesa.",
+    ui_aria_install_console:"Su quale console installare",
+    gp_install_on:"Installa su {console}",
+    gp_console_offline:" · spenta",
+    gp_tip_install_base:"Installa questo gioco sulla {console}. Finirà sull'unità indicata dall'impostazione di posizione di installazione di quella console.",
+    gp_tip_install_update:"Installa l'aggiornamento più recente di questo gioco.",
+    gp_tip_reinstall:"Reinstalla questo gioco sopra la copia già presente sulla {console}. I salvataggi non vengono toccati.",
     gp_dest_installed_drive:"l'unità dov'è installato",
     gp_dest_installs_to:"Si installa su: {drive}",
     gp_dlc_none:"Nessun file DLC per questo titolo nella cartella della libreria.",
@@ -6385,6 +6455,12 @@ var I18N={
     gp_dest_console_default:"설치 위치: 콘솔 기본값",
     gp_dest_console_only_tip:"드라이브를 고르려면 PC 앱이 필요합니다. 콘솔만 사용할 때는 ⋯ 메뉴의 “다른 드라이브로 이동”으로 원하는 곳에 게임을 옮기세요.",
     gp_dest_default_tip:"PS4/PS5 PKG 설치는 PS5 자체의 설치 위치 설정(설정 > 저장공간)을 따릅니다. 확장 저장공간에 설치하려면 콘솔에서 이 설정을 바꾸세요.",
+    ui_aria_install_console:"어느 본체에 설치할지",
+    gp_install_on:"{console}에 설치",
+    gp_console_offline:" · 꺼짐",
+    gp_tip_install_base:"이 게임을 {console}에 설치합니다. 그 본체의 설치 위치 설정이 가리키는 드라이브로 들어갑니다.",
+    gp_tip_install_update:"이 게임의 최신 업데이트를 설치합니다.",
+    gp_tip_reinstall:"{console}에 이미 있는 사본 위에 다시 설치합니다. 저장 데이터는 건드리지 않습니다.",
     gp_dest_installed_drive:"설치된 드라이브",
     gp_dest_installs_to:"설치 위치: {drive}",
     gp_dlc_none:"라이브러리 폴더에 이 타이틀용 DLC 파일이 없습니다.",
@@ -6748,6 +6824,12 @@ var I18N={
     gp_dest_console_default:"Kurulacağı yer: konsol varsayılanı",
     gp_dest_console_only_tip:"Disk seçmek için PC uygulaması gerekir. Konsolda tek başınayken oyunu istediğiniz yere ⋯ menüsündeki “Başka diske taşı” ile koyun.",
     gp_dest_default_tip:"PS4/PS5 PKG kurulumları PS5'in kendi Kurulum Konumu ayarını izler (Ayarlar > Depolama). Genişletilmiş Depolama'ya kurmak için bunu konsoldan değiştirin.",
+    ui_aria_install_console:"Hangi konsola kurulacak",
+    gp_install_on:"{console} üzerine kur",
+    gp_console_offline:" · kapalı",
+    gp_tip_install_base:"Bu oyunu {console} üzerine kurar. O konsolun kendi kurulum konumu ayarının gösterdiği diske gider.",
+    gp_tip_install_update:"Bu oyunun en yeni güncellemesini kurar.",
+    gp_tip_reinstall:"{console} üzerinde zaten duran kopyanın üstüne yeniden kurar. Kayıtlara dokunulmaz.",
     gp_dest_installed_drive:"kurulu olduğu disk",
     gp_dest_installs_to:"Kurulacağı yer: {drive}",
     gp_dlc_none:"Bu oyun için kitaplık klasörünüzde DLC dosyası yok.",
@@ -7111,6 +7193,12 @@ var I18N={
     gp_dest_console_default:"Instaluje na: domyślny dysk konsoli",
     gp_dest_console_only_tip:"Wybór dysku wymaga aplikacji na komputerze. Na samej konsoli przenieś grę tam, gdzie chcesz, poleceniem „Przenieś na inny dysk” w menu ⋯.",
     gp_dest_default_tip:"Instalacje PKG dla PS4/PS5 kierują się ustawieniem Miejsce instalacji w PS5 (Ustawienia > Pamięć). Zmień je na konsoli, aby instalować na pamięci rozszerzonej.",
+    ui_aria_install_console:"Na której konsoli zainstalować",
+    gp_install_on:"Zainstaluj na {console}",
+    gp_console_offline:" · wyłączona",
+    gp_tip_install_base:"Instaluje tę grę na {console}. Trafi na dysk wskazany przez ustawienie miejsca instalacji tej konsoli.",
+    gp_tip_install_update:"Instaluje najnowszą aktualizację tej gry.",
+    gp_tip_reinstall:"Instaluje grę ponownie na kopii, która już jest na {console}. Zapisy pozostają nietknięte.",
     gp_dest_installed_drive:"dysk z instalacją",
     gp_dest_installs_to:"Instaluje na: {drive}",
     gp_dlc_none:"W folderze biblioteki nie ma plików DLC do tego tytułu.",
@@ -7474,6 +7562,12 @@ var I18N={
     gp_dest_console_default:"Installeert naar: standaard van de console",
     gp_dest_console_only_tip:"Een schijf kiezen kan alleen met de pc-app. Op de console zelf zet je de game waar je hem wilt met “Naar een andere schijf verplaatsen” in het ⋯-menu.",
     gp_dest_default_tip:"PS4/PS5 PKG-installaties volgen de eigen instelling Installatielocatie van de PS5 (Instellingen > Opslag). Wijzig die op de console om naar uitgebreide opslag te installeren.",
+    ui_aria_install_console:"Op welke console installeren",
+    gp_install_on:"Installeren op {console}",
+    gp_console_offline:" · uit",
+    gp_tip_install_base:"Installeert deze game op de {console}. Hij komt op de schijf waar de installatielocatie-instelling van die console naar wijst.",
+    gp_tip_install_update:"Installeert de nieuwste update voor deze game.",
+    gp_tip_reinstall:"Installeert deze game opnieuw over de kopie die al op de {console} staat. Savegames blijven ongemoeid.",
     gp_dest_installed_drive:"de schijf waarop hij staat",
     gp_dest_installs_to:"Installeert naar: {drive}",
     gp_dlc_none:"Geen DLC-bestanden voor deze titel in je bibliotheekmap.",
@@ -7951,6 +8045,80 @@ function isBackupTitle(g){
    server routes on the FILE's extension, and a PKG goes wherever the console's own Installation
    Location says, which no picker of ours can change. Asking the question about the FILE keeps the
    button's promise and what actually happens in step. */
+/* "ps4" or "ps5" for a game, from its title id. PS5 titles are PPSA*, PS4 titles are CUSA*.
+   The library also states a platform; this prefers the id because the id is what the install route
+   gates on, and two sources that can disagree should not both be consulted. */
+function gamePlat(g){
+  var tid=String((g&&g.title_id)||"").toUpperCase();
+  if(tid.indexOf("PPSA")===0) return "ps5";
+  if(tid.indexOf("CUSA")===0) return "ps4";
+  var p=String((g&&g.platform)||"").toLowerCase();
+  return p.indexOf("ps5")>=0?"ps5":p.indexOf("ps4")>=0?"ps4":"";
+}
+/* THE CONSOLES THIS GAME COULD ACTUALLY GO ON.
+   A PS4 game runs on both machines, so with both connected the choice is real and the owner should
+   make it. A PS5 game runs on one, so there is nothing to ask - and offering the choice would be
+   offering a mistake. An unknown title id is treated as a PS4 game: it is the permissive answer,
+   and the install route refuses a genuine mismatch with a sentence either way. */
+function eligibleConsoles(g){
+  var plat=gamePlat(g);
+  return (state.consoles||[]).filter(function(c){
+    if(plat!=="ps5") return true;
+    return String(c.platform||"").toLowerCase()!=="ps4";
+  });
+}
+/* The console the OPEN PANEL is aimed at. The panel's own picker when it is showing a choice,
+   otherwise the header picker, otherwise the only console that could take this game. Never "all":
+   one game goes to one console. */
+function panelConsole(g){
+  var sel=$("#panelConsoleSel"), wrap=$("#panelConsoleWrap");
+  if(sel&&wrap&&wrap.style.display!=="none"&&sel.value) return sel.value;
+  var el2=eligibleConsoles(g||state.current);
+  if(state.console&&state.console!=="all"){
+    for(var i=0;i<el2.length;i++) if(el2[i].id===state.console) return state.console;
+  }
+  if(el2.length) {
+    var on=el2.filter(function(c){return c.online;});
+    return (on.length?on[0]:el2[0]).id;
+  }
+  return state.console==="all"?"":(state.console||"");
+}
+/* Paint it, or hide it. Hidden is the common case and the right default: with one console there is
+   no question, and with a PS5 game there is no question either. */
+function fillConsoleSel(g,keep){
+  var sel=$("#panelConsoleSel"), wrap=$("#panelConsoleWrap");
+  if(!sel||!wrap) return;
+  var list=eligibleConsoles(g);
+  if(list.length<2){ wrap.style.display="none"; sel.innerHTML=""; return; }
+  var prev=keep?sel.value:"";
+  sel.innerHTML="";
+  list.forEach(function(c){
+    var o=el("option"); o.value=c.id;
+    o.textContent=tsub("gp_install_on",{console:(c.name||c.id)})+(c.online?"":t("gp_console_offline"));
+    sel.appendChild(o);
+  });
+  var pick="";
+  /* 1. A CHOICE ALREADY MADE IN THIS PANEL wins - this is a repaint, not a new question. */
+  if(prev){ for(var i=0;i<list.length;i++) if(list[i].id===prev){pick=prev;break;} }
+  /* 2. WHERE THE GAME ACTUALLY IS, when there is exactly one such console.
+        "Catch up the device automatically" is the point of this control: opening a game that lives
+        on one machine should describe THAT machine, not whichever console the header happens to be
+        set to. On a PC the header defaults to the PS5, so without this a PS4 owner opened every one
+        of their PS4-installed games and was told it was not installed - true of the PS5, useless to
+        them, and one press from installing a second copy on the wrong console.
+        Only when it is unambiguous. Installed on both, or on neither, is not a hint - it is a
+        question, and the header's answer is as good as any. */
+  if(!pick){
+    var lives=list.filter(function(c){return onConsoleFor(g,c.id);});
+    if(lives.length===1) pick=lives[0].id;
+  }
+  /* 3. The console the rest of the app is pointed at. */
+  if(!pick&&state.console){ for(var j=0;j<list.length;j++) if(list[j].id===state.console){pick=state.console;break;} }
+  /* 4. Anything that is actually awake. */
+  if(!pick){ var on=list.filter(function(c){return c.online;}); pick=(on.length?on[0]:list[0]).id; }
+  sel.value=pick;
+  wrap.style.display="";
+}
 function installsAsBackup(g){
   var b=g&&g.base&&g.base[0];
   if(b&&b.install_key){
@@ -7987,8 +8155,28 @@ var PS5_DESTS=[{id:"internal",label:"Internal SSD"},{id:"ext0",label:"Extended (
                {id:"ext1",label:"Extended (ext1)"},{id:"usb0",label:"USB0"},{id:"usb1",label:"USB1"},
                {id:"usb2",label:"USB2"},{id:"usb3",label:"USB3"},{id:"usb4",label:"USB4"},
                {id:"usb5",label:"USB5"},{id:"usb6",label:"USB6"},{id:"usb7",label:"USB7"}];
-function ps5Destinations(){
-  var live=(state.devices&&state.devices.ps5)||[];
+/* THE DRIVES OF ONE NAMED CONSOLE.
+ *
+ * /api/devices has carried a per-console list for a while - {consoles:[{id,platform,devices:[...]}]}
+ * - and this page was still reading the flat `ps5` key beside it, which is the PS5's list under a
+ * name from when a PS5 was the only thing there could be. So with a PS4 selected the destination
+ * picker offered the PS5's drives: the wrong names, the wrong free space, and a USB stick that is
+ * plugged into the other console. Measured live: the PS5 reports 11 destinations and the PS4
+ * reports 8, and they share almost no free-space figure.
+ *
+ * Falls back to the flat key when the named console is not in the answer - an older companion, or
+ * a console that has not been probed yet - so this is never worse than what it replaces. */
+function consoleDevices(cid){
+  var d=state.devices;
+  if(!d) return [];
+  var list=d.consoles||[];
+  for(var i=0;i<list.length;i++){
+    if(list[i]&&String(list[i].id)===String(cid)&&list[i].devices) return list[i].devices;
+  }
+  return d.ps5||[];
+}
+function ps5Destinations(cid){
+  var live=(cid?consoleDevices(cid):((state.devices&&state.devices.ps5)||[]))||[];
   var byId={}; live.forEach(function(d){ if(d&&d.id) byId[String(d.id).toLowerCase()]=d; });
   var out=PS5_DESTS.map(function(d){
     var l=byId[d.id];
@@ -8199,16 +8387,65 @@ function verGT(a,b){
 }
 /* An update only counts as "available" if it is NEWER than what the console reports as
    installed - otherwise an already-applied patch keeps showing as pending forever. */
-function pendingUpdates(game){
+/* `cid` is OPTIONAL and new. With it: "newer than what THIS console has", which is the question
+   the game panel is asking. Without it: the old fleet-wide answer, unchanged, which is what the
+   grid badges want - every existing caller passes one argument and gets exactly what it got before.
+   It matters because the two consoles can sit at different versions of the same game, and the panel
+   was offering the PS5's pending updates while the PS4 was selected. */
+function pendingUpdates(game,cid){
   var ups=game.updates||[];
-  var cur=game.installed_version||"";
-  if(!cur) return ups;                       // console version unknown - show them all
+  var cur=cid?installedVersionOn(game,cid):(game.installed_version||"");
+  if(!cur) return ups;                       // that console's version unknown - show them all
   return ups.filter(function(u){return verGT(u.version,cur);});
 }
 function stateOf(game){
   var installed = game.on_console || (game.title_id && state.installed.has(game.title_id));
   if(!installed) return "none";
   return pendingUpdates(game).length?"upd":"inst";
+}
+
+/* ---------------- THE SAME QUESTIONS, ASKED OF ONE CONSOLE ---------------------------------
+ *
+ * stateOf() above is a FLEET answer: "is this game installed anywhere". That is the right answer
+ * for the grid - a badge that said "not installed" on a game sitting on the other console would be
+ * a lie - and it stays exactly as it is.
+ *
+ * It is the wrong answer for the game panel, which is about to install onto ONE machine. Measured
+ * on the owner's fleet: of 117 installed titles, 106 are on the PS5 alone and 7 on the PS4 alone,
+ * so for 113 of them the panel was describing the wrong console the moment the other one was
+ * chosen - "Install this game again over the copy already on the PS5", offered while the PS4 was
+ * selected and had no copy at all.
+ *
+ * `installed_on` and `console_state` come from the companion. When they are absent - an older
+ * companion, or a library built with no console reachable - these fall back to the flat fields, so
+ * the answer is never worse than it was.
+ */
+function onConsoleFor(g,cid){
+  if(!g) return false;
+  var on=g.installed_on;
+  if(on&&on.length) return cid?on.indexOf(cid)>=0:!!g.on_console;
+  return !!g.on_console;                       /* nothing per-console to go on - the old answer */
+}
+function consoleStateOf(g,cid){
+  var cs=g&&g.console_state;
+  return (cs&&cid&&cs[cid])?cs[cid]:null;
+}
+function installedDriveOn(g,cid){
+  var e=consoleStateOf(g,cid);
+  if(e&&e.drive) return e.drive;
+  return onConsoleFor(g,cid)?(g.installed_drive||""):"";
+}
+function installedVersionOn(g,cid){
+  var e=consoleStateOf(g,cid);
+  if(e&&e.version) return e.version;
+  return onConsoleFor(g,cid)?(g.installed_version||""):"";
+}
+/* "none" / "upd" / "inst" FOR ONE CONSOLE. Not installed there is "none", whatever the other
+   console has - which is what decides the button, the badge and the destination row. */
+function stateOfOn(g,cid){
+  if(!cid) return stateOf(g);
+  if(!onConsoleFor(g,cid)) return "none";
+  return pendingUpdates(g,cid).length?"upd":"inst";
 }
 
 /* A game is "on the PC" if the PC LIBRARY FOLDER has an installable copy. A package
@@ -8646,7 +8883,19 @@ function openDrawer(g,repaint){
     }
   }
   $("#dtitle").textContent=g.name;
-  var st=stateOf(g);
+  /* THE CONSOLE PICKER IS FILLED FIRST, BEFORE ANYTHING READS IT.
+     It used to be filled near the end, and panelConsole() reads the live <select> - so on the
+     first paint it was still holding the PREVIOUS game's answer. Measured: open a PS4 game, switch
+     it to the PS4, then open a PS5-only game, and that game was judged against the PS4 and came up
+     "Not installed" while it sat on the PS5. Whatever this panel decides has to be decided after
+     the control describes THIS game. */
+  fillConsoleSel(g,!!repaint);
+  /* THE PANEL'S STATE IS THE CHOSEN CONSOLE'S STATE. Every branch below hangs off `st` - the
+     badge, the Install button's words, whether a destination may be chosen, which update is
+     offered - and it was the FLEET answer, so a game sitting on the PS5 read as "installed" while
+     the PS4 was selected and had nothing. */
+  var _cid=panelConsole(g);
+  var st=stateOfOn(g,_cid);
   /* Hoisted above the pill row, which needs it for the Format fallback. One definition only. */
   var isMountG=installsAsBackup(g);
   var badge=st==="inst"?'<span class="dpill st is-inst"><i>● '+t("gp_status_installed")+'</i></span>'
@@ -8840,13 +9089,17 @@ function openDrawer(g,repaint){
        mounted, not installed, and that distinction is worth the words. */
     _ia.textContent = installsAsBackup(g)?(_onc?t("gp_btn_resend_backup"):t("gp_btn_mount_backup")):t("gp_btn_install");
     if(!installsAsBackup(g)){
+      /* NAME THE CONSOLE THIS WILL GO TO. All three of these said "the PS5" and were hardcoded
+         English besides - so a PS4 owner was told their PS4 game would be installed on a PS5, and
+         pointed at a settings path that console does not have. Through t() now, with the device
+         substituted, so it follows both the language and the chosen console. */
+      var _dev=consoleLabel(panelConsole(g));
       _ia.classList.add("tip");
       _ia.setAttribute("data-tip", st==="none"
-        ? "Install this game on the PS5. It goes to whichever drive the PS5's own Installation "+
-          "Location is set to (Settings \u203a Storage)."
+        ? tsub("gp_tip_install_base",{console:_dev})
         : st==="upd"
-        ? "Install the newest update for this game."
-        : "Install this game again over the copy already on the PS5. Saves are not touched.");
+        ? t("gp_tip_install_update")
+        : tsub("gp_tip_reinstall",{console:_dev}));
     }
   }
   // "Send to PS5" — FTP the PKG to the console for the Debug Package Installer (works without DPI). Only for PC-folder PKGs.
@@ -8878,6 +9131,13 @@ function openDrawer(g,repaint){
     if(it) installItem(g,it,up?"update":"base",qb,"queued");
   };
   wireMoreMenu(g,st);
+  /* REPAINT THE WHOLE PANEL, not just the drive list. Changing the console changes whether the
+     game is installed there, and that decides the badge, the Install button's words, its tooltip,
+     which update is offered and whether a destination may be chosen at all. Repainting one row of
+     that left the rest describing the other console. openDrawer is built to be called twice - the
+     `repaint` argument exists for it - and fillConsoleSel keeps the choice that triggered this. */
+  var _pcs=$("#panelConsoleSel");
+  if(_pcs) _pcs.onchange=function(){ openDrawer(g,true); };
 
   _showDrawer(true);if(!repaint)pushPanel("drawer");
 }
@@ -8887,7 +9147,10 @@ function openDrawer(g,repaint){
    choice, and that must not become this game's default. */
 function fillDriveSel(g,st,isMount,keep){
   var ds=$("#driveSel");var prev=keep?ds.value:"";ds.innerHTML="";ds.disabled=false;ds.classList.remove("tip");ds.removeAttribute("data-tip");
-  var devs=ps5Destinations();
+  /* THE DRIVES OF THE CONSOLE THIS PANEL IS AIMED AT, not of whichever console the flat legacy key
+     happens to describe. With a PS4 chosen this offered the PS5's eleven destinations - including a
+     USB stick plugged into the other machine - with the PS5's free space beside them. */
+  var devs=ps5Destinations(panelConsole(g));
   if(isMount){
     /* A BACKUP. We choose the folder (/mnt/<drive>/homebrew) and copy the file there ourselves, so
        every drive on the console is a real destination - including a USB stick.
@@ -8938,7 +9201,10 @@ function fillDriveSel(g,st,isMount,keep){
     }
   }else if(updOnly(g)||st!=="none"){
     // An add-on/reinstall must land where the game already is - not the user's choice to make.
-    var where=g.installed_drive||"";
+    // ON THE CHOSEN CONSOLE. g.installed_drive describes whichever console the merge happened to
+    // fill in first, so with the other console selected this row named a drive that belongs to a
+    // different machine - "Installs to: Internal SSD" for a PS4, whose drive is called Internal HDD.
+    var where=installedDriveOn(g,panelConsole(g))||g.installed_drive||"";
     var o=el("option");o.value=driveIdOf(where);
     o.textContent=t("gp_dest_installs_to").split("{drive}").join(where||t("gp_dest_installed_drive"));ds.appendChild(o);
     ds.disabled=true;ds.classList.add("tip");
@@ -9640,7 +9906,11 @@ function installItem(game,item,kind,btn,mode,force){
     // installs via Sony's installer. mode:"queued" holds it until the user presses  Start queue.
     api("/api/install",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({install_key:item.install_key,title_id:game.title_id,name:label,kind:kind,
-                           drive:drive,mode:queued?"queued":"now",console:state.console||"",
+                           /* The PANEL's console, which is the header picker unless this game gave
+                              the owner a real choice and they made one. state.console alone sent a
+                              PS4 game to whatever the header happened to be on, with the panel
+                              showing a different console's name. */
+                           drive:drive,mode:queued?"queued":"now",console:panelConsole(game)||state.console||"",
                            // the server uses these to notice the package is already on the console:
                            // version for an update, content_id for a DLC, size for a base game
                            version:item.version||"",content_id:item.content_id||"",size:item.size||0,

@@ -76,8 +76,16 @@ def write_cfg(consoles, ps5_ip, ps4_ip=""):
 
 
 def start():
+    # PMS_TEST_MODE: this companion serves every route and announces itself to NOTHING.
+    #
+    # Without it, the instance this suite starts told both real consoles "the PC is at
+    # 10.0.0.76:8791" every eight seconds - and the console kept that address after the suite
+    # exited and the port died. The owner's PS5 was still handing its browser that dead PC hours
+    # later. A test that leaves a trace on the hardware is a test that has changed the thing it
+    # was measuring.
     p = subprocess.Popen([sys.executable, os.path.join(REPO, "companion", "server.py")],
                          cwd=os.path.join(REPO, "companion"),
+                         env=dict(os.environ, PMS_TEST_MODE="1"),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for _ in range(45):
         time.sleep(2)

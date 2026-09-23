@@ -30,6 +30,11 @@ BASE = "http://127.0.0.1:8710"
 # change the thing it is measuring.
 ROUTES = [
     "/api/health",
+    # THE BIGGEST ANSWER THIS APP GIVES, and it was not being watched. Every card, every panel and
+    # every install decision is built from a game entry's shape, so a key quietly renamed here is
+    # felt everywhere at once. A list is recorded as "how many, and what shape is the first", so a
+    # library that grows by a game does not read as a change.
+    "/api/library",
     "/api/consoles",
     "/api/devices",
     "/api/installed",

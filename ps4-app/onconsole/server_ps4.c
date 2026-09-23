@@ -682,6 +682,40 @@ static void pc_register(const char *ip, int port, const char *name, const char *
     pthread_mutex_unlock(&g_pcs_lock);
 }
 
+/* HOW LONG A PC STAYS ON THE LIST AFTER IT STOPS ANNOUNCING ITSELF.
+ *
+ * A companion re-announces every 8 seconds while this console is up, so silence is real evidence
+ * that it has gone. Nothing aged these entries out, on either console, and it cost the owner a
+ * real symptom: a companion started on a spare port (a test run) announced itself, exited, and the
+ * console went on offering http://<pc>:8791 to the page for hours. The page only walks down to a
+ * dead entry when the live PC is briefly away - during a rebuild, say - and then the console's
+ * browser is seen trying to reach a port nothing is listening on.
+ *
+ * Ten minutes, not ten seconds. A PC that is restarting - which is exactly what happens when the
+ * owner installs a new build of it - must not be forgotten while it comes back, and the sort below
+ * already puts the live one first, so a stale entry costs nothing until it is the only one left.
+ * The window is long enough to survive a restart and short enough that a companion which is really
+ * gone stops being offered. */
+#define PC_STALE_MS (10 * 60 * 1000LL)
+
+/* Which PC should the page try first: THE ONE HEARD FROM MOST RECENTLY. This build had no ordering
+ * at all - it offered whichever array slot happened to be filled first, so "the PC to use" could be
+ * a machine that had not said anything since the console booted.
+ *
+ * NOT ranked by version, deliberately, even though the PS5 build does rank by it. That rule exists
+ * there for a specific measured reason: an old companion driving the console's UI brought back
+ * behaviour that had been removed, including relaunching software this app no longer ships. None of
+ * that history exists on the PS4 side, and copying the machinery would mean carrying a version
+ * comparator this file does not otherwise have, for a case that has never happened here. If a PS4
+ * ever does get bitten by an old companion, this is where the rule goes.
+ *
+ * Returns 1 when b should come before a. */
+static int pc_better(const pcpeer_t *a, const pcpeer_t *b) {
+    if (!b->ip[0]) return 0;
+    if (!a->ip[0]) return 1;
+    return b->last_ms > a->last_ms;
+}
+
 /* ---------------------------------------------------------- the install lane
  *
  * BGFT. We hand the console a URL on the companion and it downloads and installs by itself.
@@ -3329,22 +3363,38 @@ static void handle_get(int fd, const char *rawpath) {
         return;
     }
     if (!strcmp(path, "/api/companion") || !strcmp(path, "/api/pcs")) {
+        /* FRESHEST FIRST, AND NOTHING THAT HAS GONE QUIET. The page takes the first of these that
+           answers, so the order IS the decision - see pc_better() and PC_STALE_MS above. Copied out
+           under the lock and sorted outside it: this is called from the page's poll and holding the
+           registry lock across a sort is a lock held in the request path for no reason. */
+        pcpeer_t pcs[PC_MAX];
+        pthread_mutex_lock(&g_pcs_lock);
+        memcpy(pcs, g_pcs, sizeof(pcs));
+        pthread_mutex_unlock(&g_pcs_lock);
+
+        long long now = now_ms();
+        for (int i = 0; i < PC_MAX; i++)
+            if (pcs[i].ip[0] && (now - pcs[i].last_ms) > PC_STALE_MS)
+                pcs[i].ip[0] = 0;                    /* gone quiet - stop offering it */
+
+        for (int a = 0; a < PC_MAX; a++)
+            for (int b = a + 1; b < PC_MAX; b++)
+                if (pc_better(&pcs[a], &pcs[b])) { pcpeer_t t = pcs[a]; pcs[a] = pcs[b]; pcs[b] = t; }
+
         char out[1400];
         size_t len = 0;
         len += (size_t)snprintf(out + len, sizeof(out) - len, "{\"urls\":[");
-        pthread_mutex_lock(&g_pcs_lock);
         int wrote = 0;
         char best[64] = {0};
         for (int i = 0; i < PC_MAX; i++) {
-            if (!g_pcs[i].ip[0]) continue;
+            if (!pcs[i].ip[0]) continue;
             char u[80];
-            snprintf(u, sizeof(u), "http://%s:%d", g_pcs[i].ip, g_pcs[i].port);
+            snprintf(u, sizeof(u), "http://%s:%d", pcs[i].ip, pcs[i].port);
             if (!best[0]) snprintf(best, sizeof(best), "%s", u);
             if (len + 120 >= sizeof(out)) break;
             len += (size_t)snprintf(out + len, sizeof(out) - len, "%s\"%s\"", wrote ? "," : "", u);
             wrote++;
         }
-        pthread_mutex_unlock(&g_pcs_lock);
         snprintf(out + len, sizeof(out) - len, "],\"url\":\"%s\"}", best);
         send_json(fd, out);
         return;
