@@ -7386,16 +7386,58 @@ class Handler(BaseHTTPRequestHandler):
                 return self._refuse_cross_site()
             return self._json({"found": discover_ps5(srv.cfg)})
         if path == "/api/installed":
+            # WHAT IS INSTALLED IS A FACT ABOUT THE FLEET, and installed.json is the only record of
+            # it when every console is off. This asked ONE console and then pruned that file down to
+            # what that one console had - so on a machine with a PS5 and a PS4, every load that
+            # happened to resolve to the PS4 silently deleted the memory of every PS5 install, and
+            # the other way round. Invisible while a console is reachable, because the library's
+            # on_console flag is a union and carries the badges; permanent, and visible the moment
+            # the app is restarted with both consoles asleep - games lose their Installed badge and
+            # their updates and DLC reappear as orphan cards.
+            #
+            # A named console still gets ITS OWN answer, which is what the panel asks for. The
+            # PRUNE, though, only ever happens against the union of every console that answered -
+            # and only when they all did, because a console that did not answer has not disowned
+            # anything. `console=all` asks everyone and returns the union.
             cid = (q.get("console") or [None])[0]
-            bridge = srv.fleet.bridge(cid) if cid else _bridge_for(srv, self)
-            console = bridge.installed_titles() if bridge else None
-            if console is not None:                       # console is authoritative: trust it
-                prune_local_installed(console)            # self-heal: drop stale 'ghost' remembered installs
-                merged = sorted(console)
-            else:                                         # offline: best-effort from remembered installs
-                merged = sorted(local_installed())
-            return self._json({"installed": merged, "source": "console" if console is not None else "local",
-                               "console_reachable": console is not None})
+            want_all = str(cid or "").lower() == "all"
+            per, missed = {}, 0
+            for _cid in srv.fleet.ids():
+                _b = srv.fleet.bridge(_cid)
+                got = _b.installed_titles() if _b is not None else None
+                if got is None:
+                    missed += 1
+                else:
+                    per[_cid] = set(got)
+            union = set()
+            for v in per.values():
+                union |= v
+
+            if per and not missed:
+                # Every console spoke: the union is authoritative, so a title in the file that no
+                # console has is genuinely a ghost.
+                prune_local_installed(sorted(union))
+
+            if want_all:
+                asked = sorted(union) if per else None
+            elif cid and cid in per:
+                asked = sorted(per[cid])
+            elif cid:
+                asked = None                              # that console did not answer
+            else:
+                _b = _bridge_for(srv, self)
+                # A bridge keeps its console dict in .c - there is no .id property, and a getattr
+                # for one would quietly be None and send every caller to the union.
+                _id = (_b.c.get("id") if _b is not None else None)
+                asked = sorted(per[_id]) if (_id in per) else (sorted(union) if per else None)
+
+            merged = asked if asked is not None else sorted(local_installed())
+            return self._json({"installed": merged,
+                               "source": "console" if asked is not None else "local",
+                               "console_reachable": asked is not None,
+                               # Which consoles actually answered, so a caller can tell "nothing is
+                               # installed there" from "it did not say".
+                               "answered": sorted(per), "silent": missed})
         if path == "/api/sources":
             ranked = srv.engine.rank()
             doc = {"local_paths": srv.cfg["library"]["local_paths"],
