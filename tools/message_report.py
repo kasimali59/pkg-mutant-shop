@@ -152,8 +152,14 @@ def _en_dict(src):
     j = src.find("\n  en:{", i) if i >= 0 else -1
     if j < 0:
         return {}
-    k = src.find("\n  ", j + 6)          # the next language starts at the same indent
-    body = src[j:k if k > 0 else len(src)]
+    # THE END OF THE ENGLISH BLOCK IS THE NEXT LANGUAGE, and find("\n  ") did not locate it: two
+    # spaces are a PREFIX of the four that every key line is indented by, so the block ended at its
+    # own second line and this dictionary held only the eleven keys sharing the opening line. Every
+    # toast written as toast(t("key")) therefore resolved to "" and was skipped by the house-style
+    # gate entirely - silent, and exactly the gutting that routing toasts through t() was once
+    # postponed to avoid.
+    nxt = re.search(r"\n  [a-z]{2}:\{", src[j + 6:])
+    body = src[j:j + 6 + nxt.start()] if nxt else src[j:]
     return dict((m.group(1), m.group(2))
                 for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*):"((?:[^"\\]|\\.)*)"', body))
 
@@ -176,7 +182,10 @@ def web_messages():
     en = _en_dict(src)
     out = []
     key_call = r'(?<![A-Za-z0-9_.$])(?:t|tsub)\(\s*"([A-Za-z0-9_]+)"'
-    for m in re.finditer(r'(?<![A-Za-z0-9_.$])toast\(', src):
+    # confirm() and prompt() TOO, not just toast(). They are the longest sentences this app ever
+    # shows - a clean reinstall, deleting a backup, stopping every payload before rest mode - and
+    # they sat outside this gate entirely, which is the opposite of where the care should go.
+    for m in re.finditer(r'(?<![A-Za-z0-9_.$])(?:toast|toastHtml|confirm|prompt)\(', src):
         arg = _first_arg(src[m.start():m.start() + 4000])
         lineno = src.count("\n", 0, m.start()) + 1
         # keys first, so a key's literal is not also reported as a sentence of its own

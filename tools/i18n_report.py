@@ -129,6 +129,44 @@ def used_keys(s):
     return keys
 
 
+# THE CEILING, AND IT ONLY EVER COMES DOWN.
+#
+# Coverage was measured against the keys the app USES, so 129 sentences that were never keys at all
+# were invisible to it: switch the app to any of the fourteen other languages and almost everything
+# that HAPPENED still answered in English - moving a game, verifying a file, deleting, retrying,
+# the rest-mode confirmation. The labels were translated and the answers were not.
+#
+# There was one recorded reason for leaving them: routing a toast through t() used to drop it out
+# of tools/message_report.py's house-style check. That stopped being true when message_report was
+# taught to resolve t("key") back to its English sentence and lint THAT, and the decision was never
+# revisited. So they are being converted, and this number is the count of what is left.
+#
+# A build fails if the count goes UP. Lower it whenever you convert some; never raise it.
+RAW_DIALOG_CEILING = 29
+
+DIALOG_CALLS = ("toast", "toastHtml", "confirm", "window.confirm", "prompt")
+
+
+def raw_dialog_strings(s):
+    """Dialog calls whose message is still a raw English literal rather than t()/tsub().
+
+    Counts the CALL, not the sentence: one toast built from two literals is one thing a reader
+    sees. A call whose argument is only a variable is not counted - there is no English in it.
+    """
+    import re as _re
+    hits = []
+    pat = _re.compile(r"\b(" + "|".join(c.replace(".", r"\.") for c in DIALOG_CALLS) + r")\s*\(")
+    for m in pat.finditer(s):
+        arg = _first_arg(s, m.end() - 1)
+        lits = _re.findall(r'"((?:[^"\\]|\\.)*)"', arg)
+        # A literal that is the key inside t("...")/tsub("...") is already translated.
+        keyed = set(_re.findall(r'\bt(?:sub)?\(\s*"((?:[^"\\]|\\.)*)"', arg))
+        english = [x for x in lits if x not in keyed and _re.search(r"[A-Za-z]{3}", x)]
+        if english:
+            hits.append((s.count("\n", 0, m.start()) + 1, m.group(1), english[0][:70]))
+    return hits
+
+
 def hardcoded_markup(s):
     """Rough count of visible text in the static markup with no data-i18n on its element."""
     # The FIRST <script> sits in <head>, long before <body> - slicing to it produced an empty
@@ -199,7 +237,22 @@ def main():
     hard = hardcoded_markup(s)
     print("  [ .. ] roughly %d visible text nodes in the static markup (hint only, not a failure)" % hard)
 
+    raw = raw_dialog_strings(s)
+    if len(raw) > RAW_DIALOG_CEILING:
+        print("\n  [FAIL] %d dialog call(s) still carry raw English - the ceiling is %d"
+              % (len(raw), RAW_DIALOG_CEILING))
+        for line, fn, txt in raw[:12]:
+            print("         %-5d %-14s %s" % (line, fn, txt))
+    elif len(raw) < RAW_DIALOG_CEILING:
+        print("  [ .. ] %d dialog call(s) still carry raw English - below the ceiling of %d, "
+              "lower RAW_DIALOG_CEILING to %d" % (len(raw), RAW_DIALOG_CEILING, len(raw)))
+    else:
+        print("  [ .. ] %d dialog call(s) still carry raw English (at the ceiling)" % len(raw))
+
     if check:
+        if len(raw) > RAW_DIALOG_CEILING:
+            print("\nFAIL: more dialog strings are hardcoded than before. They cannot be translated.")
+            return 1
         if undefined:
             print("\nFAIL: keys used but not defined.")
             return 1
