@@ -1221,7 +1221,10 @@ html{scroll-behavior:smooth}
            Save button appears to work. -->
       <div class="setbanner" id="consoleNote" style="display:none;border-color:var(--warn)">
         <div class="t" style="color:var(--warn)" data-i18n="ui_console_note_title">Read-only here</div>
-        <div class="hint" data-i18n="ui_console_note_body">This page is being served by the PS5, which has nowhere to keep these
+        <!-- Filled by paintConsoleNote(): the device name is substituted, so a PS4 is not told its
+             page comes from a PS5. data-i18n is deliberately absent - applyI18n() would overwrite
+             the substituted sentence with the raw one on every language change. -->
+        <div class="hint" id="consoleNoteBody">This page is being served by the PS5, which has nowhere to keep these
           settings. Open the app on a PC on this network to change them.</div>
       </div>
 
@@ -1476,7 +1479,7 @@ var I18N={
     ui_aria_save_settings:"Save settings",
     ui_cfg_warn_title:"Your settings file could not be read",
     ui_console_note_title:"Read-only here",
-    ui_console_note_body:"This page is being served by the PS5, which has nowhere to keep these settings. Open the app on a PC on this network to change them.",
+    ui_console_note_body:"This page is being served by your {console}, which has nowhere to keep these settings. Open the app on a PC on this network to change them.",
     ui_sec_console:"Your consoles",
     ui_btn_find_it:"Find it",
     ui_tip_discover:"Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084.",
@@ -1898,7 +1901,7 @@ var I18N={
     msg_btn_find_pcs:"Find PCs",
     msg_btn_scanning:"Scanning…",
     msg_btn_rescan_short:"Rescan",
-    msg_q_console_decides_drive:"PS5 decides the drive",
+    msg_q_console_decides_drive:"{console} decides the drive",
     msg_conn_companion_lost:"PC companion lost — looking for one",
     ui_cheats_drop_sep:", ",
     msg_eng_detail_ready:"Ready - installs can start straight away.",
@@ -1978,7 +1981,7 @@ var I18N={
     ui_aria_save_settings:"Guardar ajustes",
     ui_cfg_warn_title:"No se pudo leer tu archivo de ajustes",
     ui_console_note_title:"Aquí es solo lectura",
-    ui_console_note_body:"Esta página la sirve la PS5, que no tiene dónde guardar estos ajustes. Abre la app en un PC de esta red para cambiarlos.",
+    ui_console_note_body:"Esta página la sirve tu {console}, que no tiene dónde guardar estos ajustes. Abre la app en un PC de esta red para cambiarlos.",
     ui_sec_console:"Tus consolas",
     ui_btn_find_it:"Buscarla",
     ui_tip_discover:"Busca una PS5 en esta red probando los puertos que usa esta app: la tienda en el 8710 y Payload Manager en el 8084.",
@@ -2400,7 +2403,7 @@ var I18N={
     msg_btn_find_pcs:"Buscar PCs",
     msg_btn_scanning:"Explorando…",
     msg_btn_rescan_short:"Reexplorar",
-    msg_q_console_decides_drive:"La PS5 elige la unidad",
+    msg_q_console_decides_drive:"La unidad la elige {console}",
     msg_conn_companion_lost:"Se perdió el PC compañero — buscando uno",
     ui_cheats_drop_sep:", ",
     msg_eng_detail_ready:"Listo - las instalaciones pueden empezar ahora mismo.",
@@ -2480,7 +2483,7 @@ var I18N={
     ui_aria_save_settings:"Guardar definições",
     ui_cfg_warn_title:"Não foi possível ler o teu ficheiro de definições",
     ui_console_note_title:"Aqui é só leitura",
-    ui_console_note_body:"Esta página está a ser servida pela PS5, que não tem onde guardar estas definições. Abre a aplicação num PC desta rede para as alterares.",
+    ui_console_note_body:"Esta página é servida pela tua {console}, que não tem onde guardar estas definições. Abre a aplicação num PC desta rede para as alterares.",
     ui_sec_console:"As tuas consolas",
     ui_btn_find_it:"Procurar",
     ui_tip_discover:"Procura uma PS5 nesta rede tentando as portas que esta aplicação usa: a loja na 8710 e o Payload Manager na 8084.",
@@ -2902,7 +2905,7 @@ var I18N={
     msg_btn_find_pcs:"Procurar PCs",
     msg_btn_scanning:"A procurar…",
     msg_btn_rescan_short:"Reanalisar",
-    msg_q_console_decides_drive:"A PS5 escolhe a unidade",
+    msg_q_console_decides_drive:"A unidade é escolhida pela {console}",
     msg_conn_companion_lost:"PC companheiro perdido — à procura de um",
     ui_cheats_drop_sep:", ",
     msg_eng_detail_ready:"Pronto - as instalações podem começar já.",
@@ -2982,7 +2985,7 @@ var I18N={
     ui_aria_save_settings:"Enregistrer les paramètres",
     ui_cfg_warn_title:"Votre fichier de paramètres n'a pas pu être lu",
     ui_console_note_title:"Lecture seule ici",
-    ui_console_note_body:"Cette page est servie par la PS5, qui n'a nulle part où garder ces paramètres. Ouvrez l'application sur un PC de ce réseau pour les modifier.",
+    ui_console_note_body:"Cette page est servie par votre {console}, qui n'a nulle part où garder ces réglages. Ouvrez l'application sur un PC de ce réseau pour les modifier.",
     ui_sec_console:"Vos consoles",
     ui_btn_find_it:"La trouver",
     ui_tip_discover:"Cherche une PS5 sur ce réseau en essayant les ports utilisés par l'application : la boutique sur 8710 et Payload Manager sur 8084.",
@@ -3404,7 +3407,7 @@ var I18N={
     msg_btn_find_pcs:"Trouver les PC",
     msg_btn_scanning:"Analyse…",
     msg_btn_rescan_short:"Réanalyser",
-    msg_q_console_decides_drive:"La PS5 choisit le disque",
+    msg_q_console_decides_drive:"{console} choisit le disque",
     msg_conn_companion_lost:"PC compagnon perdu — recherche en cours",
     ui_cheats_drop_sep:", ",
     msg_eng_detail_ready:"Prêt - les installations peuvent commencer tout de suite.",
@@ -3484,7 +3487,7 @@ var I18N={
     ui_aria_save_settings:"Einstellungen speichern",
     ui_cfg_warn_title:"Deine Einstellungsdatei konnte nicht gelesen werden",
     ui_console_note_title:"Hier nur lesbar",
-    ui_console_note_body:"Diese Seite wird von der PS5 ausgeliefert, und die hat keinen Platz für diese Einstellungen. Öffne die App auf einem PC in diesem Netzwerk, um sie zu ändern.",
+    ui_console_note_body:"Diese Seite kommt von deiner {console}, die diese Einstellungen nirgends speichern kann. Öffne die App auf einem PC in diesem Netzwerk, um sie zu ändern.",
     ui_sec_console:"Deine Konsolen",
     ui_btn_find_it:"Suchen",
     ui_tip_discover:"Sucht im Netzwerk nach einer PS5, indem die Ports dieser App probiert werden: der Shop auf 8710 und Payload Manager auf 8084.",
@@ -3906,7 +3909,7 @@ var I18N={
     msg_btn_find_pcs:"PCs suchen",
     msg_btn_scanning:"Suche läuft…",
     msg_btn_rescan_short:"Neu einlesen",
-    msg_q_console_decides_drive:"Das Laufwerk bestimmt die PS5",
+    msg_q_console_decides_drive:"Das Laufwerk bestimmt die {console}",
     msg_conn_companion_lost:"PC-Begleiter verloren — es wird einer gesucht",
     ui_cheats_drop_sep:", ",
     msg_eng_detail_ready:"Bereit - Installationen können sofort starten.",
@@ -3986,7 +3989,7 @@ var I18N={
     ui_aria_save_settings:"設定を保存",
     ui_cfg_warn_title:"設定ファイルを読み取れませんでした",
     ui_console_note_title:"ここでは変更できません",
-    ui_console_note_body:"このページは PS5 が表示しています。PS5 にはこの設定を保存する場所がありません。変更するには、同じネットワークの PC でアプリを開いてください。",
+    ui_console_note_body:"このページは {console} が配信しています。設定を保存する場所がないため、変更はこのネットワーク上の PC でアプリを開いて行ってください。",
     ui_sec_console:"あなたの本体",
     ui_btn_find_it:"探す",
     ui_tip_discover:"このアプリが使うポート (ショップは 8710、Payload Manager は 8084) を試して、ネットワーク上の PS5 を探します。",
@@ -4408,7 +4411,7 @@ var I18N={
     msg_btn_find_pcs:"PC を探す",
     msg_btn_scanning:"検索中…",
     msg_btn_rescan_short:"再スキャン",
-    msg_q_console_decides_drive:"保存先は PS5 が決めます",
+    msg_q_console_decides_drive:"保存先は {console} が決めます",
     msg_conn_companion_lost:"PC コンパニオンを見失いました — 探しています",
     ui_cheats_drop_sep:"、",
     msg_eng_detail_ready:"準備完了 - すぐにインストールを開始できます。",
@@ -4488,7 +4491,7 @@ var I18N={
     ui_aria_save_settings:"احفظ الإعدادات",
     ui_cfg_warn_title:"تعذّرت قراءة ملف الإعدادات",
     ui_console_note_title:"للقراءة فقط هنا",
-    ui_console_note_body:"هذه الصفحة يقدّمها PS5، وليس لديه مكان لحفظ هذه الإعدادات. افتح التطبيق على حاسوب في هذه الشبكة لتغييرها.",
+    ui_console_note_body:"هذه الصفحة يقدمها جهاز {console}، وليس لديه مكان لحفظ هذه الإعدادات. افتح التطبيق على حاسوب في هذه الشبكة لتغييرها.",
     ui_sec_console:"أجهزتك",
     ui_btn_find_it:"ابحث عنه",
     ui_tip_discover:"ابحث عن PS5 في هذه الشبكة بتجربة المنافذ التي يستخدمها هذا التطبيق: المتجر على 8710 وPayload Manager على 8084.",
@@ -4910,7 +4913,7 @@ var I18N={
     msg_btn_find_pcs:"ابحث عن حواسيب",
     msg_btn_scanning:"جارٍ الفحص…",
     msg_btn_rescan_short:"أعد الفحص",
-    msg_q_console_decides_drive:"جهاز PS5 يحدد محرك الأقراص",
+    msg_q_console_decides_drive:"جهاز {console} يحدد محرك الأقراص",
     msg_conn_companion_lost:"فُقد رفيق الحاسوب — جارٍ البحث عن واحد",
     ui_cheats_drop_sep:"، ",
     msg_eng_detail_ready:"جاهز - يمكن بدء التثبيت فوراً.",
@@ -5188,7 +5191,7 @@ var I18N={
     gp_dest_free:"  （剩余 {size}）",
     gp_dest_not_enough_room:"  — 空间不足",
     gp_dest_not_detected:"  （未检测到）",
-    msg_q_console_decides_drive:"由 PS5 决定存储位置",
+    msg_q_console_decides_drive:"由 {console} 决定存储位置",
     msg_conn_companion_lost:"PC 伴侣已失联 — 正在寻找",
     msg_set_sources_none:"无",
     msg_copy_this_pc:"此电脑",
@@ -5307,7 +5310,7 @@ var I18N={
     ui_btn_rescan:"重新扫描",
     ui_btn_create_folders:"创建文件夹",
     ui_yes:"是",
-    ui_console_note_body:"这个页面由 PS5 提供，它无处保存这些设置。请在这个网络中的 PC 上打开应用来更改。",
+    ui_console_note_body:"这个页面由你的 {console} 提供，它没有地方保存这些设置。请在本网络的电脑上打开应用来修改。",
     ui_aria_back:"返回",
     ui_aria_close:"关闭",
     ui_aria_save_settings:"保存设置",
@@ -5557,7 +5560,7 @@ var I18N={
     gp_dest_free:"  ({size} खाली)",
     gp_dest_not_enough_room:"  — जगह पर्याप्त नहीं",
     gp_dest_not_detected:"  (पता नहीं चला)",
-    msg_q_console_decides_drive:"ड्राइव PS5 तय करता है",
+    msg_q_console_decides_drive:"ड्राइव {console} तय करता है",
     msg_conn_companion_lost:"PC साथी से संपर्क टूटा — खोज जारी",
     msg_set_sources_none:"कोई नहीं",
     msg_copy_this_pc:"यह PC",
@@ -5676,7 +5679,7 @@ var I18N={
     ui_btn_rescan:"रीस्कैन",
     ui_btn_create_folders:"फ़ोल्डर बनाएँ",
     ui_yes:"हाँ",
-    ui_console_note_body:"यह पेज PS5 से आ रहा है, जिसके पास ये सेटिंग रखने की जगह नहीं है। इन्हें बदलने के लिए इस नेटवर्क के किसी PC पर ऐप खोलें।",
+    ui_console_note_body:"यह पेज आपका {console} दे रहा है, जिसके पास ये सेटिंग्स रखने की जगह नहीं है। इन्हें बदलने के लिए इस नेटवर्क के किसी PC पर ऐप खोलें।",
     ui_aria_back:"वापस",
     ui_aria_close:"बंद करें",
     ui_aria_save_settings:"सेटिंग सहेजें",
@@ -5926,7 +5929,7 @@ var I18N={
     gp_dest_free:"  ({size} свободно)",
     gp_dest_not_enough_room:"  — не хватает места",
     gp_dest_not_detected:"  (не обнаружен)",
-    msg_q_console_decides_drive:"Диск выбирает PS5",
+    msg_q_console_decides_drive:"Диск выбирает {console}",
     msg_conn_companion_lost:"Связь с ПК потеряна — идёт поиск",
     msg_set_sources_none:"нет",
     msg_copy_this_pc:"этот ПК",
@@ -6045,7 +6048,7 @@ var I18N={
     ui_btn_rescan:"Пересканировать",
     ui_btn_create_folders:"Создать папки",
     ui_yes:"Да",
-    ui_console_note_body:"Эту страницу отдаёт PS5, которой негде хранить эти настройки. Чтобы изменить их, откройте приложение на ПК в этой сети.",
+    ui_console_note_body:"Эту страницу отдаёт ваша {console}, которой негде хранить эти настройки. Чтобы их изменить, откройте приложение на ПК в этой сети.",
     ui_aria_back:"Назад",
     ui_aria_close:"Закрыть",
     ui_aria_save_settings:"Сохранить настройки",
@@ -6295,7 +6298,7 @@ var I18N={
     gp_dest_free:"  ({size} liberi)",
     gp_dest_not_enough_room:"  — spazio insufficiente",
     gp_dest_not_detected:"  (non rilevato)",
-    msg_q_console_decides_drive:"Il disco lo sceglie la PS5",
+    msg_q_console_decides_drive:"Il disco lo sceglie la {console}",
     msg_conn_companion_lost:"PC companion perso — lo sto cercando",
     msg_set_sources_none:"nessuna",
     msg_copy_this_pc:"questo PC",
@@ -6414,7 +6417,7 @@ var I18N={
     ui_btn_rescan:"Riscansiona",
     ui_btn_create_folders:"Crea cartelle",
     ui_yes:"Sì",
-    ui_console_note_body:"Questa pagina è servita dalla PS5, che non ha dove conservare queste impostazioni. Apri l'app su un PC di questa rete per cambiarle.",
+    ui_console_note_body:"Questa pagina è servita dalla tua {console}, che non ha dove salvare queste impostazioni. Apri l'app su un PC di questa rete per modificarle.",
     ui_aria_back:"Indietro",
     ui_aria_close:"Chiudi",
     ui_aria_save_settings:"Salva impostazioni",
@@ -6664,7 +6667,7 @@ var I18N={
     gp_dest_free:"  ({size} 남음)",
     gp_dest_not_enough_room:"  — 공간 부족",
     gp_dest_not_detected:"  (감지되지 않음)",
-    msg_q_console_decides_drive:"드라이브는 PS5가 정합니다",
+    msg_q_console_decides_drive:"드라이브는 {console}가 정합니다",
     msg_conn_companion_lost:"PC 컴패니언 연결 끊김 — 찾는 중",
     msg_set_sources_none:"없음",
     msg_copy_this_pc:"이 PC",
@@ -6783,7 +6786,7 @@ var I18N={
     ui_btn_rescan:"다시 검색",
     ui_btn_create_folders:"폴더 만들기",
     ui_yes:"예",
-    ui_console_note_body:"이 페이지는 PS5가 제공하고 있어 이 설정을 저장할 곳이 없습니다. 변경하려면 이 네트워크의 PC에서 앱을 여세요.",
+    ui_console_note_body:"이 페이지는 {console}가 제공하고 있으며, 이 설정을 저장할 곳이 없습니다. 이 네트워크의 PC에서 앱을 열어 변경하세요.",
     ui_aria_back:"뒤로",
     ui_aria_close:"닫기",
     ui_aria_save_settings:"설정 저장",
@@ -7033,7 +7036,7 @@ var I18N={
     gp_dest_free:"  ({size} boş)",
     gp_dest_not_enough_room:"  — yer yetersiz",
     gp_dest_not_detected:"  (algılanmadı)",
-    msg_q_console_decides_drive:"Sürücüye PS5 karar verir",
+    msg_q_console_decides_drive:"Sürücüye {console} karar verir",
     msg_conn_companion_lost:"PC yardımcısı kayboldu — aranıyor",
     msg_set_sources_none:"yok",
     msg_copy_this_pc:"bu PC",
@@ -7152,7 +7155,7 @@ var I18N={
     ui_btn_rescan:"Yeniden tara",
     ui_btn_create_folders:"Klasörleri oluştur",
     ui_yes:"Evet",
-    ui_console_note_body:"Bu sayfayı PS5 sunuyor ve bu ayarları saklayacak yeri yok. Değiştirmek için uygulamayı bu ağdaki bir PC'de açın.",
+    ui_console_note_body:"Bu sayfayı {console} sunuyor ve bu ayarları saklayacak bir yeri yok. Değiştirmek için bu ağdaki bir bilgisayarda uygulamayı aç.",
     ui_aria_back:"Geri",
     ui_aria_close:"Kapat",
     ui_aria_save_settings:"Ayarları kaydet",
@@ -7402,7 +7405,7 @@ var I18N={
     gp_dest_free:"  ({size} wolne)",
     gp_dest_not_enough_room:"  — za mało miejsca",
     gp_dest_not_detected:"  (nie wykryto)",
-    msg_q_console_decides_drive:"O dysku decyduje PS5",
+    msg_q_console_decides_drive:"O dysku decyduje {console}",
     msg_conn_companion_lost:"Utracono aplikację na PC — szukam",
     msg_set_sources_none:"brak",
     msg_copy_this_pc:"ten komputer",
@@ -7521,7 +7524,7 @@ var I18N={
     ui_btn_rescan:"Skanuj ponownie",
     ui_btn_create_folders:"Utwórz foldery",
     ui_yes:"Tak",
-    ui_console_note_body:"Tę stronę serwuje PS5, które nie ma gdzie przechowywać tych ustawień. Aby je zmienić, otwórz aplikację na PC w tej sieci.",
+    ui_console_note_body:"Tę stronę serwuje twoja {console}, która nie ma gdzie zapisać tych ustawień. Otwórz aplikację na komputerze w tej sieci, aby je zmienić.",
     ui_aria_back:"Wstecz",
     ui_aria_close:"Zamknij",
     ui_aria_save_settings:"Zapisz ustawienia",
@@ -7771,7 +7774,7 @@ var I18N={
     gp_dest_free:"  ({size} vrij)",
     gp_dest_not_enough_room:"  — niet genoeg ruimte",
     gp_dest_not_detected:"  (niet gevonden)",
-    msg_q_console_decides_drive:"De PS5 kiest de schijf",
+    msg_q_console_decides_drive:"{console} kiest de schijf",
     msg_conn_companion_lost:"Pc-companion kwijt — aan het zoeken",
     msg_set_sources_none:"geen",
     msg_copy_this_pc:"deze pc",
@@ -7890,7 +7893,7 @@ var I18N={
     ui_btn_rescan:"Opnieuw scannen",
     ui_btn_create_folders:"Mappen aanmaken",
     ui_yes:"Ja",
-    ui_console_note_body:"Deze pagina komt van de PS5, die deze instellingen nergens kan bewaren. Open de app op een pc in dit netwerk om ze te wijzigen.",
+    ui_console_note_body:"Deze pagina wordt geserveerd door je {console}, die deze instellingen nergens kan bewaren. Open de app op een pc in dit netwerk om ze te wijzigen.",
     ui_aria_back:"Terug",
     ui_aria_close:"Sluiten",
     ui_aria_save_settings:"Instellingen opslaan",
@@ -10115,7 +10118,11 @@ function renderQueue(){
        points, and the `drive` on its task is only the value of a disabled picker - printing
        "internal" there claimed a destination this app does not control. */
     var isMountT=(tk.lane==="mount"||tk.lane==="peer-mount"||tk.kind==="backup");
-    var where=isMountT?driveLabelOf(tk.drive):t("msg_q_console_decides_drive");
+    /* NAME THE CONSOLE THIS ROW IS FOR. It said "PS5 decides the drive" on every PKG row, including
+       a PS4's - on a row that prints that console's own name two fields along. */
+    var where=isMountT?driveLabelOf(tk.drive)
+                      :tsub("msg_q_console_decides_drive",
+                            {console:(tk.console?consoleName(tk.console):t("gp_where_console"))});
     var nm=esc(tk.name), sub=esc(tk.kind)+(tk.console?' · '+esc(consoleName(tk.console)):'')+' · '+esc(where);
     var tEl=row.querySelector(".qn .t"), kEl=row.querySelector(".qn .k");
     if(tEl.innerHTML!==nm) tEl.innerHTML=nm;
@@ -10920,10 +10927,15 @@ function openSettings(){
   modeNote();
   if($("#aboutVer"))$("#aboutVer").textContent="v"+APP_VERSION+((h.version&&h.version!==APP_VERSION)?(" · PC v"+h.version):"");
   if($("#aboutCount"))$("#aboutCount").textContent=String(state.games.length);
-  /* Served by the PS5? Then nothing on this page can be saved - say so before anything is typed,
-     rather than after the Save button appears to work. */
+  /* Served by a console? Then nothing on this page can be saved - say so before anything is typed,
+     rather than after the Save button appears to work. NAMED, because "the PS5" was printed on a
+     PS4 that was serving the page itself. herePlatform() answers from the server, never from a
+     user-agent sniff. */
   var _cn=$("#consoleNote");
   if(_cn) _cn.style.display=(state.onConsole||h.on_console)?"":"none";
+  var _cnb=$("#consoleNoteBody");
+  if(_cnb) _cnb.textContent=tsub("ui_console_note_body",
+                                 {console:(herePlatform(h)==="ps4"?"PS4":"PS5")});
   /* One plain line for "are we actually talking to the PS5". Everything else in that card is a
      detail underneath it, and the panel had no such row at all - you had to read the engine block
      and work it out. */
