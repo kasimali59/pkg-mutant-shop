@@ -384,7 +384,10 @@ static char *slurp(const char *path, long *out_len) {
 }
 
 static void mkparents(const char *path) {
-    char tmp[512];
+    /* 1024, matching every path buffer that reaches here. It was 512 against callers holding
+       char[1024] and char[1100], so a long path did not fail - snprintf truncated it and this
+       silently created a DIFFERENT, shorter directory tree than the one asked for. */
+    char tmp[1100];
     snprintf(tmp, sizeof(tmp), "%s", path);
     for (char *p = tmp + 1; *p; p++)
         if (*p == '/') { *p = 0; mkdir(tmp, 0777); *p = '/'; }
@@ -3600,6 +3603,126 @@ static void extract_web(void) {
 
 typedef struct { int fd; } conn_t;
 
+/* ============================ WHO IS ALLOWED TO ASK ============================================
+ *
+ * THE PS4 BUILD HAD NONE OF THIS AND THE PS5 BUILD HAS HAD IT FOR A LONG TIME. Ported across
+ * rather than invented: same helpers, same sentences, same rule.
+ *
+ * WHY IT MATTERS MORE HERE THAN IT SOUNDS. This server answers on every interface, as root, inside
+ * a shared system daemon, and it sends "Access-Control-Allow-Origin: *" on its JSON. Without a
+ * guard, ANY page the console's own browser happens to open - an ad frame on a game-wiki, a
+ * shortened link, anything - can fire a state-changing GET at 127.0.0.1:8710 and READ the reply.
+ * Not theoretical on this console: /api/quit takes the shop down, /api/notify puts arbitrary text
+ * on the television, /api/engine/install-spawn takes a package URL of the caller's choosing, and
+ * POST /api/fs/write writes any absolute path. The owner browses on this machine; that is the
+ * whole point of the app.
+ *
+ * WHAT IT DOES NOT DO. A request with no Origin and no Referer is allowed: that is curl, the
+ * companion, our own tools, and the console's own download service fetching /pkgfile/. The test is
+ * only ever "if a page names itself, is that page from a private address".
+ */
+static int host_is_private(const char *h, size_t len) {
+    char b[128];
+    size_t j = 0;
+    for (size_t i = 0; i < len && j < sizeof(b) - 1; i++) {
+        if (h[i] == ':' || h[i] == '/') break;          /* port, or the path after the host */
+        b[j++] = h[i];
+    }
+    b[j] = 0;
+    if (!strcmp(b, "localhost") || !strcmp(b, "[::1]") || !strcmp(b, "::1")) return 1;
+    unsigned a1, a2, a3, a4;
+    int used = 0;
+    /* %n, and the whole token must be the four octets. sscanf alone was satisfied by
+       "10.0.0.1.attacker.example" or "10.0.0.1x" - any NAME that merely begins with a private
+       address read as that address, which is exactly the thing this test exists to tell apart. */
+    if (sscanf(b, "%u.%u.%u.%u%n", &a1, &a2, &a3, &a4, &used) != 4) return 0;   /* a NAME, not an IP */
+    if (b[used] != 0) return 0;                                                  /* trailing junk */
+    if (a1 > 255 || a2 > 255 || a3 > 255 || a4 > 255) return 0;
+    if (a1 == 127 || a1 == 10) return 1;
+    if (a1 == 192 && a2 == 168) return 1;
+    if (a1 == 172 && a2 >= 16 && a2 <= 31) return 1;
+    return 0;
+}
+
+static int request_origin_ok(const char *req) {
+    static const char *HDRS[2] = { "\norigin:", "\nreferer:" };
+    for (int k = 0; k < 2; k++) {
+        const char *h = strcasestr_local(req, HDRS[k]);
+        if (!h) continue;
+        h += strlen(HDRS[k]);
+        while (*h == ' ' || *h == '\t') h++;
+        const char *end = h;
+        while (*end && *end != '\r' && *end != '\n') end++;
+        if (end - h == 4 && !strncmp(h, "null", 4)) continue;      /* sandboxed page: not a name */
+        const char *hostp = h;
+        const char *sep = strstr(h, "://");
+        if (sep && sep < end) hostp = sep + 3;
+        if (!host_is_private(hostp, (size_t)(end - hostp))) return 0;
+    }
+    return 1;
+}
+
+/* The browser's own statement of HOW a request was made.
+ *
+ * request_origin_ok() lets a request with no Origin and no Referer through on purpose. But a
+ * browser can be made to send neither: a page with a no-referrer policy loading a state-changing
+ * GET as an <img>, a <script> or a top-level navigation carries no Referer at all, and that walks
+ * straight past the guard. Sec-Fetch-Mode and Sec-Fetch-Dest cannot be suppressed or forged by a
+ * page, so on the routes that CHANGE something they are consulted as well. ABSENT headers are
+ * allowed - older WebKit, curl and urllib send none - and everything our UI does is fetch(), so
+ * nothing the app itself does changes. Read-only routes are not consulted at all. */
+static int sec_fetch_ok(const char *req) {
+    static const char *BAD_MODES[] = { "no-cors", "navigate", "nested-navigate", NULL };
+    static const char *BAD_DESTS[] = { "image", "script", "style", "iframe", "frame", "object",
+                                       "embed", "font", "video", "audio", NULL };
+    static const char *HDRS[2] = { "\nsec-fetch-mode:", "\nsec-fetch-dest:" };
+    for (int k = 0; k < 2; k++) {
+        const char *h = strcasestr_local(req, HDRS[k]);
+        if (!h) continue;
+        h += strlen(HDRS[k]);
+        while (*h == ' ' || *h == '\t') h++;
+        const char *end = h;
+        while (*end && *end != '\r' && *end != '\n' && *end != ' ' && *end != '\t') end++;
+        size_t vl = (size_t)(end - h);
+        const char **bad = k ? BAD_DESTS : BAD_MODES;
+        for (int i = 0; bad[i]; i++) {
+            size_t bl = strlen(bad[i]);
+            if (vl != bl) continue;
+            int same = 1;
+            for (size_t j = 0; j < bl; j++) {
+                char a = h[j];
+                if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                if (a != bad[i][j]) { same = 0; break; }
+            }
+            if (same) return 0;
+        }
+    }
+    return 1;
+}
+
+/* The routes that change something on THIS console - the only ones sec_fetch_ok() is applied to.
+   Re-derived from this file's own dispatch rather than copied from the PS5's list: the two builds
+   do not serve the same routes. The stubs (/api/move, /api/game/delete*, /api/rest/prepare,
+   /api/payloads/autostart) are here even though they currently change nothing, so that the day one
+   of them grows a body it is already covered. */
+static int route_changes_state(const char *rawpath, int is_post) {
+    static const char *EXACT[] = {
+        "/api/quit", "/api/notify", "/api/open", "/api/register-pc", "/api/install",
+        "/api/engine/cancel", "/api/engine/spawn-cleanup", "/api/fs/write", "/api/fs/mkdir",
+        "/api/move", "/api/game/delete", "/api/game/delete-backup",
+        "/api/rest/prepare", "/api/payloads/autostart", NULL
+    };
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", rawpath);
+    char *qs = strchr(path, '?');
+    if (qs) *qs = 0;
+    for (int i = 0; EXACT[i]; i++) if (!strcmp(path, EXACT[i])) return 1;
+    /* install-spawn, install-url, install-direct, install-local: every one of them hands a package
+       to the console. */
+    if (!strncmp(path, "/api/engine/install-", 20)) return 1;
+    return 0;
+}
+
 static void *conn_thread(void *arg) {
     conn_t *c = (conn_t *)arg;
     int fd = c->fd;
@@ -3635,10 +3758,28 @@ static void *conn_thread(void *arg) {
         close(fd);
         return NULL;
     }
-    if (is_post && !strncmp(path, "/api/fs/write", 13)) {
+    /* GATED IN THE CONDITION, exactly as the PS5 build gates its own: this branch runs before the
+       generic path below, so a write that is not allowed must fall THROUGH to the 403 rather than
+       be served here. */
+    if (is_post && !strncmp(path, "/api/fs/write", 13) &&
+        request_origin_ok(buf) && sec_fetch_ok(buf)) {
         char *he = strstr(buf, "\r\n\r\n");
         int hl = he ? (int)(he - buf) + 4 : n;
         fs_recv_write(fd, path, buf, hl, he ? n - hl : 0);
+        close(fd);
+        return NULL;
+    }
+    if (!request_origin_ok(buf)) {
+        /* A page with a public hostname is driving us. Nothing here is for it. */
+        send_status(fd, "403 Forbidden", "text/plain",
+                    "this server only answers pages served from a private address");
+        close(fd);
+        return NULL;
+    }
+    if (route_changes_state(path, is_post) && !sec_fetch_ok(buf)) {
+        /* A browser loaded a state-changing route as an image, a script or a navigation. */
+        send_status(fd, "403 Forbidden", "text/plain",
+                    "this route changes something and cannot be loaded that way");
         close(fd);
         return NULL;
     }
