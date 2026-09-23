@@ -345,6 +345,24 @@ def viewer_platform_for(consoles, peer):
     return ""
 
 
+def _is_mount_request(body, srv):
+    """Is this install a BACKUP CONTAINER - the play-in-place lane - rather than a package?
+
+    Same question the UI asks with installsAsBackup(): the item's own kind when the library states
+    one, otherwise its extension. Answered here as well as there because a refusal the server does
+    not make is a refusal a second client does not get, and this one guards a multi-gigabyte
+    transfer to a console that cannot use it."""
+    if not isinstance(body, dict):
+        return False
+    if str(body.get("kind") or "").lower() == "backup":
+        return True
+    if str(body.get("lane") or "").lower() in ("mount", "peer-mount"):
+        return True
+    key = str(body.get("install_key") or body.get("url") or "")
+    name = key.rsplit("/", 1)[-1].split("?", 1)[0].lower()
+    return name.endswith(MOUNT_EXTS) if name else False
+
+
 def _bridge_for(srv, handler=None, body=None, want=None):
     """The console a request actually means.
 
@@ -8226,6 +8244,24 @@ class Handler(BaseHTTPRequestHandler):
             if not keep:
                 return self._json({"ok": False, "error": "This is a PS5 game, and the console it "
                                                          "was sent to is a PS4"}, 400)
+            targets = keep
+
+        # A MOUNTED BACKUP CANNOT GO ON A PS4 EITHER, and this one does not announce itself in the
+        # title id - a backup of a PS4 game is a CUSA title, so the check above lets it straight
+        # through. What made it dangerous is that nothing downstream failed fast: the PS4 implements
+        # /api/fs/mkdir and /api/fs/write, so the folder was created and the WHOLE container was
+        # uploaded, gigabytes of it, onto a console with no ShadowMount to mount it. Then, with a
+        # title id, the mount confirmation timed out after three minutes and told the owner to
+        # restart their PS5; without one, the row went green and said the game was ready to play.
+        # A wrong answer after a long transfer, or a false success - and the drive filled either way.
+        if _is_mount_request(body, srv):
+            keep = [c for c in targets
+                    if not (srv.fleet.bridge(c) is not None and srv.fleet.bridge(c).is_ps4())]
+            if not keep:
+                return self._json({"ok": False,
+                                   "error": "This is a game backup, which is played in place on a "
+                                            "PS5. A PS4 installs games instead - send it a package "
+                                            "for this title."}, 400)
             targets = keep
 
         # DRY RUN: decide, answer, touch nothing.

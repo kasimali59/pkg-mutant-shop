@@ -182,24 +182,37 @@ static void park_forever(void) {
  * the error on the television. Both of the fallbacks written below it were therefore dead code:
  * neither the printf nor park_forever() can run, because by then there is no process left.
  *
- * WHAT IS BEING TRIED, AND WHY IT IS NOT A GUESSED SIGNATURE. The toolchain's own
- * include/orbis/SystemService.h declares `void sceSystemServiceKillLocalProcess();` - no
- * arguments, nothing to get wrong, and it says in its name exactly what is wanted here: end THIS
- * process, without asking AppMgr to spawn anything in its place.
+ * sceSystemServiceKillLocalProcess() WAS TRIED AND IS REFUSED. Do not try it again. It is
+ * declared no-argument in the toolchain's own include/orbis/SystemService.h, so there was nothing
+ * to get wrong about the call - and the console answered, in words, that we are not allowed to
+ * make it (klog, real icon press, 2026-09-23):
  *
- * The risk is bounded in a way that matters on this project. This runs in an APPLICATION SANDBOX,
- * not in the shared host process the shop's payload lives in - so the worst case is this app
- * closing badly, which is already what happens every single time. It also runs last, after the
- * browser is on screen, so nothing the owner is waiting for depends on it.
+ *     [PMS] done - closing this app
+ *     [SceLncService] Bug#16557 !isSystemProcess(pid=0x73) is not allowed to invoke this API.
+ *     begin_killLocalProcess: LNC_CHECK::0x8094000f (isSystemProcess(session) value is false)
+ *     sceSystemServiceKillLocalProcess: SYSTEM_SERVICE_ISOK::0x8094000f
  *
- * LoadExec stays as the second attempt: it is what a title is documented to use, and if a future
- * firmware makes the exit spawn work it is still the right call. Parking stays third. If the icon
- * ever starts leaving a suspended black app behind instead of an error dialog, this order is where
- * to look - park is quiet but it is not an exit. */
+ * It failed cleanly - returned, changed nothing - and the LoadExec below then failed exactly as it
+ * always does. So BOTH documented ways out of an application are closed to this app on this
+ * firmware, and the error dialog after the shop opens is the cost of that, not a bug in this file.
+ *
+ * WHAT IS LEFT, and why it has not been taken unilaterally: park_forever() produces no dialog at
+ * all, because nothing kills us and nothing is spawned in our place. Two things are unknown about
+ * it and both need the console to answer them - whether pressing the icon again RESUMES a parked
+ * app to a black screen instead of restarting it, and whether an application that never exits
+ * interferes with rest mode. Neither is worth guessing at on someone else's console to remove a
+ * dialog they can dismiss. If it is taken, the resume case has an answer that needs no new API:
+ * sceKernelGettimeofday() across a one-second sceKernelUsleep() shows a multi-second jump when the
+ * process has been suspended and brought back, which is the moment to ask the shop to open again.
+ *
+ * A THIRD THEORY WAS CHECKED AND IS DEAD. The failing spawn names
+ * ".../PKGM00001-app0-patch0-union/eboot.bin", which looked like the app running from a patch
+ * union that the exit helper cannot be found in - repeated installs leaving a patch behind.
+ * /user/patch/PKGM00001 does not exist on this console; that path is simply how SceShellCore names
+ * the union for every title. */
 _Noreturn void _Exit(int ec) {
     (void)ec;
     /* No printf: stdio has already been torn down by the time exit() reaches here. */
-    sceSystemServiceKillLocalProcess();
     sceSystemServiceLoadExec("exit", NULL);
     park_forever();
 }
@@ -207,9 +220,13 @@ _Noreturn void _Exit(int ec) {
 static _Noreturn void leave(void) {
     fflush(stdout);
     printf("[PMS] done - closing this app\n");
-    sceSystemServiceKillLocalProcess();
-    /* Only reached if that did not close us. */
+    /* The kill-local-process call that used to be here is gone: measured refused, see above. It
+       cost nothing but a line in klog and it achieved nothing, and a call that is known not to
+       work is worse than none - the next person reads it as an attempt that might be helping. */
     int rc = (int)sceSystemServiceLoadExec("exit", NULL);
+    /* Not reached today: the system kills this process to perform the LoadExec and only then
+       fails to spawn the exit helper. Kept because it costs nothing and because a firmware that
+       does spawn it would return here normally. */
     printf("[PMS] still here: LoadExec(exit) rc=0x%08x - parking instead\n", (unsigned)rc);
     park_forever();
 }
