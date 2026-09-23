@@ -181,6 +181,86 @@ def offline():
     except Exception as e:
         rec("guard", "is_backup_item(): a DLC under a ffpfsc game is not a backup", False, repr(e)[:60])
 
+    # The page's own assertions. See ui_checks(): these were unreachable.
+    ui_checks(h)
+
+
+
+def ui_checks(h):
+    """Every assertion about the SHIPPED page, given its text.
+
+    THIS WHOLE BLOCK WAS UNREACHABLE. It sat after the `return` of _embedded_sha(), so Python
+    parsed it, never ran it, and the fourteen names it reads out of `h` were simply undefined.
+    None of these checks had fired since the day they were pasted here - including the one
+    guarding the rule that `lane` may only be read inside isBackupTitle(), which is the exact
+    regression this file was extended to catch.
+
+    Same failure this tool has had before and in the same shape: a gate that reports nothing
+    is indistinguishable from a gate that reports success. tools/lint_python.py now fails a
+    build on an undefined name, which is what found it.
+    """
+    head("the UI's own logic, run against the shipped file")
+    # These functions decide whether a game can be sent to a drive of your choosing. Gating them on
+    # `lane` was what silently removed the destination picker: no live title carries lane "mount".
+    for fn in ("isBackupTitle", "backupDriveOf", "ps5Destinations", "driveLabelOf"):
+        rec("ui", "%s() is present" % fn, ("\nfunction %s(" % fn) in h)
+    # `lane` is not a reliable backup test - no live title carries "mount" - so isBackupTitle() is
+    # the ONLY place allowed to read it. Comments are stripped first, otherwise the note explaining
+    # this very rule counts as a violation of it.
+    code = re.sub(r"/\*.*?\*/", "", h, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    m = re.search(r"\nfunction isBackupTitle\(", code)
+    inside = ""
+    if m:
+        i = code.index("{", m.end())
+        depth, j = 0, i
+        while j < len(code):
+            if code[j] == "{":
+                depth += 1
+            elif code[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        inside = code[i:j + 1]
+    # A GAME's lane, not a TASK's. The rule is about library entries: `lane` is absent on every
+    # live title (measured: 0 of 112), so gating a game's behaviour on it silently removes the
+    # control it guards. A QUEUE TASK is a different object with a different producer - the install
+    # route sets "lane":"mount" on the row it creates - so tk.lane is both reliable and the right
+    # thing to read, and renderQueue does exactly that.
+    #
+    # The first version of this counted every `lane==="mount"` in the file and so flagged the queue
+    # row as a violation. It counts receivers now: anything whose object is not a task.
+    hits = re.findall(r'(\w+)\.lane==="mount"', code)
+    total = [r for r in hits if r not in ("tk", "t", "task")]
+    inside_hits = re.findall(r'(\w+)\.lane==="mount"', inside)
+    allowed = [r for r in inside_hits if r not in ("tk", "t", "task")]
+    rec("ui", "only isBackupTitle() reads a GAME's lane===\"mount\"",
+        len(total) > 0 and len(total) == len(allowed),
+        "%d on a game (%s), %d of them inside isBackupTitle"
+        % (len(total), ",".join(sorted(set(total))) or "-", len(allowed)))
+    # Settings is ONE PAGE of cards now. The tab machinery is gone, and it must stay gone: the
+    # answer to "why will this not install" used to be behind whichever tab you were not on.
+    # Column flow, not a grid: a grid stretched every row to its tallest card and left a band of
+    # dead space before the next row. break-inside is what stops a column splitting a card.
+    rec("ui", "settings cards flow in columns",
+        ".setgrid{column-count:3" in h and "break-inside:avoid" in h)
+    rec("ui", "settings has all eight cards", h.count('<section class="scard') == 8,
+        "%d found" % h.count('<section class="scard'))
+    rec("ui", "the settings tab machinery is gone",
+        "showSetTab" not in h and "settab" not in h and "setpane" not in h)
+    # applyI18n() assigns textContent, so a title carrying data-i18n directly would wipe its icon.
+    # The key has to sit on an inner span - and every card must still carry one, or the seven
+    # translations stop reaching the headings.
+    rec("ui", "every card title is translatable", h.count('</svg></span><span data-i18n="sec_') == 8,
+        "%d of 8" % h.count('</svg></span><span data-i18n="sec_'))
+    # The five saved settings must remain real inputs/selects with these exact ids: openSettings()
+    # dereferences setIp and setPort UNGUARDED, so losing one stops the panel opening at all.
+    for _id in ("setIp", "setPort", "setParallel", "setVerify", "setAutoScan"):
+        rec("ui", "saved control %s survives" % _id, ('id="%s"' % _id) in h)
+    rec("ui", "no title= tooltips left (the PS5 browser never shows them)",
+        'title="' not in h, "%d found" % h.count('title="'))
+
 
 def _js_function(h, name):
     """The body of `function name(` in the page, comments stripped. "" when absent."""
@@ -237,58 +317,6 @@ def _embedded_sha(bundle, rel):
     if len(data) != int(m.group(2)):
         return None, "decoded %d of %s bytes" % (len(data), m.group(2))
     return hashlib.sha256(data).hexdigest(), "decoded"
-
-    head("the UI's own logic, run against the shipped file")
-    # These functions decide whether a game can be sent to a drive of your choosing. Gating them on
-    # `lane` was what silently removed the destination picker: no live title carries lane "mount".
-    for fn in ("isBackupTitle", "backupDriveOf", "ps5Destinations", "driveLabelOf"):
-        rec("ui", "%s() is present" % fn, ("\nfunction %s(" % fn) in h)
-    # `lane` is not a reliable backup test - no live title carries "mount" - so isBackupTitle() is
-    # the ONLY place allowed to read it. Comments are stripped first, otherwise the note explaining
-    # this very rule counts as a violation of it.
-    code = re.sub(r"/\*.*?\*/", "", h, flags=re.S)
-    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
-    m = re.search(r"\nfunction isBackupTitle\(", code)
-    inside = ""
-    if m:
-        i = code.index("{", m.end())
-        depth, j = 0, i
-        while j < len(code):
-            if code[j] == "{":
-                depth += 1
-            elif code[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        inside = code[i:j + 1]
-    total = len(re.findall(r'lane==="mount"', code))
-    allowed = len(re.findall(r'lane==="mount"', inside))
-    rec("ui", "only isBackupTitle() reads lane===\"mount\"",
-        total > 0 and total == allowed,
-        "%d in code, %d of them inside isBackupTitle" % (total, allowed))
-    # Settings is ONE PAGE of cards now. The tab machinery is gone, and it must stay gone: the
-    # answer to "why will this not install" used to be behind whichever tab you were not on.
-    # Column flow, not a grid: a grid stretched every row to its tallest card and left a band of
-    # dead space before the next row. break-inside is what stops a column splitting a card.
-    rec("ui", "settings cards flow in columns",
-        ".setgrid{column-count:3" in h and "break-inside:avoid" in h)
-    rec("ui", "settings has all eight cards", h.count('<section class="scard') == 8,
-        "%d found" % h.count('<section class="scard'))
-    rec("ui", "the settings tab machinery is gone",
-        "showSetTab" not in h and "settab" not in h and "setpane" not in h)
-    # applyI18n() assigns textContent, so a title carrying data-i18n directly would wipe its icon.
-    # The key has to sit on an inner span - and every card must still carry one, or the seven
-    # translations stop reaching the headings.
-    rec("ui", "every card title is translatable", h.count('</svg></span><span data-i18n="sec_') == 8,
-        "%d of 8" % h.count('</svg></span><span data-i18n="sec_'))
-    # The five saved settings must remain real inputs/selects with these exact ids: openSettings()
-    # dereferences setIp and setPort UNGUARDED, so losing one stops the panel opening at all.
-    for _id in ("setIp", "setPort", "setParallel", "setVerify", "setAutoScan"):
-        rec("ui", "saved control %s survives" % _id, ('id="%s"' % _id) in h)
-    rec("ui", "no title= tooltips left (the PS5 browser never shows them)",
-        'title="' not in h, "%d found" % h.count('title="'))
-
 
 # ------------------------------------------------------------------------------------------------
 # ONLINE

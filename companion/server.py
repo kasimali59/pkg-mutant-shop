@@ -448,7 +448,9 @@ def build_library(srv):
     # a single console behaves exactly as it did before; `installed_on` records all of them.
     fleet_bridges = [(cid, srv.fleet.bridge(cid)) for cid in srv.fleet.ids()]
     fleet_bridges = [(cid, b) for cid, b in fleet_bridges if b is not None]
-    bridge = fleet_bridges[0][1] if fleet_bridges else None
+    # (No `bridge` singular here any more. It held consoles[0] from when the fleet was one PS5;
+    # once this loop was widened to every console nothing read it, and a name that looks like "the
+    # console" while meaning "the first one" is the shape of bug this whole pass is about.)
     apps = None
     per_console = []
     for cid, b in fleet_bridges:
@@ -503,10 +505,12 @@ def build_library(srv):
                 games.append({"title_id": a["title_id"], "content_id": a.get("content_id", ""),
                               "name": a["name"], "platform": a["platform"],
                               "region": a.get("region", "—"), "lane": "installed", "on_console": True,
-                              # Same two keys as the enrich branch above. A title that exists only
-                              # on a console and not in any PC folder is still a title the panel
-                              # has to describe per console.
-                              "installed_on": [cid],
+                              # Same per-console detail as the enrich branch above: a title that
+                              # exists only on a console, and not in any PC folder, still has to be
+                              # described per console. (`installed_on` is already set further down
+                              # this same literal - setting it twice is not an error Python reports,
+                              # the second one simply wins, which is exactly why it is worth not
+                              # doing.)
                               "console_state": {cid: {"drive": a.get("drive") or "",
                                                       "version": a.get("app_ver") or "",
                                                       "size": csize,
@@ -8027,7 +8031,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/queue/start":                                  # [B8] release held tasks, small-first
             return self._json({"ok": True, "started": srv.queue.start_held()})
         if path == "/api/dpi/reload":                # POST twin of the GET above
-            return self._dpi_reload()
+            return self._dpi_reload(body)
         # /api/dpi/status was here. It reported whether a third-party install daemon was clean,
         # wedged or down. Nothing in the UI ever called it and there is no such daemon now.
         m = re.match(r"^/api/queue/([^/]+)/cancel$", path)
@@ -8041,7 +8045,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": srv.queue.retry(m.group(1))})
         return self._json({"error": "not found"}, 404)
 
-    def _dpi_reload(self):
+    def _dpi_reload(self, body=None):
         """Manual "reload the install engine" — the dock's tag. This route did not exist: the UI
         called it, got 404 "not found", and reported "Reload failed" every single time, while three
         different install-failure messages told the user to press it. It is the same recovery the
@@ -8051,6 +8055,14 @@ class Handler(BaseHTTPRequestHandler):
         the time anyone presses this. What CAN be stale is the hand-over state, so that is what it
         clears - and it says so, rather than reporting a reload that did not happen."""
         srv = self.server
+        # `body` IS A PARAMETER, and it has to be, because this is a method - not a branch inside
+        # _do_POST where a local `body` happens to be in scope. A mechanical rewrite that added the
+        # request body to every _bridge_for call from _do_POST downwards swept this function up
+        # too, and Python only notices an undefined name when the line runs: every press of the
+        # dock's "clear the install lane" tag and of Settings > Clear answered HTTP 500 with a
+        # NameError in pms.log. Nothing was corrupted by it - the queue runs the same cleanup by
+        # itself before a hand-off - but a recovery control that always fails is worse than none,
+        # because it is pressed exactly when something else has already gone wrong.
         b = _bridge_for(srv, self, body, want="ps5")
         if b is None:
             return self._json({"ok": False, "error": "no console configured"}, 400)

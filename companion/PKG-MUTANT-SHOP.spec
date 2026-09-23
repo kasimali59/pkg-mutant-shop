@@ -44,6 +44,10 @@ _gate("check_web.py", True)                # refuse to package a UI whose script
 _gate("i18n_report.py", True, ["--check"])  # every language covers every key the app uses
 _gate("message_report.py", True, ["--check"])  # every user-facing sentence is on house style
 _gate("test_storage_tiles.py", True)       # the M.2 duplicate tile must not come back a third time
+# A name that does not exist is a 500 on the route that uses it, and this module is nine thousand
+# lines of handlers that only run when someone presses the thing. Both "reload the install engine"
+# controls shipped answering 500 with a NameError because nothing ever pressed them in a test.
+_gate("lint_python.py", True, ["--check"])
 
 
 a = Analysis(
