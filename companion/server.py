@@ -205,11 +205,18 @@ LIBRARY_ROOT = r"C:\Mutant Games"
 LIBRARY_LAYOUT = ("PS4", "PS5")
 
 DEFAULT_CONFIG = {
-    "ps5_ip": "192.168.1.50",
+    # EMPTY, NOT AN EXAMPLE ADDRESS. This used to ship as "192.168.1.50", and reconcile_consoles
+    # then treated any address equal to it as "not configured" - so a person whose PS5 really is at
+    # 192.168.1.50 had their PS5 entry deleted from the fleet every time the config was reconciled,
+    # and on a machine with a PS4 as well they were left with the PS4 and no PS5 at all. An empty
+    # default says the same thing ("I have not been told") without ever colliding with a real LAN.
+    "ps5_ip": "",
     # The PS4's address, empty until someone has one. `consoles` is the list everything actually
     # runs on; these two keys are the two boxes the settings panel offers, reconciled into it by
     # reconcile_consoles(). Empty means "I do not have that console", not "look for it".
     "ps4_ip": "",
+    # Bumped only by a migration that has to run once. See load_config.
+    "config_rev": 1,
     "consoles": [],
     # OUR engine is the only install lane: the companion serves the pkg, the on-console ELF
     # streams it to console storage and registers it itself. Nothing third-party is involved, and
@@ -307,6 +314,74 @@ class ShopHTTPError(Exception):
 # engine_words() and drive_label() lived here. Neither had a caller anywhere (server.py, index.html,
 # the tools), and drive_label's "Internal M.2"/"EXT1" disagreed with what the app actually shows
 # (the console's own /api/devices labels). Dead words that disagree are worse than none.
+
+
+def _bridge_for(srv, handler=None, body=None, want=None):
+    """The console a request actually means.
+
+    _first_bridge() answers "consoles[0]", which is the PS5 on a machine that has both. That was the
+    right answer while there could only be one console and is the wrong one now: a page open on the
+    PS4 asking about storage got the PS5's drives, and - the dangerous one - /api/rest/prepare could
+    stop the payloads on a console that has none while telling the owner it was safe to rest the one
+    that does. A PS5 woken from rest with its payloads still loaded panics.
+
+    In order, stopping at the first that answers:
+
+      1. THE CALLER NAMED ONE - `console` in the body, or ?console= in the query. An explicit name
+         wins even when it is the "wrong" platform for the route: if someone points a PS5-only
+         action at a PS4, the PS4's own refusal is the honest reply, and quietly doing it to the
+         other console instead is how you act on a machine nobody asked you to touch.
+      2. THE REQUEST CAME FROM A CONSOLE. The page is served BY the console it is read on, so a
+         request from that console's address is about that console. Free and exact.
+      3. THE ROUTE REQUIRES A PLATFORM (`want`). Reserved for things only one kind of console has -
+         stopping payloads before rest, the payload autostart, the install-host reload. If no
+         console of that kind is configured the answer is None, and the caller says so.
+      4. The first console, which is what every one of these routes did before.
+
+    `console=all` is not a console: it is what the picker sends for "every console", and the reads
+    that use this helper want one. It falls through to the ordinary order rather than failing.
+    """
+    fleet = getattr(srv, "fleet", None)
+    ids = fleet.ids() if fleet else []
+    if not ids:
+        return None
+
+    named = ""
+    if isinstance(body, dict):
+        named = str(body.get("console") or "").strip()
+    if not named and handler is not None:
+        try:
+            named = (parse_qs(urlparse(handler.path).query).get("console") or [""])[0].strip()
+        except Exception:
+            named = ""
+    if named and named.lower() != "all":
+        b = fleet.bridge(named)
+        if b is not None:
+            return b
+
+    if handler is not None:
+        try:
+            peer = (handler.client_address or ("",))[0] or ""
+        except Exception:
+            peer = ""
+        if peer:
+            for cid in ids:
+                b = fleet.bridge(cid)
+                if b is not None and str(getattr(b, "ip", "")) == peer:
+                    return b
+
+    if want:
+        for cid in ids:
+            b = fleet.bridge(cid)
+            try:
+                plat = b.platform_id() if b is not None else None
+            except Exception:
+                plat = None
+            if b is not None and plat == want:
+                return b
+        return None
+
+    return fleet.bridge(ids[0])
 
 
 def _first_bridge(srv):
@@ -1331,14 +1406,20 @@ def reconcile_consoles(cfg):
     ftp_port = (cfg.get("ftp") or {}).get("port", 2121)
     for plat, key, label in (("ps5", "ps5_ip", "PS5"), ("ps4", "ps4_ip", "PS4")):
         ip = str(cfg.get(key) or "").strip()
-        # The shipped default address is a placeholder, not a console. Treating it as one is how an
-        # unconfigured PC ended up with a fleet entry pointing at somebody else's LAN.
-        if ip == DEFAULT_CONFIG.get(key):
-            ip = ""
+        # WHICH ENTRY THIS SETTING OWNS - and it owns exactly one.
+        #
+        # This used to claim EVERY entry whose platform matched, which contradicts the rule written
+        # above it ("every OTHER entry is left exactly as it is"). Clearing the PS5 address removed
+        # a second PS5 somebody had added by hand, and SETUP-REMOTE.md tells people to add entries
+        # with their own ids. The id is the stable name this function created, so the id is what it
+        # looks for; a config written before ids existed is matched on platform instead, and only
+        # when it has no id of its own to be known by.
         mine = [c for c in cons
-                if isinstance(c, dict)
-                and (str(c.get("platform") or "").lower() == plat
-                     or (not c.get("platform") and str(c.get("id") or "").lower().startswith(plat)))]
+                if isinstance(c, dict) and str(c.get("id") or "").lower() == plat]
+        if not mine:
+            mine = [c for c in cons
+                    if isinstance(c, dict) and not c.get("id")
+                    and str(c.get("platform") or "").lower() == plat]
         if not ip:
             for c in mine:
                 cons.remove(c)
@@ -1348,6 +1429,19 @@ def reconcile_consoles(cfg):
             mine[0]["platform"] = plat
             mine[0].setdefault("name", label)
             mine[0].setdefault("ftp_port", ftp_port)
+            continue
+        # ONE PHYSICAL CONSOLE, ONE ENTRY. An entry someone wrote by hand - {"id":"living"} with no
+        # platform - matched neither test above, so this appended a SECOND entry for the same
+        # address. That is not merely untidy: the install queue serialises by console ID, so one
+        # console under two ids defeats "one install at a time per console" and runs two installs
+        # against the same box at once. If the address is already in the list, that entry IS this
+        # console; fill in what it is missing and leave its id alone.
+        same = [c for c in cons
+                if isinstance(c, dict) and str(c.get("ip") or "").strip() == ip]
+        if same:
+            same[0].setdefault("platform", plat)
+            same[0].setdefault("name", label)
+            same[0].setdefault("ftp_port", ftp_port)
         else:
             cons.append({"id": plat, "name": label, "ip": ip,
                          "platform": plat, "ftp_port": ftp_port})
@@ -1417,6 +1511,19 @@ def load_config():
                     if k.startswith("_"):
                         data.pop(k)
                 cfg = deep_merge(cfg, data)
+                # ONE-TIME: the old shipped placeholder becomes empty again.
+                # Until this version the default address WAS "192.168.1.50", and save_config writes
+                # the merged dict - so a config.json written by an older build very likely carries
+                # that literal even though nobody ever typed it. Now that the default is empty, that
+                # value would be read as a real console and a PS4-only owner would acquire a dead
+                # PS5. Dropped once, recorded in config_rev, and never touched again: if someone
+                # genuinely has a console at that address they can type it and it will stick.
+                if int(cfg.get("config_rev") or 0) < 1:
+                    if str(cfg.get("ps5_ip") or "").strip() == "192.168.1.50":
+                        cfg["ps5_ip"] = ""
+                        print("[cfg] the old example address 192.168.1.50 was still in config.json "
+                              "- clearing it once; set your PS5's real address in Settings")
+                    cfg["config_rev"] = 1
             except Exception as e:
                 print("[cfg] could not read %s: %s" % (path, e))
                 if path == CONFIG_PATH:
@@ -6770,7 +6877,7 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         engine_ready = False
                     srv._engine_probe = (time.monotonic(), engine_ready)
-            _b = _first_bridge(srv)
+            _b = _bridge_for(srv, self)
             # Only ask what is running when the console is actually there. This lookup costs two
             # 6-second timeouts against a dead address, which turned every health check into a
             # ~14s stall whenever the PS5 was off or resting — the app looked hung when in fact
@@ -6824,7 +6931,7 @@ class Handler(BaseHTTPRequestHandler):
             # survives a crash, and it is the only record of an install that happened with this PC
             # switched off. Returned as JSON because everything else this API serves is JSON; the
             # console's own route stays plain text for anyone reading it with curl.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if b is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             try:
@@ -6839,7 +6946,7 @@ class Handler(BaseHTTPRequestHandler):
             # dpi_port out of /api/health and printing "ip:12800" next to an LED that meant "is a
             # third-party daemon listening". With our own engine that row was wrong in both halves
             # - the port belongs to software we removed, and the LED was off while installs worked.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             # ONE ENGINE, whatever an old config.json says. Ps5Bridge.install() always spawns
             # (install_spawn), so `mode` is reported as what actually runs. It used to be read
             # from dpi.mode with a default of "v2" - a key DEFAULT_CONFIG never carried - so a
@@ -6897,7 +7004,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/move/status":
             # Progress lives on the console (it is doing the copying), so this is a straight
             # forward. "not active, not done" is the honest answer when there is no console.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if b is None:
                 return self._json({"active": False, "done": False})
             try:
@@ -6983,7 +7090,7 @@ class Handler(BaseHTTPRequestHandler):
             if reg is not None:
                 reg.scan_async()
             me = device_identity(srv.cfg)
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             return self._json({
                 "this_pc": {"id": me.get("id"), "name": me.get("name"),
                             "lan_ip": lan_ip(), "port": srv.cfg["companion"]["port"],
@@ -7026,7 +7133,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"peers": [peer_summary(p) for p in (reg.known() if reg is not None else [])],
                                "enabled": bool(srv.cfg.get("federation", {}).get("enabled"))})
         if path == "/api/storage":
-            b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
+            b = _bridge_for(srv, self)
             devs = None
             if b is not None:
                 try:
@@ -7040,7 +7147,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(build_storage(srv, b.console_apps() if b else None, devs,
                                             console_online=devs is not None))
         if path == "/api/console/apps":
-            b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
+            b = _bridge_for(srv, self)
             apps = b.console_apps() if b else None
             # `reachable` is a LIVE question and gets a live answer: console_apps() serves its
             # last good list for the life of the process (right for browsing, wrong as a
@@ -7053,7 +7160,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"found": discover_ps5(srv.cfg)})
         if path == "/api/installed":
             cid = (q.get("console") or [None])[0]
-            bridge = srv.fleet.bridge(cid) if cid else (srv.fleet.consoles and srv.fleet.bridge(srv.fleet.ids()[0]))
+            bridge = srv.fleet.bridge(cid) if cid else _bridge_for(srv, self)
             console = bridge.installed_titles() if bridge else None
             if console is not None:                       # console is authoritative: trust it
                 prune_local_installed(console)            # self-heal: drop stale 'ghost' remembered installs
@@ -7068,7 +7175,7 @@ class Handler(BaseHTTPRequestHandler):
                    "lan_url": "http://%s:%d/library/" % (lan_ip(), srv.cfg["companion"]["port"]),
                    "sources_file": srv.cfg["library"].get("sources_file"),
                    "sources": ranked, "best": (srv.engine.best() or {}).get("name"),
-                   "helpers": (_first_bridge(srv).helper_status() if _first_bridge(srv) else {})}
+                   "helpers": (_bridge_for(srv, self).helper_status() if _bridge_for(srv, self) else {})}
             return self._json(_with_peer_sources(srv, doc))
         if path.startswith("/api/hash/"):
             raw = unquote(path[len("/api/hash/"):])
@@ -7107,7 +7214,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/manifest/"):
             return self._manifest(unquote(path[len("/api/manifest/"):]))
         if path == "/api/cheats/paths":
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             info = b.cheat_paths() or {}
@@ -7122,7 +7229,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cheats/rescan":
             if not self._origin_ok():
                 return self._refuse_cross_site()
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             return self._json(b.cheat_rescan() or {"ok": False})
@@ -7136,7 +7243,7 @@ class Handler(BaseHTTPRequestHandler):
             # Stopping the console's payloads is most useful from HERE — you are about to walk
             # away and rest the console, so driving it from the PC or a phone beats having to
             # open the app on the PS5 first. Relay it; the console does the actual work.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self, want="ps5")
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             q = urlparse(self.path).query
@@ -7204,7 +7311,7 @@ class Handler(BaseHTTPRequestHandler):
             # change that must not be reachable from a hostile page's <img>.
             if urlparse(self.path).query and not self._origin_ok():
                 return self._refuse_cross_site()
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self, want="ps5")
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             # Pass the whole query through rather than one named parameter: the console owns this
@@ -7220,7 +7327,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "console did not answer: %s" % e}, 502)
         if path.startswith("/api/mods/"):
             tid = unquote(path[len("/api/mods/"):]).strip("/")
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
 
@@ -7313,7 +7420,7 @@ class Handler(BaseHTTPRequestHandler):
                                "patches": doc.get("patches") or [],
                                "error": found.get("error", "")})
         if path == "/api/cheats/library":            # what we ship vs what the console has
-            bridge = _first_bridge(srv)
+            bridge = _bridge_for(srv, self)
             if bridge is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             return self._json(bridge.cheat_library_status())
@@ -7328,7 +7435,7 @@ class Handler(BaseHTTPRequestHandler):
         # ELF's own library at CONSOLE_CHEAT_ROOT - the mods panel goes through /api/mods/.
         if path.startswith("/api/cheats/"):
             tid = unquote(path[len("/api/cheats/"):])
-            b = srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
+            b = _bridge_for(srv, self)
             res = b.console_cheats(tid) if b else None
             return self._json({"title_id": tid, "reachable": res is not None,
                                "cheats": (res or {}).get("cheats", []), "patches": (res or {}).get("patches", [])})
@@ -7436,7 +7543,7 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.match(r"^/api/mods/([^/]+)/(select|toggle|apply|disable-all)$", path)
         if mm:
             tid, act = unquote(mm.group(1)), mm.group(2)
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self, want="ps5")
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             body = body or {}
@@ -7562,13 +7669,13 @@ class Handler(BaseHTTPRequestHandler):
                     print("[open-folder] %s" % e)
             return self._json({"ok": True, "opened": opened})
         if path == "/api/notify":
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             return self._json({"ok": bool(b and b.notify(body.get("text", "")))})
         if path == "/api/move":
             # A console-owned operation: it copies the container between the console's OWN drives,
             # verifies, then removes the original. The companion only forwards - it has no business
             # knowing console paths, and the console can finish the job with this PC switched off.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if b is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             try:
@@ -7588,7 +7695,7 @@ class Handler(BaseHTTPRequestHandler):
             # console owns the scan that knows where the container is, and keeping the lookup there
             # means this PC never sends a path - so there is nothing here that could be pointed at
             # the local library by accident.
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if b is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             tid = (body.get("title_id") or "").strip()
@@ -7615,7 +7722,7 @@ class Handler(BaseHTTPRequestHandler):
                 srv.library.scan()
             return self._json(r)
         if path == "/api/open-ps5":
-            b = _first_bridge(srv)
+            b = _bridge_for(srv, self)
             if b is None:
                 return self._json({"ok": False,
                                    "error": "no console configured"}, 400)
@@ -7690,7 +7797,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/install":
             return self._install(body)
         if path == "/api/hosts/cleanup":             # kept as a no-op: see the reply
-            bridge = _first_bridge(srv)
+            bridge = _bridge_for(srv, self, want="ps5")
             if bridge is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             # There is nothing to clean up. This used to stop Elf Arsenal and the daemons it
@@ -7703,7 +7810,7 @@ class Handler(BaseHTTPRequestHandler):
                                "message": "Nothing to do - this app does not use a separate "
                                           "install payload any more."})
         if path == "/api/cheats/sync":               # push only what the console is missing
-            bridge = _first_bridge(srv)
+            bridge = _bridge_for(srv, self)
             if bridge is None:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             return self._json(bridge.sync_cheat_library(
@@ -7739,7 +7846,7 @@ class Handler(BaseHTTPRequestHandler):
         the time anyone presses this. What CAN be stale is the hand-over state, so that is what it
         clears - and it says so, rather than reporting a reload that did not happen."""
         srv = self.server
-        b = _first_bridge(srv)
+        b = _bridge_for(srv, self, want="ps5")
         if b is None:
             return self._json({"ok": False, "error": "no console configured"}, 400)
 
@@ -8036,7 +8143,7 @@ class Handler(BaseHTTPRequestHandler):
             # goes through the QUEUE like every other install, so "+ Queue" holds it instead of
             # starting it immediately and the job is visible with the rest.
             local_path = str(key)[len("local:"):]
-            if not (srv.fleet.bridge(targets[0]) if targets else _first_bridge(srv)):
+            if not (srv.fleet.bridge(targets[0]) if targets else _bridge_for(srv, self, want="ps5")):
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             jobs = [srv.queue.add({"name": body.get("name") or os.path.basename(local_path),
                                    "title_id": body.get("title_id"),
@@ -8370,7 +8477,10 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 return out
         if not os.path.isfile(srcp):
-            b = _first_bridge(self.server)          # pull it off the console if we have never seen it
+            # EITHER CONSOLE MIGHT HAVE IT. A PS4 game's artwork is on the PS4 and a PS5 game's on
+            # the PS5, so asking only the first console meant half the library drew initials on a
+            # machine that owns both. Ask each in turn and stop at the one that answers.
+            b = _bridge_for(self.server, self)
             if b:
                 try:
                     b.console_icon(tid)
@@ -8441,7 +8551,18 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isfile(full):
             # lazy-fetch the real icon from the console (base is "<title_id>.png")
             tid = base[:-4] if base.lower().endswith(".png") else base
-            b = _first_bridge(self.server)
+            # Try every console, not just the first: the icon is on whichever one has the game.
+            for _cid in (self.server.fleet.ids() or []):
+                b = self.server.fleet.bridge(_cid)
+                if b is None:
+                    continue
+                try:
+                    b.console_icon(tid)
+                except Exception:
+                    continue
+                if os.path.isfile(full):
+                    break
+            b = _bridge_for(self.server, self)
             if b:
                 b.console_icon(tid)
         if not os.path.isfile(full):
@@ -8867,7 +8988,10 @@ def start_cheat_sync_thread(httpd):
         time.sleep(25)                       # let the library scan and the first UI poll settle
         while True:
             try:
-                bridge = _first_bridge(httpd)
+                # Cheats are a PS5 capability - the PS4's jailbreak gives a payload no kernel
+                # access, so there is nothing to sync there. Ask for a PS5 by name rather than
+                # taking whichever console happens to sort first.
+                bridge = _bridge_for(httpd, want="ps5")
                 if bridge is not None and os.path.isdir(CHEATS_DIR) and bridge.engine_available():
                     st = bridge.cheat_library_status()
                     missing = st.get("missing_total")

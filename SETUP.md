@@ -142,8 +142,13 @@ this app does not reach into the PS4's jailbreak.
 
 ### 2.1c The PS4's home-screen app
 
-`PKG-MUTANT-SHOP-PS4-APP.pkg` is a real PS4 application that puts the shop on the console's home
+The PS4's home-screen app is a real PS4 application that puts the shop on the console's home
 screen, so it opens from an icon instead of only existing while a payload is loaded.
+
+**It is not a file you download.** There are three artefacts and no more: `PKG-MUTANT-SHOP.exe`,
+`PKG-MUTANT-SHOP.elf` for the PS5 and `PKG-MUTANT-SHOP-PS4.elf` for the PS4. The application's
+package is carried *inside* both the PS4 ELF and the exe, so whichever of them is running can put
+the icon on the console without anything else being present.
 
 **The PC installs it for you** the first time it sees a PS4 that does not have it, and Settings ->
 Your consoles -> **PS4 home screen app** shows its state with a button to put it back. That row
