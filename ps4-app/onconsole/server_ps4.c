@@ -3162,8 +3162,12 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
      * each says what is true instead of going quiet. The POST side of cheats and mods already did
      * this; the GET side did not, which is how /api/cheat/paths answered {} to the settings panel.
      */
+    /* /api/mem is here rather than in a second block further down. There WAS a second copy of
+       this refusal, and because this one runs first it only ever saw /api/mem - where it answered
+       the same refusal WITHOUT the "platform" key, so the one path that reached it got a different
+       shape from every other path in the set. One list, one answer. */
     if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
-        !strncmp(path, "/api/patch", 10)) {
+        !strncmp(path, "/api/patch", 10) || !strncmp(path, "/api/mem", 8)) {
         send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
                       "\"error\":\"Mods and cheats are not available on the PS4 yet\"}");
         return;
@@ -3725,16 +3729,6 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         return;
     }
 
-    /* The cheat/patch engine writes another process's memory through the kernel. Under GoldHEN we
-       have no kernel access at all, so rather than answer an empty stub that looks like a broken
-       button, these say what is true. */
-    if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
-        !strncmp(path, "/api/patch", 10) || !strncmp(path, "/api/mem", 8)) {
-        send_json(fd, "{\"ok\":false,\"unsupported\":true,"
-                      "\"error\":\"Mods and cheats are not available on the PS4 yet\"}");
-        return;
-    }
-
     if (!strcmp(path, "/") || path[0] == 0 || strncmp(path, "/api/", 5)) {
         serve_static(fd, path, req);
         return;
@@ -3871,6 +3865,15 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         json_str_field(body ? body : "", "type", ptype, sizeof(ptype));
         long long psize = json_num_field(body ? body : "", "size");
         if (!cid[0]) pkg_content_id_from_url_name(uri, cid, sizeof(cid));
+        /* ASK THE CONSOLE BEFORE REFUSING. Both busy checks below are only as true as the last
+           poll: nothing in this process advances g_job.state on its own - it moves when a route
+           reads it - so an install that finished while nobody was looking at the page leaves the
+           slot still saying "downloading". Both guards then answer "An install is already running
+           on this PS4" on a console that is doing nothing, and the guard that exists to stop a
+           second install from orphaning the first becomes a lock-out that only a reload clears.
+           Every other busy check in this file refreshes first (install_local_pkg, the direct lane,
+           /api/engine/install-spawn); these two were the pair that did not. */
+        job_refresh();
         if (!strcmp(mode, "queued")) {
             pthread_mutex_lock(&g_job_lock);
             int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
@@ -3935,6 +3938,18 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         pthread_mutex_unlock(&g_job_lock);
         send_json(fd, "{\"ok\":true,\"queued\":true}");
+        return;
+    }
+    /* THE SAVE BUTTON PAINTED GREEN AND SAVED NOTHING, and only the POST half of it. handle_get
+       already answers /api/config with saved:false, which is what makes Settings show its
+       read-only banner instead of live fields - but the page SAVES with a POST, and a POST for
+       that path fell through to the 200 {} at the bottom of this function. No `saved`, no
+       `on_console`: the page read that as a save that had worked, painted a green tick, and then
+       the next poll refilled every field from a config that had never changed. These settings live
+       in the PC's config.json and this console has nowhere to put them, so both verbs now answer
+       the same sentence - which is the one the PS5 build answers too. */
+    if (!strcmp(path, "/api/config")) {
+        send_json(fd, "{\"ok\":true,\"saved\":false,\"on_console\":true,\"platform\":\"ps4\"}");
         return;
     }
     if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
