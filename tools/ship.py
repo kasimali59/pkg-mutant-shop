@@ -75,6 +75,14 @@ def main():
             continue
         s = sha(src)
 
+        # ALREADY THERE IS NOT A COPY. Without this, an artifact that is correct but happens to be
+        # RUNNING - which the companion exe usually is - is reported LOCKED on a release where it
+        # did not change at all, and a real failure would be lost among the noise.
+        if os.path.exists(dst) and sha(dst) == s:
+            print("[ok     ] %-26s %10d bytes  %s  (%s, already current)"
+                  % (name, os.path.getsize(dst), s[:16], what))
+            continue
+
         if not check_only:
             try:
                 shutil.copy2(src, dst)

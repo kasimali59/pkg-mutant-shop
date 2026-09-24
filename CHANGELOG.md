@@ -112,6 +112,76 @@ two places it *tells the owner where to go*: both notifications had `127.0.0.1:8
 hand. Moving the port would have left the icon directing the owner to the old address - on the one
 screen they are looking at precisely because something is not where they expected it.
 
+### One caller takes the PS4's install slot, not twelve
+
+The busy check was check-then-act, and the gap was a whole BGFT registration wide. Every route that
+starts a transfer read `active` under the lock, **released the lock**, registered a task with the
+console, and only then took the lock again to fill the slot. Requests arriving inside that gap all
+read "not busy", all registered a task, and the last one overwrote the slot - so the earlier tasks
+went on downloading with nothing following them, while progress, the finished check and the cancel
+button all described the last package. The guard that was added for exactly this narrowed the
+window instead of closing it.
+
+**Measured on the PS4, in the console's own install log.** Twelve concurrent presses of Start queue,
+the same test minutes apart, the two builds differing only in this change:
+
+| | `install: register failed ... RACEPROBE`, same second |
+| --- | ---: |
+| without the claim | **12** |
+| with the claim | **1** |
+
+**Why the PS4 and not the PS5.** The PS5 payload has the same routes and does not have this bug: its
+accept loop is single-threaded, so only one request is ever inside a handler, and its own comment
+says so. The PS4 spawns a thread per connection. It inherited the shape and changed the concurrency
+model underneath it. An independent read of all five PS5 install decision points found every one
+already atomic, and `spawn_lane_claim()` there already carries a comment recording that this same
+bug was found and fixed on that side. The PS5 is not touched.
+
+Six lanes, not the two first reported: `install_local_pkg`, the direct lane,
+`/api/engine/install-spawn`, `/api/queue/start`, a row's `/retry` and `POST /api/install`. The
+`mode:"queued"` branch never had it - it tests and fills under one lock hold, which is the pattern
+this brings to the rest.
+
+**A token, not a flag**, and that distinction is the whole design. The first version committed
+against "is a claim outstanding", which is not the question: a cancel arriving mid-registration
+clears the claim - correctly, so the committer knows to hand its task back - but it also frees the
+slot, so a *second* install can claim before the first returns. The first would then find the
+boolean set again, believe the claim was still its own, and write its task id over the second one's
+row. Two live tasks, one slot: the bug, reintroduced by the fix for it. An adversarial read caught
+that after the flag version had been written.
+
+**Nothing is ever handed a task id BGFT never issued.** What the service does with one is written
+down nowhere - not in `bgft.h`, not in the OpenOrbis headers it was copied from, not in the SDK this
+builds against (which has no BGFT header at all, which is why every symbol is `dlsym`'d), not in the
+link stub (which is codeless), and there is no GoldHEN source or firmware dump on this machine. The
+one measurement the repo holds is about an id that *was* valid and has since been unregistered,
+which does not transfer. So the answer is not to ask: the file already encodes that as a convention -
+`bgft_release()` returns early on `BGFT_INVALID_TASK_ID` - and everything that could reach the
+service during a claim now follows it. `job_refresh()` returns before it even reads the task, the
+stranded-task sweeper does not run, and the two cancel routes guard the stop call they were making
+**unguarded**. That last one is a pre-existing bug: a direct install has carried
+`BGFT_INVALID_TASK_ID` since that lane was written, so cancelling a local install has been calling
+`stop(-1)` all along.
+
+And "no task" is `-1` everywhere now, never `0`. `memset` leaves `0`, and `0` is a value BGFT really
+issues - the sweepers accept it, observed ids are `0x75` and `0x77`, and the OpenOrbis header shows
+PUP and Store tasks share that id space. A zeroed slot reaching a stop call would be asking the
+console to stop something that is not ours.
+
+**Found while racing it:** Start queue and Clear are POSTs, their handlers are GET branches, and the
+PS4 had no delegation - so both fell through to the `200 {}` at the bottom of `handle_post`. Two dead
+buttons on any page a PS4 serves, answering exactly like success. The race test passed by GET and did
+nothing at all by POST, which is how it surfaced.
+
+`tools/test_job_claim.py` keeps the race. It installs nothing - the url it queues has no `.pkg`,
+which BGFT refuses at registration - and it checks the three things that are easy to get wrong once a
+claim exists: the losers are refused rather than queued behind, the row is held again afterwards, and
+the slot is not wedged. Verified at 8, 12 and 16 concurrent: one attempt every time.
+
+*Not verified on hardware: a successful install through the new commit path. The abort path runs on
+every boot - the dashboard-app reinstall has been failing at registration with `0x80991404` since
+before this change - and behaves.*
+
 ### The PS4 stops asserting things it never checked
 
 `"ftp_online":true, "ftp_port":2121` was a claim on the strength of nothing, in three routes at
