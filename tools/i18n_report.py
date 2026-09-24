@@ -163,7 +163,7 @@ def used_keys(s):
 # revisited. So they are being converted, and this number is the count of what is left.
 #
 # A build fails if the count goes UP. Lower it whenever you convert some; never raise it.
-RAW_DIALOG_CEILING = 28
+RAW_DIALOG_CEILING = 19
 
 DIALOG_CALLS = ("toast", "toastHtml", "confirm", "window.confirm", "prompt")
 

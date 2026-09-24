@@ -905,6 +905,21 @@ html{scroll-behavior:smooth}
 [dir="rtl"] .led{margin-right:0;margin-left:8px}
 [dir="rtl"] .menu button,[dir="rtl"] .modtile,[dir="rtl"] .tipbox{text-align:right}
 [dir="rtl"] .dback svg,[dir="rtl"] .backbtn svg{transform:scaleX(-1)}
+/* TOASTS. The corner and the coloured status bar are both physical-left, so in Arabic the stack
+   sat in the empty corner with the one mark that tells ok from err at a glance pinned to the far
+   END of the sentence. The phone rules (640px) and the landscape rule already set BOTH left and
+   right, so the strip is full width there and only the desktop corner is one-sided - the flip is
+   scoped to match, because [dir="rtl"] .toasts would otherwise out-specify them inside their own
+   media queries. The landscape twin is repeated verbatim for that same reason. */
+@media (min-width:641px){ [dir="rtl"] .toasts{left:auto;right:18px} }
+@media (min-width:641px) and (max-width:960px) and (max-height:540px){
+  [dir="rtl"] .toasts{left:calc(12px + env(safe-area-inset-left,0px));
+    right:calc(12px + env(safe-area-inset-right,0px))}
+}
+[dir="rtl"] .toast{border-left:1px solid var(--line2);border-right:3px solid var(--accent);animation-name:slidein-rtl}
+[dir="rtl"] .toast.ok{border-right-color:var(--ok)}
+[dir="rtl"] .toast.err{border-right-color:var(--danger)}
+@keyframes slidein-rtl{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
 
 /* ======================= PHONE =============================================================
    WHY THE PHONE SHOWED NOTHING, measured on the live page at 375x812 and 390x844:
@@ -1156,7 +1171,11 @@ html{scroll-behavior:smooth}
 <main>
   <div id="demoBanner" class="demo-banner" style="display:none">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-    <span id="demoText" data-i18n="ui_loading">Loading…</span>
+    <!-- NO data-i18n HERE. applyI18n() rewrites every [data-i18n] element from the dictionary,
+         so changing language on an empty library replaced this instruction with "Loading" and
+         nothing ever put it back: setLang() repaints eight things and loadLibrary() is not one of
+         them. demoSay() writes the words and remembers the keys instead. -->
+    <span id="demoText">Loading…</span>
   </div>
   <div class="grid" id="grid"></div>
   <div class="empty" id="empty" style="display:none">No titles match your filters.</div>
@@ -1239,9 +1258,9 @@ html{scroll-behavior:smooth}
 
         <!-- ================= CONSOLE ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your PS5</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n-tip="ui_tip_test_console" data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your consoles</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n-tip="ui_tip_test_console" data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
           <div class="frow">
-            <span class="flabel" data-i18n="ui_console_address">Console address</span>
+            <span class="flabel" data-i18n="ui_console_address">PS5 address</span>
             <!-- An address is fifteen characters. A full-width box for it just looked unfinished. -->
             <input id="setIp" class="short" placeholder="192.168.1.50" aria-label="Console address"
                    data-i18n-aria="ui_console_address"
@@ -1254,6 +1273,7 @@ html{scroll-behavior:smooth}
           <div class="frow">
             <span class="flabel" data-i18n="ui_ps4_address">PS4 address</span>
             <input id="setIp4" class="short" placeholder="192.168.1.60" aria-label="PS4 address"
+                   data-i18n-aria="ui_ps4_address"
                    autocomplete="off" spellcheck="false">
           </div>
           <!-- THE PS4'S ICON. A PS5 gets its tile from the ELF; a PS4 cannot work that way,
@@ -1327,10 +1347,17 @@ html{scroll-behavior:smooth}
                (index.html:3680) - which a bare <span> can never fire, because it takes no focus
                without a tabindex. This is the one folder you have to type, so it is a row. -->
           <div class="chips">
-            <span class="chip tip" id="cpDrop" tabindex="0" data-tip="Where to drop new cheat files" data-i18n-tip="ui_tip_cp_drop" data-i18n="ui_chip_inbox">Inbox</span>
+            <!-- NO data-i18n-tip ON THESE CHIPS. openSettings() writes the real cheat FOLDER PATH
+                 into each chip's data-tip from /api/cheats/paths, and applyI18n() rewrites data-tip
+                 from the dictionary for every [data-i18n-tip] element - so changing language threw
+                 the path away, and repaintSettingsWords() never asks for the paths again, so it
+                 stayed gone until Settings was reopened. The same trap this file already documents
+                 for #consoleNoteBody. The data-tip written here is only what shows in the moment
+                 before /api/cheats/paths answers. -->
+            <span class="chip tip" id="cpDrop" tabindex="0" data-tip="Where to drop new cheat files" data-i18n="ui_chip_inbox">Inbox</span>
             <span class="chip tip" id="cpJson" tabindex="0" data-tip="JSON cheats">JSON</span>
             <span class="chip tip" id="cpShn" tabindex="0" data-tip="SHN cheats">SHN</span>
-            <span class="chip tip" id="cpMc4" tabindex="0" data-tip="MC4 cheats" data-i18n-tip="ui_tip_cp_mc4">MC4</span>
+            <span class="chip tip" id="cpMc4" tabindex="0" data-tip="MC4 cheats">MC4</span>
             <span class="chip tip" id="cpPatch" tabindex="0" data-tip="Patches" data-i18n="ui_chip_patches">Patches</span>
           </div>
           <!-- THE INBOX PATH IS STILL PRINTED. A chip keeps its folder in a tooltip, and .tipbox
@@ -1667,15 +1694,20 @@ var I18N={
     gp_dest_installed_drive:"the installed drive",
     gp_dest_addon_tip:"Patches and reinstalls must go to the same drive as the game, so this is chosen automatically.",
     gp_dest_console_default:"Installs to: console default",
+    gp_dest_default_tip_ps4:"A PKG install follows the PS4's own Application Install Location setting (Settings > Storage > OPTIONS). Change it on the console to install to extended storage.",
     gp_dest_default_tip:"PS4/PS5 PKG installs follow the PS5's own Installation Location setting (Settings > Storage). Change it on the console to install to Extended Storage.",
     gp_dest_default_tip_ps4:"PKG installs follow the PS4's own Installation Location setting (Settings > Storage). Change it on the console to install to extended storage.",
     tm_all_mods_disabled:"All mods disabled",
     tm_moved_ok:"Moved {p1} ✓",
+    tm_started_smallest_first:"Started {n} — smallest first, so something finishes soon",
+    tm_install_lane_is_clear:"The install lane is clear — ready for the next one",
     tm_there_was_nothing_waiting_to_start:"There was nothing waiting to start",
     tm_helpers_start_immediately_least_safe_after_wak:"Helpers start immediately — least safe after waking from rest",
     tm_nothing_left_to_stop_safe_to_rest:"Nothing left to stop — safe to rest the console",
     tm_helpers_will_not_auto_start_load_them:"Helpers will not auto-start — load them from Payload Manager",
     tm_helpers_will_auto_start_with_the_app:"Helpers will auto-start with the app",
+    msg_cheat_filed_one:"Filed 1 new cheat file",
+    msg_cheat_filed_many:"Filed {n} new cheat files",
     tm_no_new_files_found:"No new files found",
     tm_library_rescanned:"Library rescanned",
     tm_games_ps4_ps5_folders_already_exist:"Games/PS4 & PS5 folders already exist",
@@ -1685,6 +1717,9 @@ var I18N={
     tm_the_move_did_not_finish_nothing_was:"The move did not finish — nothing was removed",
     tm_the_copy_could_not_be_started:"The copy could not be started",
     tm_the_old_copy_could_not_be_removed:"The old copy could not be removed",
+    tm_there_was_no_backup_on_the_console:"There was no backup on the console",
+    tm_removed_from_the_console:"Removed from the console",
+    tm_freed:" — {size} freed",
     tm_the_console_could_not_delete_it:"The console could not delete it",
     tm_the_cheats_could_not_be_turned_off:"The cheats could not be turned off",
     tm_that_cheat_could_not_be_changed:"That cheat could not be changed",
@@ -1717,6 +1752,7 @@ var I18N={
     tm_complete:"✓ Complete — {p1}",
     tm_inconclusive:"Inconclusive — {p1}",
     tm_clean_reinstall_of_the_copy_on_the:"Clean reinstall of “{p1}”?\n\nThe copy on the PS5 is deleted first, then a fresh one is sent. Your copy on this PC is not touched.",
+    tm_clean_reinstall_of_1_on_your_console:"Clean reinstall of “{p1}”:\n\n1) On your {console}: delete it (Options → Delete)\n2) Then press OK here to reinstall a fresh copy.",
     tm_clean_reinstall_of_1_on_your_ps5:"Clean reinstall of “{p1}”:\n\n1) On your PS5: delete it (Options → Delete)\n2) Then press OK here to reinstall a fresh copy.",
     tm_delete_from_the_ps5_this_removes_the:"Delete “{p1}” from the PS5?\n\nThis removes the backup file from the console's drive, so it will not come back the next time the console scans.\n\nYour copy on this PC is NOT touched.\n\nDelete it from the PS5 home screen as well if it is still showing there.",
     tm_removing_from_the_ps5:"Removing {p1} from the PS5…",
@@ -1762,6 +1798,7 @@ var I18N={
     tm_the_pc_did_not_answer:"The PC did not answer",
     tm_library_updated:"Library updated",
     tm_the_pc_companion_stopped_answering_showing_the:"The PC companion stopped answering — showing the console's own library while it looks for one",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Stop all homebrew before rest mode?\n\nThis shuts down everything of ours running on the PS4, PKG MUTANT SHOP itself last.\n\nYour jailbreak is not touched, but the shop has to be loaded again after the console wakes.",
     tm_stop_all_homebrew_before_rest_mode_this:"Stop all homebrew before rest mode?\n\nThis shuts down every homebrew payload on the PS5 - the game-backup services, anything else you have loaded, and PKG MUTANT SHOP itself last.\n\nYour jailbreak (kstuff) and Payload Manager keep running, so nothing needs re-jailbreaking. Load the shop again from Payload Manager when you come back.",
     tm_the_console_did_not_confirm_that_anything:"The console did not confirm that anything was stopped — do NOT rest yet",
     tm_homebrew_stopped_safe_to_rest_the_console:"Homebrew stopped — safe to rest the console",
@@ -1871,6 +1908,12 @@ var I18N={
     gp_patch_apply_failed:"That patch could not be applied",
     gp_lib_loading:"Loading…",
     gp_lib_empty_no_pkgs:"No PKGs found. Set library.local_paths in config.json (drop your .pkg / .ffpfsc files there), then click Rescan in Settings.",
+    gp_lib_empty_any:"No games found yet. Copy your .pkg / .ffpfsc files into the games folder (Settings > Your games shows where), then press Rescan there.",
+    gp_lib_empty_ps4:"No games found yet. Copy your .pkg files into the games folder (Settings > Your games shows where), then press Rescan there.",
+    gp_lib_shop_down:"The shop on the PS5 is not answering — load it again from Payload Manager.",
+    gp_lib_shop_down_ps4:"The shop on the PS4 is not answering — run the jailbreak, then open PKG MUTANT SHOP on the console.",
+    gp_lib_pc_down:"The PC with the library is not answering — is PKG MUTANT SHOP still open on it?",
+    gp_lib_showing_last:"Showing the last list it sent.",
     gp_lib_preview:"Interface preview. Run the companion (start.cmd) to load your real library and connect your PS5.",
     gp_lib_unreachable:"Companion not reachable. Start it with start.cmd, then reload this page.",
     msg_err_no_local_cheat_found:"There is no cheat file for this game yet — drop one into the cheats inbox and press Rescan in Settings > Cheats & mods",
@@ -1905,6 +1948,7 @@ var I18N={
     msg_q_state_working:"working",
     msg_q_pct_working:"working",
     msg_q_retry_tip:"Try this game again. Anything left over from the last attempt is cleared first.",
+    msg_q_cancel_tip_pkg:"Remove this from the queue. A package the console has already accepted finishes on its own. Nothing already installed on the console is removed.",
     msg_q_cancel_tip:"Remove this from the queue. A backup the PS5 is still downloading is asked to stop; a package the console has already accepted finishes on its own. Nothing already installed on the PS5 is removed.",
     msg_drive_free:"free",
     msg_drive_not_enough_room:"  — not enough room",
@@ -1934,6 +1978,7 @@ var I18N={
     msg_confirm_second_copy_b:".\n\nSending it to ",
     msg_confirm_second_copy_c:" leaves that old copy in place, and the PS5 may mount either one.\n\nTo put it on another drive properly, cancel and use “Move to another drive” in the ⋯ menu — that copies it, checks it, then removes the original.\n\nSend a second copy to ",
     msg_confirm_second_copy_d:" anyway?",
+    msg_already_installed_on_console:"{name} is already installed on the {console}.",
     msg_confirm_already_installed_suffix:" is already installed on the PS5.",
     msg_confirm_reinstall_anyway:"\n\nReinstall it anyway?\n\nThe console overwrites the existing copy. Your saves are not touched.",
     msg_btn_needs_base_game:"Needs base game",
@@ -2023,6 +2068,7 @@ var I18N={
     msg_log_reading:"Reading the console…",
     msg_log_nothing_yet:"Nothing logged yet — the console writes to this the first time it installs something.",
     msg_log_no_answer:"The console did not answer. Load PKG MUTANT SHOP on it from Payload Manager.",
+    msg_discover_no_answer:"The PC did not answer, so nothing was scanned.",
     msg_discover_scanning:"Scanning the network…",
     msg_discover_ports_prefix:" — ports ",
     msg_discover_scan_failed:"The network could not be scanned. Check this device is still on the network, then try again.",
@@ -2294,6 +2340,20 @@ var I18N={
     gp_dest_addon_tip:"Los parches y las reinstalaciones tienen que ir al mismo disco que el juego, así que se elige automáticamente.",
     gp_dest_console_default:"Se instala en: destino de la consola",
     gp_dest_default_tip:"Las instalaciones de PKG de PS4/PS5 siguen el ajuste de Ubicación de instalación de la propia PS5 (Ajustes > Almacenamiento). Cámbialo en la consola para instalar en el Almacenamiento ampliado.",
+    gp_lib_empty_any:"Aún no se encontró ningún juego. Copia tus archivos .pkg / .ffpfsc en la carpeta de juegos (Settings > Your games indica dónde está) y pulsa Volver a buscar ahí.",
+    gp_lib_empty_ps4:"Aún no se encontró ningún juego. Copia tus archivos .pkg en la carpeta de juegos (Settings > Your games indica dónde está) y pulsa Volver a buscar ahí.",
+    msg_already_installed_on_console:"{name} ya está instalado en {console}.",
+    msg_cheat_filed_many:"Se guardaron {n} archivos de trucos nuevos",
+    msg_cheat_filed_one:"Se guardó 1 archivo de trucos nuevo",
+    msg_discover_no_answer:"El PC no respondió, así que no se analizó nada.",
+    msg_q_cancel_tip_pkg:"Quita esto de la cola. Un paquete que la consola ya aceptó termina por su cuenta. No se elimina nada de lo que ya está instalado en la consola.",
+    tm_clean_reinstall_of_1_on_your_console:"Reinstalación limpia de “{p1}”:\n\n1) En tu {console}: elimínalo (Options → Delete)\n2) Luego pulsa Aceptar aquí para reinstalar una copia nueva.",
+    tm_freed:" — {size} liberados",
+    tm_install_lane_is_clear:"La vía de instalación está libre — lista para el siguiente",
+    tm_removed_from_the_console:"Eliminado de la consola",
+    tm_started_smallest_first:"Se iniciaron {n} — primero los más pequeños, para que algo termine pronto",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"¿Detener todo el homebrew antes del modo de reposo?\n\nEsto cierra todo lo nuestro que se esté ejecutando en la PS4, y PKG MUTANT SHOP el último.\n\nTu jailbreak no se toca, pero habrá que volver a cargar la tienda cuando la consola despierte.",
+    tm_there_was_no_backup_on_the_console:"No había ninguna copia de seguridad en la consola",
     gp_dest_default_tip_ps4:"Las instalaciones de PKG siguen el ajuste Installation Location de la propia PS4 (Settings > Storage). Cámbialo en la consola para instalar en el almacenamiento ampliado.",
     gp_tip_console_asleep:"{console} está en reposo. Actívala primero o esto quedará en la cola hasta que responda.",
     msg_conn_shop_silent_ps4:"La tienda en la PS4 no responde",
@@ -2919,6 +2979,20 @@ var I18N={
     gp_dest_addon_tip:"Os patches e as reinstalações têm de ir para a mesma unidade do jogo, por isso isto é escolhido automaticamente.",
     gp_dest_console_default:"Instala em: predefinição da consola",
     gp_dest_default_tip:"As instalações de PKG de PS4/PS5 seguem a definição de Localização de Instalação da própria PS5 (Definições > Armazenamento). Altera-a na consola para instalar no Armazenamento Expandido.",
+    gp_lib_empty_any:"Nenhum jogo encontrado ainda. Copie seus arquivos .pkg / .ffpfsc para a pasta de jogos (Settings > Your games mostra onde ela fica) e depois pressione Rescan ali.",
+    gp_lib_empty_ps4:"Nenhum jogo encontrado ainda. Copie seus arquivos .pkg para a pasta de jogos (Settings > Your games mostra onde ela fica) e depois pressione Rescan ali.",
+    msg_already_installed_on_console:"{name} já está instalado no {console}.",
+    msg_cheat_filed_many:"{n} novos arquivos de cheat guardados",
+    msg_cheat_filed_one:"1 novo arquivo de cheat guardado",
+    msg_discover_no_answer:"O PC não respondeu, então nada foi verificado.",
+    msg_q_cancel_tip_pkg:"Remove isto da fila. Um pacote que o console já aceitou termina sozinho. Nada que já está instalado no console é removido.",
+    tm_clean_reinstall_of_1_on_your_console:"Reinstalação limpa de “{p1}”:\n\n1) No seu {console}: apague-o (Options → Delete)\n2) Depois pressione OK aqui para reinstalar uma cópia nova.",
+    tm_freed:" — {size} liberados",
+    tm_install_lane_is_clear:"A via de instalação está livre — pronta para o próximo pacote",
+    tm_removed_from_the_console:"Removido do console",
+    tm_started_smallest_first:"{n} iniciados — os menores primeiro, para algo terminar logo",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Parar todo o homebrew antes do modo de repouso?\n\nIsto encerra tudo o que é nosso rodando no PS4, e o PKG MUTANT SHOP por último.\n\nO seu jailbreak não é afetado, mas a loja precisa ser carregada de novo depois que o console acordar.",
+    tm_there_was_no_backup_on_the_console:"Não havia backup no console",
     gp_dest_default_tip_ps4:"As instalações de PKG seguem a opção Installation Location do próprio PS4 (Settings > Storage). Altere-a no console para instalar no armazenamento estendido.",
     gp_tip_console_asleep:"O {console} está em repouso. Ative-o primeiro, ou isto fica na fila até ele responder.",
     msg_conn_shop_silent_ps4:"A loja no PS4 não responde",
@@ -3544,6 +3618,20 @@ var I18N={
     gp_dest_addon_tip:"Les patchs et les réinstallations doivent aller sur le même disque que le jeu : le choix est donc automatique.",
     gp_dest_console_default:"Installation sur : emplacement par défaut de la console",
     gp_dest_default_tip:"Les installations de PKG PS4/PS5 suivent le réglage Emplacement d'installation de la PS5 (Paramètres > Stockage). Modifiez-le sur la console pour installer sur le stockage étendu.",
+    gp_lib_empty_any:"Aucun jeu trouvé pour l'instant. Copiez vos fichiers .pkg / .ffpfsc dans le dossier des jeux (Settings > Your games vous indique où il se trouve), puis appuyez sur Réanalyser à cet endroit.",
+    gp_lib_empty_ps4:"Aucun jeu trouvé pour l'instant. Copiez vos fichiers .pkg dans le dossier des jeux (Settings > Your games vous indique où il se trouve), puis appuyez sur Réanalyser à cet endroit.",
+    msg_already_installed_on_console:"{name} est déjà installé sur {console}.",
+    msg_cheat_filed_many:"{n} nouveaux fichiers de triche classés",
+    msg_cheat_filed_one:"1 nouveau fichier de triche classé",
+    msg_discover_no_answer:"Le PC n'a pas répondu, donc rien n'a été analysé.",
+    msg_q_cancel_tip_pkg:"Retire cet élément de la file d'attente. Un paquet que la console a déjà accepté se termine tout seul. Rien de ce qui est déjà installé sur la console n'est supprimé.",
+    tm_clean_reinstall_of_1_on_your_console:"Réinstallation propre de « {p1} » :\n\n1) Sur votre {console} : supprimez-le (Options → Delete)\n2) Puis appuyez sur OK ici pour réinstaller une copie neuve.",
+    tm_freed:" — {size} d'espace libéré",
+    tm_install_lane_is_clear:"La voie d'installation est libre — prête pour la prochaine installation",
+    tm_removed_from_the_console:"Supprimé de la console",
+    tm_started_smallest_first:"{n} lancés — les plus petits d'abord, pour qu'une installation se termine rapidement",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Arrêter tous les homebrews avant le mode repos ?\n\nCela ferme tout ce qui nous appartient et tourne sur la PS4, PKG MUTANT SHOP en dernier.\n\nVotre jailbreak n'est pas touché, mais la boutique devra être rechargée au réveil de la console.",
+    tm_there_was_no_backup_on_the_console:"Il n'y avait aucune sauvegarde sur la console",
     gp_dest_default_tip_ps4:"Les installations de PKG suivent le réglage Installation Location de la PS4 (Settings > Storage). Modifiez-le sur la console pour installer sur le stockage étendu.",
     gp_tip_console_asleep:"La {console} est en veille. Réveillez-la d'abord, sinon cette action reste dans la file d'attente jusqu'à sa réponse.",
     msg_conn_shop_silent_ps4:"La boutique sur la PS4 ne répond pas",
@@ -4169,6 +4257,20 @@ var I18N={
     gp_dest_addon_tip:"Patches und Neuinstallationen müssen auf dasselbe Laufwerk wie das Spiel, deshalb wird das automatisch gewählt.",
     gp_dest_console_default:"Installiert auf: Standard der Konsole",
     gp_dest_default_tip:"PS4-/PS5-PKG-Installationen folgen der Einstellung „Installationsort“ der PS5 (Einstellungen > Speicher). Ändere sie auf der Konsole, um auf den erweiterten Speicher zu installieren.",
+    gp_lib_empty_any:"Noch keine Spiele gefunden. Kopiere deine .pkg- / .ffpfsc-Dateien in den Spieleordner (Settings > Your games zeigt, wo er liegt), und drücke dort anschließend auf Rescan.",
+    gp_lib_empty_ps4:"Noch keine Spiele gefunden. Kopiere deine .pkg-Dateien in den Spieleordner (Settings > Your games zeigt, wo er liegt), und drücke dort anschließend auf Rescan.",
+    msg_already_installed_on_console:"{name} ist auf {console} bereits installiert.",
+    msg_cheat_filed_many:"{n} neue Cheat-Dateien abgelegt",
+    msg_cheat_filed_one:"1 neue Cheat-Datei abgelegt",
+    msg_discover_no_answer:"Der PC hat nicht geantwortet, deshalb wurde nichts durchsucht.",
+    msg_q_cancel_tip_pkg:"Entfernt diesen Eintrag aus der Warteschlange. Ein Paket, das die Konsole bereits angenommen hat, wird von selbst fertig. Nichts, was bereits auf der Konsole installiert ist, wird entfernt.",
+    tm_clean_reinstall_of_1_on_your_console:"Saubere Neuinstallation von „{p1}“:\n\n1) Auf {console}: dort löschen (Options → Delete)\n2) Dann hier auf OK drücken, um eine frische Kopie zu installieren.",
+    tm_freed:" — {size} freigegeben",
+    tm_install_lane_is_clear:"Die Installationsspur ist frei — bereit für die nächste Installation",
+    tm_removed_from_the_console:"Von der Konsole entfernt",
+    tm_started_smallest_first:"{n} gestartet — die kleinsten zuerst, damit bald etwas fertig ist",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Alle Homebrew vor dem Ruhemodus beenden?\n\nDamit wird alles von uns beendet, was auf der PS4 läuft, PKG MUTANT SHOP selbst zuletzt.\n\nDein Jailbreak bleibt unberührt, aber der Shop muss neu geladen werden, sobald die Konsole wieder aufwacht.",
+    tm_there_was_no_backup_on_the_console:"Auf der Konsole war kein Backup vorhanden",
     gp_dest_default_tip_ps4:"PKG-Installationen folgen der Einstellung Installation Location der PS4 (Settings > Storage). Ändere sie auf der Konsole, um auf erweiterten Speicher zu installieren.",
     gp_tip_console_asleep:"{console} ist im Ruhemodus. Wecke die Konsole auf, sonst bleibt der Vorgang in der Warteschlange, bis sie antwortet.",
     msg_conn_shop_silent_ps4:"Der Shop auf der PS4 antwortet nicht",
@@ -4794,6 +4896,20 @@ var I18N={
     gp_dest_addon_tip:"パッチと再インストールはゲームと同じドライブに入れる必要があるため、自動で選ばれます。",
     gp_dest_console_default:"インストール先: 本体の設定どおり",
     gp_dest_default_tip:"PS4/PS5 の PKG は、PS5 本体のインストール先の設定 (設定 > ストレージ) に従います。拡張ストレージに入れたいときは本体で変更してください。",
+    gp_lib_empty_any:"ゲームはまだ見つかっていません。.pkg / .ffpfsc ファイルをゲームフォルダー(場所は Settings > Your games に表示されます)にコピーしてから、そこで「再スキャン」を押してください。",
+    gp_lib_empty_ps4:"ゲームはまだ見つかっていません。.pkg ファイルをゲームフォルダー(場所は Settings > Your games に表示されます)にコピーしてから、そこで「再スキャン」を押してください。",
+    msg_already_installed_on_console:"{name} は {console} にインストール済みです。",
+    msg_cheat_filed_many:"新しいチートファイルを {n} 件保存しました",
+    msg_cheat_filed_one:"新しいチートファイルを 1 件保存しました",
+    msg_discover_no_answer:"PC から応答がなかったため、スキャンは行われませんでした。",
+    msg_q_cancel_tip_pkg:"これをキューから取り除きます。本体がすでに受け取ったパッケージは、そのまま最後まで進みます。本体にインストール済みのものが削除されることはありません。",
+    tm_clean_reinstall_of_1_on_your_console:"「{p1}」をクリーンインストールし直します:\n\n1) {console} 側で削除します(Options → Delete)\n2) そのあと、ここで OK を押すと新しいコピーをインストールします。",
+    tm_freed:" — {size} を解放",
+    tm_install_lane_is_clear:"インストールの処理は空きました — 次の一件をすぐ始められます",
+    tm_removed_from_the_console:"本体から削除しました",
+    tm_started_smallest_first:"{n} 件を開始しました — 小さいものから順に進めるので、まもなく最初の一件が終わります",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"スタンバイモードの前に自作ソフトをすべて停止しますか？\n\nPS4 で動作している当アプリ側のものをすべて終了します。PKG MUTANT SHOP 自体は最後に終了します。\n\n脱獄の状態はそのままですが、本体が復帰したあとに PKG MUTANT SHOP を読み込み直す必要があります。",
+    tm_there_was_no_backup_on_the_console:"本体にバックアップはありませんでした",
     gp_dest_default_tip_ps4:"PKG のインストール先は、PS4 本体の Installation Location（Settings > Storage）の設定に従います。拡張ストレージにインストールするには、本体側で設定を変更してください。",
     gp_tip_console_asleep:"{console} がスリープ中です。先に本体を起動してください。そのままの場合は、応答があるまでキューで待機します。",
     msg_conn_shop_silent_ps4:"PS4 のショップが応答していません",
@@ -5419,6 +5535,20 @@ var I18N={
     gp_dest_addon_tip:"الرقع وإعادة التثبيت يجب أن تذهب إلى القرص نفسه الذي عليه اللعبة، فيُختار تلقائيًا.",
     gp_dest_console_default:"يُثبَّت على: الوجهة الافتراضية للجهاز",
     gp_dest_default_tip:"تثبيت حزم PS4/PS5 يتبع إعداد موقع التثبيت في PS5 نفسه (الإعدادات > التخزين). غيّره على الجهاز للتثبيت على التخزين الموسّع.",
+    gp_lib_empty_any:"لا توجد ألعاب حتى الآن. انسخ ملفات .pkg / .ffpfsc إلى مجلد الألعاب (يوضّح مكانه Settings > Your games)، ثم اضغط إعادة الفحص هناك.",
+    gp_lib_empty_ps4:"لا توجد ألعاب حتى الآن. انسخ ملفات .pkg إلى مجلد الألعاب (يوضّح مكانه Settings > Your games)، ثم اضغط إعادة الفحص هناك.",
+    msg_already_installed_on_console:"{name} مثبّت بالفعل على {console}.",
+    msg_cheat_filed_many:"تم حفظ {n} من ملفات الغش الجديدة",
+    msg_cheat_filed_one:"تم حفظ ملف غش جديد واحد",
+    msg_discover_no_answer:"لم يستجب الكمبيوتر، لذا لم يتم فحص أي شيء.",
+    msg_q_cancel_tip_pkg:"إزالة هذا من قائمة الانتظار. أي حزمة قبلها الجهاز بالفعل تُكمل تثبيتها وحدها. ولا يُزال أي شيء مثبّت على الجهاز.",
+    tm_clean_reinstall_of_1_on_your_console:"إعادة تثبيت نظيفة لـ “{p1}”:\n\n1) على {console}: احذفها (Options → Delete)\n2) ثم اضغط موافق هنا لتثبيت نسخة جديدة.",
+    tm_freed:" — تم تحرير {size}",
+    tm_install_lane_is_clear:"مسار التثبيت خالٍ — جاهز للتالي",
+    tm_removed_from_the_console:"تمت الإزالة من الجهاز",
+    tm_started_smallest_first:"تم بدء {n} — الأصغر أولًا، كي ينتهي أحدها قريبًا",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"إيقاف كل برامج الهومبرو قبل وضع الراحة؟\n\nسيؤدي هذا إلى إغلاق كل ما يخصنا ويعمل على PS4، وآخرها PKG MUTANT SHOP نفسه.\n\nكسر الحماية لن يتأثر، لكن يجب تحميل المتجر مرة أخرى بعد استيقاظ الجهاز.",
+    tm_there_was_no_backup_on_the_console:"لم تكن هناك نسخة احتياطية على الجهاز",
     gp_dest_default_tip_ps4:"تتبع عمليات تثبيت PKG إعداد Installation Location الخاص بجهاز PS4 (Settings > Storage). غيّر الإعداد من الجهاز نفسه للتثبيت على وحدة التخزين الموسّعة.",
     gp_tip_console_asleep:"{console} في وضع السكون. أيقظه أولًا، وإلا فسينتظر هذا الطلب في قائمة الانتظار حتى يستجيب الجهاز.",
     msg_conn_shop_silent_ps4:"المتجر على PS4 لا يستجيب",
@@ -5857,6 +5987,20 @@ var I18N={
     gp_dest_console_default:"安装到：主机默认位置",
     gp_dest_console_only_tip:"选择硬盘需要电脑端应用。只用主机时，请在 ⋯ 菜单里用“移动到其他硬盘”把游戏放到你想要的位置。",
     gp_dest_default_tip:"PS4/PS5 的 PKG 安装遵循 PS5 自己的安装位置设置（设置 > 存储）。要装到扩展存储，请在主机上改这项设置。",
+    gp_lib_empty_any:"还没有找到游戏。请把 .pkg / .ffpfsc 文件复制到游戏文件夹（“Settings > Your games” 中会显示位置），然后在那里按“重新扫描”。",
+    gp_lib_empty_ps4:"还没有找到游戏。请把 .pkg 文件复制到游戏文件夹（“Settings > Your games” 中会显示位置），然后在那里按“重新扫描”。",
+    msg_already_installed_on_console:"{name} 已经安装在 {console} 上。",
+    msg_cheat_filed_many:"已归档 {n} 个新的金手指文件",
+    msg_cheat_filed_one:"已归档 1 个新的金手指文件",
+    msg_discover_no_answer:"电脑没有响应，所以没有扫描到任何内容。",
+    msg_q_cancel_tip_pkg:"把这一项从队列中移除。主机已经接收的安装包会自行完成。主机上已安装的内容不会被删除。",
+    tm_clean_reinstall_of_1_on_your_console:"彻底重装“{p1}”：\n\n1）在你的 {console} 上：删除它（“Options” → “Delete”）\n2）然后在这里按“确定”，重新安装一份全新的副本。",
+    tm_freed:" — 已释放 {size}",
+    tm_install_lane_is_clear:"安装通道已空出 — 可以开始下一个了",
+    tm_removed_from_the_console:"已从主机上移除",
+    tm_started_smallest_first:"已开始 {n} 个 — 从最小的开始，很快就会有一个完成",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"进入待机模式前停止所有自制程序？\n\n这会关闭我们在 PS4 上运行的全部程序，PKG MUTANT SHOP 自己最后关闭。\n\n越狱不会受到影响，但主机唤醒后需要重新加载本商店。",
+    tm_there_was_no_backup_on_the_console:"主机上没有备份",
     gp_dest_default_tip_ps4:"PKG 安装会遵循 PS4 自身的 Installation Location 设置（Settings > Storage）。若要安装到扩展存储，请在主机上更改该设置。",
     gp_tip_console_asleep:"{console} 正在休眠。请先唤醒它，否则此项会一直在队列中等待，直到它响应。",
     msg_conn_shop_silent_ps4:"PS4 上的商店没有响应",
@@ -6523,6 +6667,20 @@ var I18N={
     gp_dest_console_default:"यहाँ इंस्टॉल होगा: कंसोल की डिफ़ॉल्ट जगह",
     gp_dest_console_only_tip:"ड्राइव चुनने के लिए PC ऐप चाहिए। सिर्फ़ कंसोल पर, ⋯ मेनू के “दूसरी ड्राइव पर ले जाएँ” से गेम को अपनी पसंद की जगह रखें।",
     gp_dest_default_tip:"PS4/PS5 PKG इंस्टॉल PS5 की अपनी Installation Location सेटिंग (Settings > Storage) के अनुसार होते हैं। एक्सटेंडेड स्टोरेज पर इंस्टॉल करना हो तो इसे कंसोल पर बदलें।",
+    gp_lib_empty_any:"अभी तक कोई गेम नहीं मिला। अपनी .pkg / .ffpfsc फ़ाइलें गेम्स फ़ोल्डर में कॉपी करें (Settings > Your games में जगह दिखती है), फिर वहाँ रीस्कैन दबाएँ।",
+    gp_lib_empty_ps4:"अभी तक कोई गेम नहीं मिला। अपनी .pkg फ़ाइलें गेम्स फ़ोल्डर में कॉपी करें (Settings > Your games में जगह दिखती है), फिर वहाँ रीस्कैन दबाएँ।",
+    msg_already_installed_on_console:"{name} पहले से ही {console} पर इंस्टॉल है।",
+    msg_cheat_filed_many:"{n} नई चीट फ़ाइलें सहेजी गईं",
+    msg_cheat_filed_one:"1 नई चीट फ़ाइल सहेजी गई",
+    msg_discover_no_answer:"PC ने जवाब नहीं दिया, इसलिए कुछ भी स्कैन नहीं हुआ।",
+    msg_q_cancel_tip_pkg:"इसे कतार से हटाएँ। जिस पैकेज को कंसोल पहले ही स्वीकार कर चुका है, वह अपने आप पूरा होगा। कंसोल पर पहले से इंस्टॉल कुछ भी नहीं हटाया जाता।",
+    tm_clean_reinstall_of_1_on_your_console:"“{p1}” को नए सिरे से इंस्टॉल करना:\n\n1) अपने {console} पर: इसे हटाएँ (Options → Delete)\n2) फिर नई प्रति इंस्टॉल करने के लिए यहाँ OK दबाएँ।",
+    tm_freed:" — {size} खाली हुआ",
+    tm_install_lane_is_clear:"इंस्टॉल लेन खाली है — अगले के लिए तैयार",
+    tm_removed_from_the_console:"कंसोल से हटा दिया गया",
+    tm_started_smallest_first:"{n} शुरू किए — सबसे छोटा पहले, ताकि कुछ जल्दी पूरा हो",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"रेस्ट मोड से पहले सारा होमब्रू बंद करें?\n\nइससे PS4 पर चल रही हमारी हर चीज़ बंद हो जाएगी, सबसे आख़िर में खुद PKG MUTANT SHOP।\n\nआपके जेलब्रेक को कुछ नहीं होता, पर कंसोल के जागने के बाद शॉप को फिर से लोड करना होगा।",
+    tm_there_was_no_backup_on_the_console:"कंसोल पर कोई बैकअप नहीं था",
     gp_dest_default_tip_ps4:"PKG इंस्टॉल PS4 की अपनी Installation Location सेटिंग (Settings > Storage) के अनुसार होते हैं। एक्सटेंडेड स्टोरेज में इंस्टॉल करने के लिए इसे कंसोल पर बदलें।",
     gp_tip_console_asleep:"{console} स्लीप मोड में है। पहले इसे जगाएँ, वरना यह कतार में तब तक रुका रहेगा जब तक कंसोल जवाब नहीं देता।",
     msg_conn_shop_silent_ps4:"PS4 पर शॉप जवाब नहीं दे रही",
@@ -7189,6 +7347,20 @@ var I18N={
     gp_dest_console_default:"Установка на: диск по умолчанию",
     gp_dest_console_only_tip:"Выбор диска доступен только в приложении на ПК. На самой консоли перенесите игру куда нужно через «Перенести на другой диск» в меню ⋯.",
     gp_dest_default_tip:"Установка PKG для PS4/PS5 подчиняется настройке места установки на самой PS5 («Настройки» > «Хранилище»). Измените её на консоли, чтобы ставить на расширенное хранилище.",
+    gp_lib_empty_any:"Игры пока не найдены. Скопируйте файлы .pkg / .ffpfsc в папку с играми (путь показан в Settings > Your games), затем нажмите там «Пересканировать».",
+    gp_lib_empty_ps4:"Игры пока не найдены. Скопируйте файлы .pkg в папку с играми (путь показан в Settings > Your games), затем нажмите там «Пересканировать».",
+    msg_already_installed_on_console:"На {console} уже установлено: {name}.",
+    msg_cheat_filed_many:"Добавлено новых файлов с читами: {n}",
+    msg_cheat_filed_one:"Добавлен 1 новый файл с читами",
+    msg_discover_no_answer:"ПК не ответил, поэтому сканирование не выполнено.",
+    msg_q_cancel_tip_pkg:"Убрать это из очереди. Пакет, который консоль уже приняла, установится сам. То, что уже установлено на консоли, не удаляется.",
+    tm_clean_reinstall_of_1_on_your_console:"Чистая переустановка «{p1}»:\n\n1) На {console}: удалите текущую копию (Options → Delete)\n2) Затем нажмите OK здесь, чтобы поставить свежую копию.",
+    tm_freed:" — освобождено {size}",
+    tm_install_lane_is_clear:"Канал установки свободен — можно ставить следующий пакет",
+    tm_removed_from_the_console:"Удалено с консоли",
+    tm_started_smallest_first:"Запущено: {n} — сначала самые маленькие, чтобы что-то завершилось поскорее",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Остановить весь homebrew перед режимом покоя?\n\nБудет закрыто всё наше, что работает на PS4, и PKG MUTANT SHOP — последним.\n\nДжейлбрейк не затрагивается, но после пробуждения консоли магазин придётся загрузить заново.",
+    tm_there_was_no_backup_on_the_console:"Резервной копии на консоли не было",
     gp_dest_default_tip_ps4:"Установка PKG подчиняется настройке Installation Location на самом PS4 (Settings > Storage). Чтобы устанавливать на расширенный накопитель, измените её на консоли.",
     gp_tip_console_asleep:"{console} спит. Сначала разбудите консоль, иначе задача будет ждать в очереди, пока консоль не ответит.",
     msg_conn_shop_silent_ps4:"Магазин на PS4 не отвечает",
@@ -7855,6 +8027,20 @@ var I18N={
     gp_dest_console_default:"Si installa su: unità predefinita della console",
     gp_dest_console_only_tip:"Per scegliere l'unità serve l'app sul PC. Sulla sola console, metti il gioco dove vuoi con “Sposta su un'altra unità” nel menu ⋯.",
     gp_dest_default_tip:"Le installazioni dei PKG PS4/PS5 seguono l'impostazione Posizione di installazione della PS5 (Impostazioni > Archiviazione). Cambiala sulla console per installare sull'archiviazione estesa.",
+    gp_lib_empty_any:"Nessun gioco trovato per ora. Copia i file .pkg / .ffpfsc nella cartella dei giochi (Settings > Your games indica dove si trova), poi premi Riscansiona lì.",
+    gp_lib_empty_ps4:"Nessun gioco trovato per ora. Copia i file .pkg nella cartella dei giochi (Settings > Your games indica dove si trova), poi premi Riscansiona lì.",
+    msg_already_installed_on_console:"{name} è già installato su {console}.",
+    msg_cheat_filed_many:"Archiviati {n} nuovi file di cheat",
+    msg_cheat_filed_one:"Archiviato 1 nuovo file di cheat",
+    msg_discover_no_answer:"Il PC non ha risposto, quindi non è stata eseguita nessuna scansione.",
+    msg_q_cancel_tip_pkg:"Rimuove questo elemento dalla coda. Un pacchetto che la console ha già accettato viene completato da solo. Non viene rimosso nulla di ciò che è già installato sulla console.",
+    tm_clean_reinstall_of_1_on_your_console:"Reinstallazione pulita di “{p1}”:\n\n1) Su {console}: eliminalo (Options → Delete)\n2) Poi premi OK qui per reinstallare una copia nuova.",
+    tm_freed:" — {size} liberati",
+    tm_install_lane_is_clear:"La linea di installazione è libera — pronta per il prossimo",
+    tm_removed_from_the_console:"Rimosso dalla console",
+    tm_started_smallest_first:"Avviati {n} — prima i più piccoli, così qualcosa finisce presto",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Chiudere tutto l'homebrew prima della modalità riposo?\n\nQuesto arresta tutto ciò che è nostro in esecuzione sulla PS4, PKG MUTANT SHOP per ultimo.\n\nIl jailbreak non viene toccato, ma lo shop va ricaricato dopo il risveglio della console.",
+    tm_there_was_no_backup_on_the_console:"Non c'era nessun backup sulla console",
     gp_dest_default_tip_ps4:"Le installazioni PKG seguono l'impostazione Installation Location della PS4 (Settings > Storage). Modificala sulla console per installare sull'archiviazione estesa.",
     gp_tip_console_asleep:"{console} è in sospensione. Riattivala, oppure l'operazione resta in coda finché non risponde.",
     msg_conn_shop_silent_ps4:"Lo shop sulla PS4 non risponde",
@@ -8521,6 +8707,20 @@ var I18N={
     gp_dest_console_default:"설치 위치: 콘솔 기본값",
     gp_dest_console_only_tip:"드라이브를 고르려면 PC 앱이 필요합니다. 콘솔만 사용할 때는 ⋯ 메뉴의 “다른 드라이브로 이동”으로 원하는 곳에 게임을 옮기세요.",
     gp_dest_default_tip:"PS4/PS5 PKG 설치는 PS5 자체의 설치 위치 설정(설정 > 저장공간)을 따릅니다. 확장 저장공간에 설치하려면 콘솔에서 이 설정을 바꾸세요.",
+    gp_lib_empty_any:"아직 게임을 찾지 못했습니다. .pkg / .ffpfsc 파일을 게임 폴더에 복사한 다음(폴더 위치는 Settings > Your games에 표시됩니다) 그 화면에서 Rescan을 누르세요.",
+    gp_lib_empty_ps4:"아직 게임을 찾지 못했습니다. .pkg 파일을 게임 폴더에 복사한 다음(폴더 위치는 Settings > Your games에 표시됩니다) 그 화면에서 Rescan을 누르세요.",
+    msg_already_installed_on_console:"{name}은(는) 이미 {console}에 설치되어 있습니다.",
+    msg_cheat_filed_many:"새 치트 파일 {n}개를 정리했습니다",
+    msg_cheat_filed_one:"새 치트 파일 1개를 정리했습니다",
+    msg_discover_no_answer:"PC가 응답하지 않아 아무것도 검색하지 못했습니다.",
+    msg_q_cancel_tip_pkg:"이 항목을 대기열에서 제거합니다. 콘솔이 이미 받아들인 패키지는 그대로 설치가 끝납니다. 콘솔에 이미 설치된 항목은 삭제되지 않습니다.",
+    tm_clean_reinstall_of_1_on_your_console:"“{p1}” 새로 설치:\n\n1) {console}에서 먼저 삭제하세요 (Options → Delete)\n2) 그런 다음 여기에서 OK를 눌러 새 사본을 설치하세요.",
+    tm_freed:" — {size} 확보됨",
+    tm_install_lane_is_clear:"설치 경로가 비었습니다 — 다음 항목을 받을 준비가 되었습니다",
+    tm_removed_from_the_console:"콘솔에서 삭제했습니다",
+    tm_started_smallest_first:"{n}개를 시작했습니다 — 작은 것부터 진행하므로 곧 하나가 끝납니다",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"대기 모드로 전환하기 전에 모든 홈브루를 종료할까요?\n\nPS4에서 실행 중인 이 앱 계열의 프로그램을 모두 종료하며, PKG MUTANT SHOP은 맨 마지막에 종료됩니다.\n\n탈옥 상태는 그대로 유지되지만, 콘솔이 깨어난 뒤에 PKG MUTANT SHOP을 다시 불러와야 합니다.",
+    tm_there_was_no_backup_on_the_console:"콘솔에 백업이 없었습니다",
     gp_dest_default_tip_ps4:"PKG 설치는 PS4 자체의 Installation Location 설정(Settings > Storage)을 따릅니다. 확장 저장소에 설치하려면 콘솔에서 이 설정을 바꾸세요.",
     gp_tip_console_asleep:"{console}이(가) 절전 상태입니다. 먼저 깨우세요. 그러지 않으면 응답할 때까지 대기열에서 기다립니다.",
     msg_conn_shop_silent_ps4:"PS4의 상점이 응답하지 않습니다",
@@ -9187,6 +9387,20 @@ var I18N={
     gp_dest_console_default:"Kurulacağı yer: konsol varsayılanı",
     gp_dest_console_only_tip:"Disk seçmek için PC uygulaması gerekir. Konsolda tek başınayken oyunu istediğiniz yere ⋯ menüsündeki “Başka diske taşı” ile koyun.",
     gp_dest_default_tip:"PS4/PS5 PKG kurulumları PS5'in kendi Kurulum Konumu ayarını izler (Ayarlar > Depolama). Genişletilmiş Depolama'ya kurmak için bunu konsoldan değiştirin.",
+    gp_lib_empty_any:"Henüz oyun bulunamadı. .pkg / .ffpfsc dosyalarınızı oyunlar klasörüne kopyalayın (klasörün yerini Settings > Your games gösterir), sonra oradaki Rescan düğmesine basın.",
+    gp_lib_empty_ps4:"Henüz oyun bulunamadı. .pkg dosyalarınızı oyunlar klasörüne kopyalayın (klasörün yerini Settings > Your games gösterir), sonra oradaki Rescan düğmesine basın.",
+    msg_already_installed_on_console:"{name} zaten {console} üzerinde kurulu.",
+    msg_cheat_filed_many:"{n} yeni hile dosyası yerleştirildi",
+    msg_cheat_filed_one:"1 yeni hile dosyası yerleştirildi",
+    msg_discover_no_answer:"PC yanıt vermedi, bu yüzden hiçbir şey taranmadı.",
+    msg_q_cancel_tip_pkg:"Bunu kuyruktan çıkarır. Konsolun kabul ettiği bir paket kendi başına tamamlanır. Konsolda kurulu olan hiçbir şey silinmez.",
+    tm_clean_reinstall_of_1_on_your_console:"“{p1}” için temiz yeniden kurulum:\n\n1) {console} konsolunuzda: oyunu silin (Options → Delete)\n2) Sonra yeni bir kopyayı kurmak için burada OK düğmesine basın.",
+    tm_freed:" — {size} boşaltıldı",
+    tm_install_lane_is_clear:"Kurulum hattı boş — sıradakine hazır",
+    tm_removed_from_the_console:"Konsoldan kaldırıldı",
+    tm_started_smallest_first:"{n} tanesi başlatıldı — önce en küçüğü, böylece bir şey kısa sürede biter",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Dinlenme moduna geçmeden önce tüm homebrew durdurulsun mu?\n\nBu, PS4 üzerinde çalışan bize ait her şeyi kapatır; en son da PKG MUTANT SHOP'u.\n\nJailbreak'inize dokunulmaz, ama konsol uyandıktan sonra mağazanın yeniden yüklenmesi gerekir.",
+    tm_there_was_no_backup_on_the_console:"Konsolda yedek yoktu",
     gp_dest_default_tip_ps4:"PKG kurulumları PS4'ün kendi Installation Location ayarını izler (Settings > Storage). Genişletilmiş depolamaya kurmak için bu ayarı konsoldan değiştirin.",
     gp_tip_console_asleep:"{console} uyku modunda. Önce uyandırın; uyandırmazsanız bu iş, konsol yanıt verene kadar kuyrukta bekler.",
     msg_conn_shop_silent_ps4:"PS4'teki mağaza yanıt vermiyor",
@@ -9853,6 +10067,20 @@ var I18N={
     gp_dest_console_default:"Instaluje na: domyślny dysk konsoli",
     gp_dest_console_only_tip:"Wybór dysku wymaga aplikacji na komputerze. Na samej konsoli przenieś grę tam, gdzie chcesz, poleceniem „Przenieś na inny dysk” w menu ⋯.",
     gp_dest_default_tip:"Instalacje PKG dla PS4/PS5 kierują się ustawieniem Miejsce instalacji w PS5 (Ustawienia > Pamięć). Zmień je na konsoli, aby instalować na pamięci rozszerzonej.",
+    gp_lib_empty_any:"Nie znaleziono jeszcze żadnych gier. Skopiuj pliki .pkg / .ffpfsc do folderu z grami (ścieżkę znajdziesz w Settings > Your games), a następnie naciśnij tam Skanuj ponownie.",
+    gp_lib_empty_ps4:"Nie znaleziono jeszcze żadnych gier. Skopiuj pliki .pkg do folderu z grami (ścieżkę znajdziesz w Settings > Your games), a następnie naciśnij tam Skanuj ponownie.",
+    msg_already_installed_on_console:"Pakiet {name} jest już zainstalowany na konsoli {console}.",
+    msg_cheat_filed_many:"Dodano nowe pliki z kodami: {n}",
+    msg_cheat_filed_one:"Dodano 1 nowy plik z kodami",
+    msg_discover_no_answer:"Komputer nie odpowiedział, więc nic nie zostało przeskanowane.",
+    msg_q_cancel_tip_pkg:"Usuwa tę pozycję z kolejki. Pakiet, który konsola już przyjęła, dokończy się sam. Nic, co jest już zainstalowane na konsoli, nie zostanie usunięte.",
+    tm_clean_reinstall_of_1_on_your_console:"Czysta ponowna instalacja „{p1}”:\n\n1) Na konsoli {console}: usuń tę pozycję (Options → Delete)\n2) Potem naciśnij tutaj OK, aby zainstalować świeżą kopię.",
+    tm_freed:" — zwolniono {size}",
+    tm_install_lane_is_clear:"Tor instalacji jest wolny — gotowy na następny pakiet",
+    tm_removed_from_the_console:"Usunięto z konsoli",
+    tm_started_smallest_first:"Rozpoczęto: {n} — najmniejsze jako pierwsze, więc coś skończy się szybko",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Zatrzymać całe homebrew przed trybem spoczynku?\n\nSpowoduje to zamknięcie wszystkiego, co uruchomiliśmy na PS4 — samego PKG MUTANT SHOP na końcu.\n\nJailbreak pozostaje nienaruszony, ale po wybudzeniu konsoli trzeba wczytać sklep ponownie.",
+    tm_there_was_no_backup_on_the_console:"Na konsoli nie było kopii zapasowej",
     gp_dest_default_tip_ps4:"Instalacje PKG trafiają tam, gdzie wskazuje ustawienie Installation Location na PS4 (Settings > Storage). Zmień je na konsoli, aby instalować na pamięci rozszerzonej.",
     gp_tip_console_asleep:"{console} jest w trybie uśpienia. Wybudź konsolę albo zadanie poczeka w kolejce, aż konsola odpowie.",
     msg_conn_shop_silent_ps4:"Sklep na PS4 nie odpowiada",
@@ -10519,6 +10747,20 @@ var I18N={
     gp_dest_console_default:"Installeert naar: standaard van de console",
     gp_dest_console_only_tip:"Een schijf kiezen kan alleen met de pc-app. Op de console zelf zet je de game waar je hem wilt met “Naar een andere schijf verplaatsen” in het ⋯-menu.",
     gp_dest_default_tip:"PS4/PS5 PKG-installaties volgen de eigen instelling Installatielocatie van de PS5 (Instellingen > Opslag). Wijzig die op de console om naar uitgebreide opslag te installeren.",
+    gp_lib_empty_any:"Nog geen games gevonden. Kopieer je .pkg- / .ffpfsc-bestanden naar de gamesmap (Settings > Your games laat zien waar) en druk daar op Opnieuw scannen.",
+    gp_lib_empty_ps4:"Nog geen games gevonden. Kopieer je .pkg-bestanden naar de gamesmap (Settings > Your games laat zien waar) en druk daar op Opnieuw scannen.",
+    msg_already_installed_on_console:"{name} is al geïnstalleerd op de {console}.",
+    msg_cheat_filed_many:"{n} nieuwe cheatbestanden opgeborgen",
+    msg_cheat_filed_one:"1 nieuw cheatbestand opgeborgen",
+    msg_discover_no_answer:"De pc heeft niet geantwoord, dus er is niets gescand.",
+    msg_q_cancel_tip_pkg:"Haalt dit uit de wachtrij. Een pakket dat de console al heeft aangenomen, wordt vanzelf afgerond. Er wordt niets verwijderd wat al op de console staat.",
+    tm_clean_reinstall_of_1_on_your_console:"Schone herinstallatie van “{p1}”:\n\n1) Op je {console}: verwijder hem (Options → Delete)\n2) Druk daarna hier op OK om een verse kopie te installeren.",
+    tm_freed:" — {size} vrijgemaakt",
+    tm_install_lane_is_clear:"De installatiebaan is vrij — klaar voor de volgende",
+    tm_removed_from_the_console:"Verwijderd van de console",
+    tm_started_smallest_first:"{n} gestart — kleinste eerst, zodat er snel iets klaar is",
+    tm_stop_all_homebrew_before_rest_mode_ps4:"Alle homebrew stoppen vóór de rustmodus?\n\nHiermee wordt alles van ons dat op de PS4 draait afgesloten, PKG MUTANT SHOP zelf als laatste.\n\nJe jailbreak blijft ongemoeid, maar de shop moet opnieuw geladen worden nadat de console wakker is geworden.",
+    tm_there_was_no_backup_on_the_console:"Er stond geen back-up op de console",
     gp_dest_default_tip_ps4:"PKG-installaties volgen de eigen instelling Installation Location van de PS4 (Settings > Storage). Wijzig die op de console om naar uitgebreide opslag te installeren.",
     gp_tip_console_asleep:"{console} slaapt. Maak de console eerst wakker, anders blijft dit in de wachtrij staan tot hij antwoordt.",
     msg_conn_shop_silent_ps4:"De shop op de PS4 antwoordt niet",
@@ -11191,6 +11433,9 @@ function setLang(code){
   try{ if(typeof updateSrcBar==="function")updateSrcBar(); }catch(e){}
   try{ if(typeof paintServices==="function"&&state&&state.health)paintServices(state.health); }catch(e){}
   try{ if(typeof paintPcOnly==="function")paintPcOnly(); }catch(e){}
+  /* The library banner picks its sentence in code, so applyI18n cannot reach it - and it is the
+     only thing on screen when the library is empty or nothing is answering. */
+  try{ if(typeof repaintDemoText==="function")repaintDemoText(); }catch(e){}
   /* The rows Settings filled with WORDS (connection, engine, helpers, devices, rest note) keep
      the language they were painted in - applyI18n only reaches markup. Repaint them, and ask for
      health again so the header pill changes language now rather than at its next poll. */
@@ -12619,7 +12864,7 @@ function moveGame(g){
     });
     if(!opts.length){toast(t("tm_no_other_drive_is_connected_to_the"),"err");return;}
     var lines=opts.map(function(x,i){
-      return (i+1)+") "+x.label+(x.free>0?("  ("+gb(x.free)+" free)"):"  (free space unknown)");
+      return (i+1)+") "+x.label+(x.free>0?tsub("gp_dest_free",{size:gb(x.free)}):t("msg_move_free_space_unknown"));
     }).join("\n");
     var pick=prompt(tsub("tm_move_to_which_drive_type_the_number",{p1:g.name,p2:gb(g.size),p3:lines}),"1");
     if(!pick) return;
@@ -12686,7 +12931,7 @@ function copyFromPeer(g){
      on", which is rarely what you mean when three of them are running. */
   api("/api/network").then(function(d){
     var me=(d&&d.this_pc)||{}, src=(g.source_pc||"").toLowerCase();
-    var opts=[{id:"local",label:(me.name||"this PC")+" (this one)"}];
+    var opts=[{id:"local",label:(me.name||t("msg_copy_this_pc"))+t("msg_copy_this_one_suffix")}];
     ((d&&d.peers)||[]).forEach(function(p){
       if(!p.online) return;
       if(String(p.name||"").toLowerCase()===src) return;      // it is already there
@@ -12694,15 +12939,15 @@ function copyFromPeer(g){
     });
     if(opts.length===1) return startCopy(g,it,opts[0].id,opts[0].label);
     var lines=opts.map(function(x,i){return (i+1)+") "+x.label;}).join("\n");
-    var pick=prompt(tsub("tm_copy_from_to_which_pc_type_the",{p1:g.name,p2:gb(g.size),p3:(g.source_pc||"the other PC"),p4:lines}),"1");
+    var pick=prompt(tsub("tm_copy_from_to_which_pc_type_the",{p1:g.name,p2:gb(g.size),p3:(g.source_pc||t("msg_copy_the_other_pc")),p4:lines}),"1");
     if(!pick) return;
     var idx=parseInt(pick,10)-1;
     if(isNaN(idx)||idx<0||idx>=opts.length){toast(t("tm_not_a_valid_choice"),"err");return;}
     startCopy(g,it,opts[idx].id,opts[idx].label);
-  }).catch(function(){ startCopy(g,it,"local","this PC"); });
+  }).catch(function(){ startCopy(g,it,"local",t("msg_copy_this_pc")); });
 }
 function startCopy(g,it,to,label){
-  toast(tsub("tm_copying_from_to",{p1:g.name,p2:(g.source_pc||"the other PC"),p3:label}),"ok");
+  toast(tsub("tm_copying_from_to",{p1:g.name,p2:(g.source_pc||t("msg_copy_the_other_pc")),p3:label}),"ok");
   api("/api/transfer",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({install_key:it.install_key,name:g.name,mode:"now",to:to})},30000)   /* the PC waits 25 s on the other PC */
   .then(function(r){
@@ -12815,7 +13060,14 @@ function cleanReinstall(g){
   /* A PACKAGE removes itself completely when it is deleted from the PS5 home screen - nothing is
      left behind afterwards - so that really is the right way round for these, and the app should
      say so rather than pretend it has a button for it. */
-  if(window.confirm(tsub("tm_clean_reinstall_of_1_on_your_ps5",{p1:g.name}))){
+  /* NAME THE CONSOLE. This is the branch every PKG game takes, which is every PS4 game, and it
+     told a PS4 owner to go and delete it on a PS5 they may not even own. The PS5 sentence is left
+     exactly as it is, all fifteen translations of it included; only a console that says it is a
+     PS4 is given the other one. */
+  var _crCon=panelConsole(g);
+  if(window.confirm(consoleIsPs4(_crCon)
+        ? tsub("tm_clean_reinstall_of_1_on_your_console",{p1:g.name,console:consoleLabel(_crCon)})
+        : tsub("tm_clean_reinstall_of_1_on_your_ps5",{p1:g.name}))){
     if(g.base&&g.base[0]) installItem(g,g.base[0],"base",null);
   }
 }
@@ -12847,9 +13099,11 @@ function deleteTitle(g){
                                                console:panelConsole(g)||state.console||""})},65000)   /* the PC relays with 60 s */
     .then(function(r){
       if(!r||r.ok===false){toast(errText(r,t("tm_the_console_could_not_delete_it")),"err");return;}
-      if(r.already_gone){toast(r.message||"There was no backup on the console","ok");}
-      else{toast((r.message||"Removed from the console")+
-                 (r.bytes?(" \u2014 "+gb(r.bytes)+" freed"):""),"ok");}
+      /* The last two raw English sentences in this flow: the console's own words when it sends
+         them, ours in the reader's language when it does not. */
+      if(r.already_gone){toast(r.message||t("tm_there_was_no_backup_on_the_console"),"ok");}
+      else{toast((r.message||t("tm_removed_from_the_console"))+
+                 (r.bytes?tsub("tm_freed",{size:gb(r.bytes)}):""),"ok");}
       loadLibrary();
       closeDrawer();
     })
@@ -13003,7 +13257,9 @@ function cheatSection(g){
           // (game not running, engine unreachable) still read as success.
           if(r&&r.ok===false){toast(errText(r,t("tm_the_cheats_could_not_be_turned_off")),"err");return;}
           var n=(r&&typeof r.disabled==="number")?r.disabled:null;
-          toast(n===null?t("tm_all_mods_disabled"):("All mods disabled ("+n+")"),"ok");
+          /* The counted branch is the one that actually fires - the server answers with a
+             number - and it was the only English left in this handler. */
+          toast(n===null?t("tm_all_mods_disabled"):tsub("gp_mods_all_disabled_n",{n:n}),"ok");
           refreshModsQuiet();
         })
         .catch(function(){toast(t("tm_the_console_did_not_answer_is_the"),"err");}).then(function(){off.disabled=false;});
@@ -13329,7 +13585,11 @@ function installItem(game,item,kind,btn,mode,force){
           if(btn){btn.disabled=false;btn.textContent=_rest;}
           return;
         }
-        var again=confirm(tsub("tm_reinstall_it_anyway_the_console_overwrites_the",{p1:(r.message||(label+" is already installed on the PS5."))}));
+        /* The fallback under the server's own message named the PS5 on a PS4's install, and was
+           the one part of this dialog that never followed the language selector. */
+        var again=confirm(tsub("tm_reinstall_it_anyway_the_console_overwrites_the",
+          {p1:(r.message||tsub("msg_already_installed_on_console",
+                               {name:label,console:consoleLabel(panelConsole(game))}))}));
         if(again){
           toast(tsub("tm_reinstalling",{p1:label}),"ok");
           if(btn) btn.textContent=_rest;   /* restore first - the inner call captures this label */
@@ -13501,7 +13761,22 @@ function renderQueue(){
     }
     /* The task object is replaced on every poll, so the handlers have to close over the CURRENT
        one - but the elements they are attached to stay put. */
-    row.querySelector(".qcancel").onclick=function(){cancelTask(tk);};
+    var _xb=row.querySelector(".qcancel");
+    _xb.onclick=function(){cancelTask(tk);};
+    /* THE X'S TOOLTIP, PER ROW. The sentence above deliberately tells two truths, one per lane,
+       and the backup half names the PS5 twice - but a PS4 row is never lane "mount", so on a PS4
+       that half is wrong twice over: wrong console and wrong lane. Such a row gets the package
+       wording instead. The mount sentence itself is not edited, so the half two earlier rewrites
+       dropped cannot be dropped again. Attributes only, never a rebuild - that would destroy the
+       button under a finger - and the KEY travels with the text, so a language change re-applies
+       whichever one this row is owed. */
+    var _xk=consoleIsPs4(tk.console)?"msg_q_cancel_tip_pkg":"msg_q_cancel_tip";
+    if(_xb.getAttribute("data-i18n-tip")!==_xk){
+      _xb.setAttribute("data-i18n-tip",_xk);
+      _xb.setAttribute("data-i18n-aria",_xk);
+      _xb.setAttribute("data-tip",t(_xk));
+      _xb.setAttribute("aria-label",t(_xk));
+    }
     var rb=row.querySelector(".qretry");
     rb.onclick=function(){retryTask(tk);};
     rb.style.display=wantRetry?"":"none";
@@ -13545,11 +13820,15 @@ function renderQueue(){
   }
 }
 var RELOAD_SVG='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>';
-function retryTask(t){        // [wedge-retry] re-run a failed install (after reloading the DPI payload)
-  if(t.local){t.state="transferring";t.pct=0;renderQueue();return;}
-  api("/api/queue/"+t.id+"/retry",{method:"POST"}).then(function(r){
+/* `tk`, not `t` - the same rule the row builder above already carries. A parameter named t
+   shadows the dictionary function for the whole body, and once these sentences were translated
+   every t("...") in here called the TASK OBJECT and threw: a refused retry showed nothing, said
+   nothing, and never reached pollQueue(). */
+function retryTask(tk){       // [wedge-retry] re-run a failed install (after reloading the DPI payload)
+  if(tk.local){tk.state="transferring";tk.pct=0;renderQueue();return;}
+  api("/api/queue/"+tk.id+"/retry",{method:"POST"}).then(function(r){
     /* ok:false used to be silence - the button did nothing and said nothing. */
-    if(r&&r.ok) toast(tsub("tm_retrying",{p1:(t.name||"")}),"ok");
+    if(r&&r.ok) toast(tsub("tm_retrying",{p1:(tk.name||"")}),"ok");
     else toast(errText(r,t("tm_this_one_cannot_be_retried_from_here")),"err");
     pollQueue();
   }).catch(function(){toast(t("tm_could_not_retry_the_pc_did_not"),"err");});
@@ -13558,14 +13837,16 @@ function retryTask(t){        // [wedge-retry] re-run a failed install (after re
    there reading "Canceled" - and the only control that actually removes rows is a small icon in the
    dock header that nobody finds. So: a finished row is removed outright; a live one is cancelled
    first and then removed once it has actually stopped. */
-function cancelTask(t){
-  if(t.local){
-    state.queue=state.queue.filter(function(x){return x!==t;});
+/* `tk` here too, and for the same reason: every sentence below reaches the dictionary, so a
+   parameter called t left the X doing nothing at all whenever the server refused it. */
+function cancelTask(tk){
+  if(tk.local){
+    state.queue=state.queue.filter(function(x){return x!==tk;});
     renderQueue();return;
   }
-  var done=(t.state==="playable"||t.state==="error"||t.state==="canceled");
+  var done=(tk.state==="playable"||tk.state==="error"||tk.state==="canceled");
   function drop(){
-    api("/api/queue/"+t.id+"/dismiss",{method:"POST"})
+    api("/api/queue/"+tk.id+"/dismiss",{method:"POST"})
       .then(function(r){
         /* A refusal here means the worker still holds the task: the row stays until it has really
            stopped. Say so instead of leaving a press that visibly did nothing. */
@@ -13575,7 +13856,7 @@ function cancelTask(t){
       .catch(function(){pollQueue();});
   }
   if(done){ drop(); return; }
-  api("/api/queue/"+t.id+"/cancel",{method:"POST"}).then(function(r){
+  api("/api/queue/"+tk.id+"/cancel",{method:"POST"}).then(function(r){
     if(r&&r.ok===false){
       /* Already terminal - so this is a stale row, and removing it is exactly right. A refusal that
          carries its own words is a different thing, and those words are shown. */
@@ -13677,7 +13958,7 @@ $("#startQueue").onclick=function(e){                                    // [B8]
   e.stopPropagation();
   if(API===null){toast(t("tm_needs_the_companion_running"));return;}
   api("/api/queue/start",{method:"POST"}).then(function(r){
-    toast(r.started ? ("Started "+r.started+" — smallest first, so something finishes soon")
+    toast(r.started ? tsub("tm_started_smallest_first",{n:r.started})
                     :t("tm_there_was_nothing_waiting_to_start"),"ok");
     pollQueue();
   }).catch(function(){toast(t("tm_could_not_start_the_queue_the_pc"),"err");});
@@ -13690,7 +13971,7 @@ $("#reloadDpi").onclick=function(e){          // [B9] manual reload — the queu
   /* The console has no /api/dpi/reload and answers it with a bare {}, which read here as failure
      every time no PC was around. Its own cleanup route does the same job. */
   api((state.onConsole?"/api/engine/spawn-cleanup":"/api/dpi/reload")+conQS(),undefined,30000).then(function(r){
-    toast((r&&(r.ok||r.reloaded))?((r&&r.detail)||"The install lane is clear — ready for the next one")
+    toast((r&&(r.ok||r.reloaded))?((r&&r.detail)||t("tm_install_lane_is_clear"))
                                  :errText(r,t("tm_the_install_lane_could_not_be_cleared")),
           (r&&(r.ok||r.reloaded))?"ok":"err");
     pollQueue();
@@ -13723,6 +14004,10 @@ function herePlatform(h){
   if(h&&h.viewer_platform) return String(h.viewer_platform).toLowerCase();
   return "";
 }
+/* Is the page being read ON a PS4? For words about "this machine" - the shop that stopped
+   answering, the folder to drop files into - which are the ones a console owner reads with no PC
+   in the room. */
+function hereIsPs4(){ return herePlatform(state.health)==="ps4"; }
 /* THE CHEATS CARD, OR ONE HONEST LINE INSTEAD OF IT.
    Driven by herePlatform() and the console picker, NOT by the html.ps4 class: that class is only
    set when the page is SERVED by a console, so a PC page whose only console is a PS4 - or whose
@@ -14053,6 +14338,13 @@ function consoleLabel(id){
   var nm=c&&c.name?String(c.name).trim():"";
   return nm||(consolePlat(id)==="ps4"?"PS4":"PS5");
 }
+/* Is the console this is ABOUT a PS4? For words aimed at a NAMED console, as against hereIsPs4()
+   which asks about the machine the page happens to be open on. Its definition arrived attached to
+   the old one-line consoleLabel(), which had already been rewritten - so the anchor was stale, the
+   edit was skipped, and the callers shipped against a function that did not exist. check_web.py
+   caught it before the build: it parses cleanly and throws at runtime, which on this page means a
+   blank app on every device. */
+function consoleIsPs4(id){return consolePlat(id)==="ps4";}
 function loadConsoles(){
   if(API===null)return;
   api("/api/consoles").then(function(r){
@@ -14127,7 +14419,7 @@ function primeLibraryFromCache(){
 }
 var _libPrimed=false;
 function loadLibrary(){
-  if(API===null){showEmpty("Interface preview. Run the companion (start.cmd) to load your real library and connect your PS5.");return;}
+  if(API===null){showEmpty("gp_lib_preview");return;}
   // Paint the last known library at once, then replace it when the real one arrives.
   if(!_libPrimed){ _libPrimed=true; primeLibraryFromCache(); }
   api("/api/library",undefined,30000).then(function(r){
@@ -14135,7 +14427,9 @@ function loadLibrary(){
     cacheLibrary(r);
     if(r.empty){
       $("#demoBanner").style.display="flex";
-      $("#demoText").textContent="No games found yet. Copy your .pkg / .ffpfsc files into the games folder (Settings > Your games shows where), then press Rescan there.";
+      /* .ffpfsc is a PS5 mounted-backup container and a PS4 cannot mount one, so half of the very
+         first instruction this app ever gives a PS4 owner was about a file their console ignores. */
+      demoSay(hereIsPs4()?"gp_lib_empty_ps4":"gp_lib_empty_any");
       $("#srcbar").style.display="none";
     } else {
       $("#demoBanner").style.display="none";
@@ -14163,9 +14457,26 @@ function loadLibrary(){
   });
   api("/api/installed"+conQS()).then(function(r){state.installed=new Set(r.installed||[]);renderGrid(true);}).catch(function(){});
 }
-function showEmpty(msg){
+/* THE BANNER'S WORDS, BY KEY. This is the one sentence on the page chosen in code rather than
+   in the markup, so applyI18n() cannot reach it: a language change left it in whatever language
+   it was painted in, and while #demoText still carried data-i18n it was replaced with the loading
+   word and never came back, because setLang() repaints eight things and loadLibrary() is not one
+   of them. The keys are kept on the element, which is the only copy that survives a repaint. */
+function demoSay(k1,k2){
+  var e=$("#demoText"); if(!e) return;
+  e.setAttribute("data-keys",k1+(k2?(" "+k2):""));
+  var words=t(k1)+(k2?(" "+t(k2)):"");
+  if(e.textContent!==words) e.textContent=words;
+}
+function repaintDemoText(){
+  var e=$("#demoText"); if(!e) return;
+  var k=e.getAttribute("data-keys"); if(!k) return;
+  var parts=k.split(" ");
+  demoSay(parts[0],parts[1]);
+}
+function showEmpty(k1,k2){
   state.games=[];state.empty=true;
-  $("#demoBanner").style.display="flex";$("#demoText").textContent=msg;
+  $("#demoBanner").style.display="flex";demoSay(k1,k2);
   $("#srcbar").style.display="none";
   renderGrid();
 }
@@ -14279,7 +14590,11 @@ if(_hd) _hd.onchange=function(){
 /* One action, two ways in: the Settings button and the header shortcut. Sharing it means the
    quick access can never drift from the one in Settings. */
 function stopAllHomebrew(btn){
-  if(!confirm(t("tm_stop_all_homebrew_before_rest_mode_this"))) return;
+  /* The shipped sentence promises that kstuff and Payload Manager keep running, and a PS4 has
+     neither - and the header shortcut that reaches this IS shown on a PS4-served page, so that
+     owner could read it. Only a page being read ON a PS4 gets the other wording. */
+  if(!confirm(hereIsPs4()?t("tm_stop_all_homebrew_before_rest_mode_ps4")
+                         :t("tm_stop_all_homebrew_before_rest_mode_this"))) return;
   if(btn) btn.disabled=true;
   api("/api/rest/prepare",undefined,50000).then(function(r){
     var stopped=(r&&r.stopped)||[], failed=(r&&r.failed)||[];
@@ -14298,8 +14613,11 @@ function stopAllHomebrew(btn){
       return;
     }
     var names=stopped.map(function(x){return x.name;}).join(", ");
+    /* When the console sends its own account of what happened, that is the truer sentence. The
+       PS4 answers stopped:[] with the reason nothing of ours had to be stopped and what to do when
+       it wakes, and the generated "nothing left to stop" threw those words away. */
     toast(stopped.length ? ("Stopped "+stopped.length+": "+names+" — safe to rest the console")
-                         :t("tm_nothing_left_to_stop_safe_to_rest"),"ok");
+                         :((r&&r.message)||t("tm_nothing_left_to_stop_safe_to_rest")),"ok");
     state.restNote="ok";
     if(rn) rn.textContent=t("msg_rest_all_stopped");
   }).catch(function(){
@@ -14349,7 +14667,11 @@ if(_cr) _cr.onclick=function(){
   var _crWas=_cr.textContent;                 /* restored as it was, in whatever language it was */
   _cr.disabled=true;_cr.textContent=t("msg_btn_scanning");
   api("/api/cheats/rescan",{method:"GET"},60000).then(function(r){
-    if(r&&r.ok) toast(r.filed?("Filed "+r.filed+" new cheat file"+(r.filed===1?"":"s")):t("tm_no_new_files_found"),"ok");
+    /* One key per count rather than an "s" glued on the end: most of the shipped languages do
+       not make a plural that way. This was the last English literal in this handler. */
+    if(r&&r.ok) toast(r.filed?(r.filed===1?tsub("msg_cheat_filed_one",{n:r.filed})
+                                          :tsub("msg_cheat_filed_many",{n:r.filed}))
+                             :t("tm_no_new_files_found"),"ok");
     else toast(errText(r,t("tm_the_console_could_not_sort_the_cheat")),"err");
   }).catch(function(){toast(t("tm_could_not_reach_the_console_is_pkg"),"err");})
    .then(function(){_cr.disabled=false;_cr.textContent=_crWas;});
@@ -14894,7 +15216,7 @@ if(_el) _el.onclick=function(){
 };
 $("#discover").onclick=function(){
   if(API===null){toast(t("tm_discovery_needs_the_companion_running"));return;}
-  var out=$("#discoverResults");out.textContent="Scanning the network…";
+  var out=$("#discoverResults");out.textContent=t("msg_discover_scanning");
   api("/api/discover",undefined,60000).then(function(r){
     /* Only a real list is an answer. The console answers this route with a bare {} - no `found` at
        all - and that used to read as "No PS5 found" on the very console being looked for. */
@@ -14914,7 +15236,7 @@ $("#discover").onclick=function(){
       var label=plat==="ps4"?"PS4":"PS5";
       var b=el("button","btn ghost");b.style.cssText="width:100%;margin-top:6px;text-align:left";
       b.innerHTML='📡 <b>'+esc(label)+'</b> <b style="font-family:var(--mono)">'+esc(f.ip)+
-                  '</b> — ports '+esc((f.ports||[]).join(", "));
+                  '</b>'+esc(t("msg_discover_ports_prefix"))+esc((f.ports||[]).join(", "));
       b.onclick=function(){
         var box=$(plat==="ps4"?"#setIp4":"#setIp");
         if(box) box.value=f.ip;
@@ -14925,7 +15247,7 @@ $("#discover").onclick=function(){
       };
       out.appendChild(b);
     });
-  }).catch(function(){out.textContent="The PC did not answer, so nothing was scanned.";});
+  }).catch(function(){out.textContent=t("msg_discover_no_answer");});
 };
 
 /* ============================ INIT ============================ */
