@@ -255,6 +255,26 @@ def main():
     if unused:
         print("  [ .. ] %d defined key(s) never used (dead weight, not an error)" % len(unused))
 
+    # THE BACKLOG THE COVERAGE FIGURE ABOVE CANNOT SHOW. Reported, never failed.
+    #
+    # Coverage is measured against the keys the app USES, and that is deliberate - 3.60.0 tried
+    # measuring against every DEFINED key and eight fully-translated languages read as 42.3%, so it
+    # was reversed. The side effect is that a language can print 100% while being short of English
+    # by every key that is not wired up yet, and those are precisely the keys the next UI change
+    # reaches for: wiring one turns a green gate red with no warning that it was coming.
+    #
+    # This is that warning. It is information, so it can never block a build over work no user can
+    # see - but nobody can now be surprised by it either.
+    short = [(code, len(defined_en - langs[code])) for code in sorted(langs)
+             if code != "en" and (defined_en - langs[code])]
+    if short:
+        print("  [ .. ] dictionary backlog (NOT a failure): %d language(s) carry fewer keys than en"
+              % len(short))
+        for code, n in short:
+            print("         %-3s %d of %d defined, %d not written yet"
+                  % (code, len(langs[code]), len(defined_en), n))
+        print("         wiring any of those into t()/tsub()/data-i18n makes --check FAIL")
+
     hard = hardcoded_markup(s)
     print("  [ .. ] roughly %d visible text nodes in the static markup (hint only, not a failure)" % hard)
 

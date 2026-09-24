@@ -57,6 +57,10 @@
 #include <orbis/libkernel.h>
 #include <orbis/SystemService.h>
 
+/* The one place the port is written down. The two notifications this app shows used to type
+ * "127.0.0.1:8710" into their own sentence, so changing this line moved the server and left
+ * the icon telling the owner to open the old address - on the one screen they are looking at
+ * precisely because something is not where they expected it. */
 #define SHOP_PORT 8710
 
 /* A WRITE TO A SOCKET THE OTHER END HAS CLOSED KILLS THIS PROCESS, and that is very probably the
@@ -402,7 +406,10 @@ int main(void) {
         /* ASKING THE SHOP IS THE ONLY ROUTE. It is not sandboxed and this is measured working on
            the hardware; the app's own browser call was a guessed signature and is gone. */
         if (ask_shop_to_open() != 0)
-            notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
+            { char _m[128];
+              snprintf(_m, sizeof(_m),
+                       "PKG MUTANT SHOP is running\nOpen 127.0.0.1:%d in the browser", SHOP_PORT);
+              notify(_m); }
         leave();
     }
 
@@ -425,7 +432,10 @@ int main(void) {
                 printf("[PMS] the shop came up after %d second(s)\n", i + 1);
                 notify("Opening PKG MUTANT SHOP");
                 if (ask_shop_to_open() != 0)
-                    notify("PKG MUTANT SHOP is running\nOpen 127.0.0.1:8710 in the browser");
+                    { char _m[128];
+                      snprintf(_m, sizeof(_m),
+                               "PKG MUTANT SHOP is running\nOpen 127.0.0.1:%d in the browser", SHOP_PORT);
+                      notify(_m); }
                 leave();
             }
         }
