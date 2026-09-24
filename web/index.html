@@ -1185,10 +1185,9 @@ html{scroll-behavior:smooth}
          to give: a PS4 game with both consoles connected, since a PS4 game runs on either. -->
     <div class="selwrap" id="panelConsoleWrap" style="display:none"><select id="panelConsoleSel" aria-label="Install on which console" data-i18n-aria="ui_aria_install_console"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
     <div class="selwrap"><select id="driveSel" aria-label="Install destination" data-i18n-aria="ui_aria_install_dest"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
-    <button class="btn ghost tip" id="sendPkg"
-            data-tip="Copy the package onto the PS5's own drive first, then install it from there. Useful when you want the console to hold the file rather than stream it over the network." data-i18n-tip="ui_tip_send_pkg">📥 Send to PS5</button>
     <button class="btn ghost tip" id="queueBtn"
             data-tip="Add this to the queue instead of installing it now. Queued games install one after another."
+            data-i18n-tip="ui_tip_queue_add"
             data-i18n="queue_add">＋ Queue</button>
     <button class="btn primary" id="installAll" data-i18n="ui_install_base">Install base</button>
     <div style="position:relative">
@@ -1240,11 +1239,12 @@ html{scroll-behavior:smooth}
 
         <!-- ================= CONSOLE ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your PS5</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your PS5</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n-tip="ui_tip_test_console" data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
           <div class="frow">
             <span class="flabel" data-i18n="ui_console_address">Console address</span>
             <!-- An address is fifteen characters. A full-width box for it just looked unfinished. -->
-            <input id="setIp" class="short" placeholder="192.168.1.50" aria-label="PS5 address"
+            <input id="setIp" class="short" placeholder="192.168.1.50" aria-label="Console address"
+                   data-i18n-aria="ui_console_address"
                    autocomplete="off" spellcheck="false">
           </div>
           <!-- The PS4 is a SECOND console, not an alternative to the first: a PC can drive both at
@@ -1305,7 +1305,7 @@ html{scroll-behavior:smooth}
           <div class="btnrow">
             <button class="btn ghost sm tip pconly" id="rescan" data-tip="Re-read the games folder now. It is watched automatically, so this is only needed if you have just copied files in." data-i18n-tip="ui_tip_rescan" data-i18n="ui_btn_rescan">Rescan</button>
             <button class="btn ghost sm tip pconly" id="prepareTree" data-tip="Create the PS4 and PS5 folders inside the games folder if they are missing." data-i18n-tip="ui_tip_create_folders" data-i18n="ui_btn_create_folders">Create folders</button>
-            <button class="btn ghost sm tip pconly pcseat" id="openFolder" data-tip="Open the games folder on this PC." data-i18n="ui_btn_open_folder">Open folder</button>
+            <button class="btn ghost sm tip pconly pcseat" id="openFolder" data-tip="Open the games folder on this PC." data-i18n-tip="ui_tip_open_folder" data-i18n="ui_btn_open_folder">Open folder</button>
           </div>
         </section>
 
@@ -1359,7 +1359,7 @@ html{scroll-behavior:smooth}
           <div class="svc"><span class="k"><span class="led" id="ledFiles"></span><span data-i18n="ui_file_transfer">File transfer</span></span><span class="v mono ell" id="setFiles">-</span></div>
           <div class="btnrow">
             <button class="btn ghost sm tip" id="autoStart" style="display:none" data-tip="Whether loading this app also starts the background services that let PS5 backups be played from a drive. Installing PKG files does not need them, so turning this off is safe - and it rules them out of a crash when the console wakes from rest." data-i18n-tip="ui_tip_autostart">Helpers: &hellip;</button>
-            <select class="sort tip" id="helperDelay" style="display:none"
+            <select class="sort tip" id="helperDelay" style="display:none" data-i18n-tip="ui_tip_helper_delay"
                     data-tip="How long to wait after the console starts before the helpers are loaded. Waking from rest brings the whole payload chain up at once, and starting them into a system that is still assembling itself is what makes a wake crash now and then. Longer is safer.">
               <option value="0" data-i18n="ui_helper_delay_now">Start helpers: immediately</option>
               <option value="15" data-i18n="ui_helper_delay_15">Start helpers: after 15s</option>
@@ -1391,11 +1391,11 @@ html{scroll-behavior:smooth}
 
         <!-- ================= ADVANCED ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-i18n="ui_btn_clear_state" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n="ui_btn_install_log">Install log</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-i18n="ui_btn_clear_state" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n-tip="ui_tip_eng_log" data-i18n="ui_btn_install_log">Install log</button></div></div>
           <div class="hint" style="margin-top:0" data-i18n="ui_advanced_hint">For working out why something is not happening. Nothing here is needed to use the app.</div>
           <div class="frow" style="margin-top:10px">
             <span class="flabel" data-i18n="ui_shop_port_label">Shop port on the console</span>
-            <input id="setPort" placeholder="8710" inputmode="numeric" aria-label="Shop port on the PS5">
+            <input id="setPort" placeholder="8710" inputmode="numeric" aria-label="Shop port on the console" data-i18n-aria="ui_shop_port_label">
           </div>
           <div class="svc"><span class="k" data-i18n="ui_console_ftp">Console FTP</span><span class="v mono ell" id="cpFtp">-</span></div>
           <div class="hint mono" id="engLogBox" style="display:none;white-space:pre-wrap;max-height:190px;overflow:auto;margin-top:6px;font-size:10.5px;line-height:1.5"></div>
@@ -1668,7 +1668,9 @@ var I18N={
     gp_dest_addon_tip:"Patches and reinstalls must go to the same drive as the game, so this is chosen automatically.",
     gp_dest_console_default:"Installs to: console default",
     gp_dest_default_tip:"PS4/PS5 PKG installs follow the PS5's own Installation Location setting (Settings > Storage). Change it on the console to install to Extended Storage.",
+    gp_dest_default_tip_ps4:"PKG installs follow the PS4's own Installation Location setting (Settings > Storage). Change it on the console to install to extended storage.",
     tm_all_mods_disabled:"All mods disabled",
+    tm_moved_ok:"Moved {p1} ✓",
     tm_there_was_nothing_waiting_to_start:"There was nothing waiting to start",
     tm_helpers_start_immediately_least_safe_after_wak:"Helpers start immediately — least safe after waking from rest",
     tm_nothing_left_to_stop_safe_to_rest:"Nothing left to stop — safe to rest the console",
@@ -1788,6 +1790,7 @@ var I18N={
     ui_aria_install_console:"Install on which console",
     gp_install_on:"Install on {console}",
     gp_console_offline:" · offline",
+    gp_tip_console_asleep:"{console} is asleep. Wake it first, or this waits in the queue until it answers.",
     gp_tip_install_base:"Install this game on the {console}. It goes to whichever drive that console's own installation-location setting points at.",
     gp_tip_install_update:"Install the newest update for this game.",
     gp_tip_reinstall:"Install this game again over the copy already on the {console}. Saves are not touched.",
@@ -1968,6 +1971,11 @@ var I18N={
     msg_conn_engine_not_ready:" · not ready to install",
     msg_conn_offline_suffix:" · offline",
     msg_conn_companion_not_answering:"The PC companion is not answering",
+    msg_conn_shop_silent_ps5:"The shop on the PS5 is not answering",
+    msg_conn_shop_silent_ps4:"The shop on the PS4 is not answering",
+    msg_lib_shop_silent_ps5:"The shop on the PS5 is not answering — load it again from Payload Manager.",
+    msg_lib_pc_silent:"The PC with the library is not answering — is PKG MUTANT SHOP still open on it?",
+    msg_lib_cached_banner:"{who} Showing the last list it sent.",
     msg_ver_page_older:"This page is older than the companion it is talking to. Reload the ELF on the PS5 (or refresh) to pick up the matching UI.",
     msg_ver_companion_older:"The companion is older than this page. Rebuild and restart PKG-MUTANT-SHOP.exe on the PC.",
     msg_svc_cannot_tell_from_pc:" · cannot tell from this PC",
@@ -2286,6 +2294,14 @@ var I18N={
     gp_dest_addon_tip:"Los parches y las reinstalaciones tienen que ir al mismo disco que el juego, así que se elige automáticamente.",
     gp_dest_console_default:"Se instala en: destino de la consola",
     gp_dest_default_tip:"Las instalaciones de PKG de PS4/PS5 siguen el ajuste de Ubicación de instalación de la propia PS5 (Ajustes > Almacenamiento). Cámbialo en la consola para instalar en el Almacenamiento ampliado.",
+    gp_dest_default_tip_ps4:"Las instalaciones de PKG siguen el ajuste Installation Location de la propia PS4 (Settings > Storage). Cámbialo en la consola para instalar en el almacenamiento ampliado.",
+    gp_tip_console_asleep:"{console} está en reposo. Actívala primero o esto quedará en la cola hasta que responda.",
+    msg_conn_shop_silent_ps4:"La tienda en la PS4 no responde",
+    msg_conn_shop_silent_ps5:"La tienda en la PS5 no responde",
+    msg_lib_cached_banner:"{who} Se muestra la última lista que envió.",
+    msg_lib_pc_silent:"El PC con la biblioteca no responde. ¿PKG MUTANT SHOP sigue abierto en él?",
+    msg_lib_shop_silent_ps5:"La tienda en la PS5 no responde: cárgala de nuevo desde Payload Manager.",
+    tm_moved_ok:"Se movió {p1} ✓",
     msg_err_no_local_cheat_found:"Todavía no hay ningún archivo de trucos para este juego — suelta uno en la carpeta Entrada y pulsa Reexplorar en Ajustes > Trucos y mods",
     msg_err_game_not_running:"Abre el juego primero — los trucos se escriben en su memoria mientras funciona",
     msg_err_version_mismatch:"Ese archivo se hizo para otra versión del juego, así que no se ha escrito nada",
@@ -2903,6 +2919,14 @@ var I18N={
     gp_dest_addon_tip:"Os patches e as reinstalações têm de ir para a mesma unidade do jogo, por isso isto é escolhido automaticamente.",
     gp_dest_console_default:"Instala em: predefinição da consola",
     gp_dest_default_tip:"As instalações de PKG de PS4/PS5 seguem a definição de Localização de Instalação da própria PS5 (Definições > Armazenamento). Altera-a na consola para instalar no Armazenamento Expandido.",
+    gp_dest_default_tip_ps4:"As instalações de PKG seguem a opção Installation Location do próprio PS4 (Settings > Storage). Altere-a no console para instalar no armazenamento estendido.",
+    gp_tip_console_asleep:"O {console} está em repouso. Ative-o primeiro, ou isto fica na fila até ele responder.",
+    msg_conn_shop_silent_ps4:"A loja no PS4 não responde",
+    msg_conn_shop_silent_ps5:"A loja no PS5 não responde",
+    msg_lib_cached_banner:"{who} Exibindo a última lista recebida.",
+    msg_lib_pc_silent:"O PC com a biblioteca não responde — o PKG MUTANT SHOP ainda está aberto nele?",
+    msg_lib_shop_silent_ps5:"A loja no PS5 não responde — carregue-a novamente pelo Payload Manager.",
+    tm_moved_ok:"Movido: {p1} ✓",
     msg_err_no_local_cheat_found:"Ainda não há ficheiro de cheats para este jogo — larga um na entrada de cheats e carrega em Reanalisar, em Definições > Cheats e mods",
     msg_err_game_not_running:"Abre primeiro o jogo — os cheats são escritos na memória dele em execução",
     msg_err_version_mismatch:"Esse ficheiro foi feito para outra versão do jogo, por isso não foi escrito nada",
@@ -3520,6 +3544,14 @@ var I18N={
     gp_dest_addon_tip:"Les patchs et les réinstallations doivent aller sur le même disque que le jeu : le choix est donc automatique.",
     gp_dest_console_default:"Installation sur : emplacement par défaut de la console",
     gp_dest_default_tip:"Les installations de PKG PS4/PS5 suivent le réglage Emplacement d'installation de la PS5 (Paramètres > Stockage). Modifiez-le sur la console pour installer sur le stockage étendu.",
+    gp_dest_default_tip_ps4:"Les installations de PKG suivent le réglage Installation Location de la PS4 (Settings > Storage). Modifiez-le sur la console pour installer sur le stockage étendu.",
+    gp_tip_console_asleep:"La {console} est en veille. Réveillez-la d'abord, sinon cette action reste dans la file d'attente jusqu'à sa réponse.",
+    msg_conn_shop_silent_ps4:"La boutique sur la PS4 ne répond pas",
+    msg_conn_shop_silent_ps5:"La boutique sur la PS5 ne répond pas",
+    msg_lib_cached_banner:"{who} Affichage de la dernière liste reçue.",
+    msg_lib_pc_silent:"Le PC qui héberge la bibliothèque ne répond pas — PKG MUTANT SHOP est-il toujours ouvert dessus ?",
+    msg_lib_shop_silent_ps5:"La boutique sur la PS5 ne répond pas — rechargez-la depuis Payload Manager.",
+    tm_moved_ok:"Déplacé : {p1} ✓",
     msg_err_no_local_cheat_found:"Il n'y a pas encore de fichier de cheats pour ce jeu — déposez-en un dans la boîte d'entrée des cheats et appuyez sur Réanalyser dans Paramètres > Cheats et mods",
     msg_err_game_not_running:"Lancez d'abord le jeu — les cheats sont écrits dans sa mémoire vive",
     msg_err_version_mismatch:"Ce fichier a été conçu pour une autre version du jeu, donc rien n'a été écrit",
@@ -4137,6 +4169,14 @@ var I18N={
     gp_dest_addon_tip:"Patches und Neuinstallationen müssen auf dasselbe Laufwerk wie das Spiel, deshalb wird das automatisch gewählt.",
     gp_dest_console_default:"Installiert auf: Standard der Konsole",
     gp_dest_default_tip:"PS4-/PS5-PKG-Installationen folgen der Einstellung „Installationsort“ der PS5 (Einstellungen > Speicher). Ändere sie auf der Konsole, um auf den erweiterten Speicher zu installieren.",
+    gp_dest_default_tip_ps4:"PKG-Installationen folgen der Einstellung Installation Location der PS4 (Settings > Storage). Ändere sie auf der Konsole, um auf erweiterten Speicher zu installieren.",
+    gp_tip_console_asleep:"{console} ist im Ruhemodus. Wecke die Konsole auf, sonst bleibt der Vorgang in der Warteschlange, bis sie antwortet.",
+    msg_conn_shop_silent_ps4:"Der Shop auf der PS4 antwortet nicht",
+    msg_conn_shop_silent_ps5:"Der Shop auf der PS5 antwortet nicht",
+    msg_lib_cached_banner:"{who} Angezeigt wird die zuletzt gesendete Liste.",
+    msg_lib_pc_silent:"Der PC mit der Bibliothek antwortet nicht — ist PKG MUTANT SHOP dort noch geöffnet?",
+    msg_lib_shop_silent_ps5:"Der Shop auf der PS5 antwortet nicht — lade ihn erneut über den Payload Manager.",
+    tm_moved_ok:"{p1} verschoben ✓",
     msg_err_no_local_cheat_found:"Für dieses Spiel gibt es noch keine Cheat-Datei — lege eine in den Cheats-Eingang und drücke unter Einstellungen > Cheats & Mods auf „Neu einlesen“",
     msg_err_game_not_running:"Starte zuerst das Spiel — Cheats werden in seinen laufenden Arbeitsspeicher geschrieben",
     msg_err_version_mismatch:"Diese Datei wurde für eine andere Version des Spiels gemacht, deshalb wurde nichts geschrieben",
@@ -4754,6 +4794,14 @@ var I18N={
     gp_dest_addon_tip:"パッチと再インストールはゲームと同じドライブに入れる必要があるため、自動で選ばれます。",
     gp_dest_console_default:"インストール先: 本体の設定どおり",
     gp_dest_default_tip:"PS4/PS5 の PKG は、PS5 本体のインストール先の設定 (設定 > ストレージ) に従います。拡張ストレージに入れたいときは本体で変更してください。",
+    gp_dest_default_tip_ps4:"PKG のインストール先は、PS4 本体の Installation Location（Settings > Storage）の設定に従います。拡張ストレージにインストールするには、本体側で設定を変更してください。",
+    gp_tip_console_asleep:"{console} がスリープ中です。先に本体を起動してください。そのままの場合は、応答があるまでキューで待機します。",
+    msg_conn_shop_silent_ps4:"PS4 のショップが応答していません",
+    msg_conn_shop_silent_ps5:"PS5 のショップが応答していません",
+    msg_lib_cached_banner:"{who} 最後に届いたリストを表示しています。",
+    msg_lib_pc_silent:"ライブラリのある PC が応答していません。その PC で PKG MUTANT SHOP はまだ開いていますか。",
+    msg_lib_shop_silent_ps5:"PS5 のショップが応答していません。Payload Manager から読み込み直してください。",
+    tm_moved_ok:"{p1} を移動しました ✓",
     msg_err_no_local_cheat_found:"このゲームのチートファイルはまだありません — 受信箱にファイルを入れて、設定 > チートと MOD で再スキャンを押してください",
     msg_err_game_not_running:"先にゲームを起動してください — チートは動作中のゲームのメモリーに書き込みます",
     msg_err_version_mismatch:"そのファイルは別のバージョンのゲーム用に作られているため、何も書き込まれていません",
@@ -5371,6 +5419,14 @@ var I18N={
     gp_dest_addon_tip:"الرقع وإعادة التثبيت يجب أن تذهب إلى القرص نفسه الذي عليه اللعبة، فيُختار تلقائيًا.",
     gp_dest_console_default:"يُثبَّت على: الوجهة الافتراضية للجهاز",
     gp_dest_default_tip:"تثبيت حزم PS4/PS5 يتبع إعداد موقع التثبيت في PS5 نفسه (الإعدادات > التخزين). غيّره على الجهاز للتثبيت على التخزين الموسّع.",
+    gp_dest_default_tip_ps4:"تتبع عمليات تثبيت PKG إعداد Installation Location الخاص بجهاز PS4 (Settings > Storage). غيّر الإعداد من الجهاز نفسه للتثبيت على وحدة التخزين الموسّعة.",
+    gp_tip_console_asleep:"{console} في وضع السكون. أيقظه أولًا، وإلا فسينتظر هذا الطلب في قائمة الانتظار حتى يستجيب الجهاز.",
+    msg_conn_shop_silent_ps4:"المتجر على PS4 لا يستجيب",
+    msg_conn_shop_silent_ps5:"المتجر على PS5 لا يستجيب",
+    msg_lib_cached_banner:"{who} يتم عرض آخر قائمة تم استلامها.",
+    msg_lib_pc_silent:"الكمبيوتر الذي يحتوي على المكتبة لا يستجيب — هل ما زال PKG MUTANT SHOP مفتوحًا عليه؟",
+    msg_lib_shop_silent_ps5:"المتجر على PS5 لا يستجيب — أعد تحميله من Payload Manager.",
+    tm_moved_ok:"تم نقل {p1} ✓",
     msg_err_no_local_cheat_found:"لا يوجد ملف أكواد غش لهذه اللعبة بعد — ضع واحدًا في صندوق وارد الأكواد واضغط إعادة الفحص في الإعدادات > الأكواد والتعديلات",
     msg_err_game_not_running:"شغّل اللعبة أولًا — تُكتب أكواد الغش في ذاكرتها أثناء التشغيل",
     msg_err_version_mismatch:"هذا الملف مُعدّ لإصدار آخر من اللعبة، فلم يُكتب أي شيء",
@@ -5801,6 +5857,14 @@ var I18N={
     gp_dest_console_default:"安装到：主机默认位置",
     gp_dest_console_only_tip:"选择硬盘需要电脑端应用。只用主机时，请在 ⋯ 菜单里用“移动到其他硬盘”把游戏放到你想要的位置。",
     gp_dest_default_tip:"PS4/PS5 的 PKG 安装遵循 PS5 自己的安装位置设置（设置 > 存储）。要装到扩展存储，请在主机上改这项设置。",
+    gp_dest_default_tip_ps4:"PKG 安装会遵循 PS4 自身的 Installation Location 设置（Settings > Storage）。若要安装到扩展存储，请在主机上更改该设置。",
+    gp_tip_console_asleep:"{console} 正在休眠。请先唤醒它，否则此项会一直在队列中等待，直到它响应。",
+    msg_conn_shop_silent_ps4:"PS4 上的商店没有响应",
+    msg_conn_shop_silent_ps5:"PS5 上的商店没有响应",
+    msg_lib_cached_banner:"{who} 当前显示的是它最后发送的列表。",
+    msg_lib_pc_silent:"存放库的那台 PC 没有响应——PKG MUTANT SHOP 是否仍在这台 PC 上运行？",
+    msg_lib_shop_silent_ps5:"PS5 上的商店没有响应——请从 Payload Manager 重新加载。",
+    tm_moved_ok:"已移动 {p1} ✓",
     about:"关于",
     app_version:"应用版本",
     back:"返回",
@@ -6459,6 +6523,14 @@ var I18N={
     gp_dest_console_default:"यहाँ इंस्टॉल होगा: कंसोल की डिफ़ॉल्ट जगह",
     gp_dest_console_only_tip:"ड्राइव चुनने के लिए PC ऐप चाहिए। सिर्फ़ कंसोल पर, ⋯ मेनू के “दूसरी ड्राइव पर ले जाएँ” से गेम को अपनी पसंद की जगह रखें।",
     gp_dest_default_tip:"PS4/PS5 PKG इंस्टॉल PS5 की अपनी Installation Location सेटिंग (Settings > Storage) के अनुसार होते हैं। एक्सटेंडेड स्टोरेज पर इंस्टॉल करना हो तो इसे कंसोल पर बदलें।",
+    gp_dest_default_tip_ps4:"PKG इंस्टॉल PS4 की अपनी Installation Location सेटिंग (Settings > Storage) के अनुसार होते हैं। एक्सटेंडेड स्टोरेज में इंस्टॉल करने के लिए इसे कंसोल पर बदलें।",
+    gp_tip_console_asleep:"{console} स्लीप मोड में है। पहले इसे जगाएँ, वरना यह कतार में तब तक रुका रहेगा जब तक कंसोल जवाब नहीं देता।",
+    msg_conn_shop_silent_ps4:"PS4 पर शॉप जवाब नहीं दे रही",
+    msg_conn_shop_silent_ps5:"PS5 पर शॉप जवाब नहीं दे रही",
+    msg_lib_cached_banner:"{who} पिछली बार भेजी गई सूची दिखाई जा रही है।",
+    msg_lib_pc_silent:"लाइब्रेरी वाला PC जवाब नहीं दे रहा — क्या उस पर PKG MUTANT SHOP अब भी खुला है?",
+    msg_lib_shop_silent_ps5:"PS5 पर शॉप जवाब नहीं दे रही — इसे Payload Manager से दोबारा लोड करें।",
+    tm_moved_ok:"{p1} को ले जाया गया ✓",
     about:"परिचय",
     app_version:"ऐप संस्करण",
     back:"वापस",
@@ -7117,6 +7189,14 @@ var I18N={
     gp_dest_console_default:"Установка на: диск по умолчанию",
     gp_dest_console_only_tip:"Выбор диска доступен только в приложении на ПК. На самой консоли перенесите игру куда нужно через «Перенести на другой диск» в меню ⋯.",
     gp_dest_default_tip:"Установка PKG для PS4/PS5 подчиняется настройке места установки на самой PS5 («Настройки» > «Хранилище»). Измените её на консоли, чтобы ставить на расширенное хранилище.",
+    gp_dest_default_tip_ps4:"Установка PKG подчиняется настройке Installation Location на самом PS4 (Settings > Storage). Чтобы устанавливать на расширенный накопитель, измените её на консоли.",
+    gp_tip_console_asleep:"{console} спит. Сначала разбудите консоль, иначе задача будет ждать в очереди, пока консоль не ответит.",
+    msg_conn_shop_silent_ps4:"Магазин на PS4 не отвечает",
+    msg_conn_shop_silent_ps5:"Магазин на PS5 не отвечает",
+    msg_lib_cached_banner:"{who} Показан последний полученный список.",
+    msg_lib_pc_silent:"ПК с библиотекой не отвечает — на нём ещё открыт PKG MUTANT SHOP?",
+    msg_lib_shop_silent_ps5:"Магазин на PS5 не отвечает — загрузите его заново через Payload Manager.",
+    tm_moved_ok:"Перемещено: {p1} ✓",
     about:"О программе",
     app_version:"Версия приложения",
     back:"Назад",
@@ -7775,6 +7855,14 @@ var I18N={
     gp_dest_console_default:"Si installa su: unità predefinita della console",
     gp_dest_console_only_tip:"Per scegliere l'unità serve l'app sul PC. Sulla sola console, metti il gioco dove vuoi con “Sposta su un'altra unità” nel menu ⋯.",
     gp_dest_default_tip:"Le installazioni dei PKG PS4/PS5 seguono l'impostazione Posizione di installazione della PS5 (Impostazioni > Archiviazione). Cambiala sulla console per installare sull'archiviazione estesa.",
+    gp_dest_default_tip_ps4:"Le installazioni PKG seguono l'impostazione Installation Location della PS4 (Settings > Storage). Modificala sulla console per installare sull'archiviazione estesa.",
+    gp_tip_console_asleep:"{console} è in sospensione. Riattivala, oppure l'operazione resta in coda finché non risponde.",
+    msg_conn_shop_silent_ps4:"Lo shop sulla PS4 non risponde",
+    msg_conn_shop_silent_ps5:"Lo shop sulla PS5 non risponde",
+    msg_lib_cached_banner:"{who} Viene mostrato l'ultimo elenco ricevuto.",
+    msg_lib_pc_silent:"Il PC con la libreria non risponde — PKG MUTANT SHOP è ancora aperto su quel PC?",
+    msg_lib_shop_silent_ps5:"Lo shop sulla PS5 non risponde — caricalo di nuovo da Payload Manager.",
+    tm_moved_ok:"Spostamento completato: {p1} ✓",
     about:"Informazioni",
     app_version:"Versione app",
     back:"Indietro",
@@ -8433,6 +8521,14 @@ var I18N={
     gp_dest_console_default:"설치 위치: 콘솔 기본값",
     gp_dest_console_only_tip:"드라이브를 고르려면 PC 앱이 필요합니다. 콘솔만 사용할 때는 ⋯ 메뉴의 “다른 드라이브로 이동”으로 원하는 곳에 게임을 옮기세요.",
     gp_dest_default_tip:"PS4/PS5 PKG 설치는 PS5 자체의 설치 위치 설정(설정 > 저장공간)을 따릅니다. 확장 저장공간에 설치하려면 콘솔에서 이 설정을 바꾸세요.",
+    gp_dest_default_tip_ps4:"PKG 설치는 PS4 자체의 Installation Location 설정(Settings > Storage)을 따릅니다. 확장 저장소에 설치하려면 콘솔에서 이 설정을 바꾸세요.",
+    gp_tip_console_asleep:"{console}이(가) 절전 상태입니다. 먼저 깨우세요. 그러지 않으면 응답할 때까지 대기열에서 기다립니다.",
+    msg_conn_shop_silent_ps4:"PS4의 상점이 응답하지 않습니다",
+    msg_conn_shop_silent_ps5:"PS5의 상점이 응답하지 않습니다",
+    msg_lib_cached_banner:"{who} 마지막으로 받은 목록을 표시합니다.",
+    msg_lib_pc_silent:"라이브러리가 있는 PC가 응답하지 않습니다 — 그 PC에서 PKG MUTANT SHOP이 아직 열려 있나요?",
+    msg_lib_shop_silent_ps5:"PS5의 상점이 응답하지 않습니다 — Payload Manager에서 다시 불러오세요.",
+    tm_moved_ok:"{p1} 이동 완료 ✓",
     about:"정보",
     app_version:"앱 버전",
     back:"뒤로",
@@ -9091,6 +9187,14 @@ var I18N={
     gp_dest_console_default:"Kurulacağı yer: konsol varsayılanı",
     gp_dest_console_only_tip:"Disk seçmek için PC uygulaması gerekir. Konsolda tek başınayken oyunu istediğiniz yere ⋯ menüsündeki “Başka diske taşı” ile koyun.",
     gp_dest_default_tip:"PS4/PS5 PKG kurulumları PS5'in kendi Kurulum Konumu ayarını izler (Ayarlar > Depolama). Genişletilmiş Depolama'ya kurmak için bunu konsoldan değiştirin.",
+    gp_dest_default_tip_ps4:"PKG kurulumları PS4'ün kendi Installation Location ayarını izler (Settings > Storage). Genişletilmiş depolamaya kurmak için bu ayarı konsoldan değiştirin.",
+    gp_tip_console_asleep:"{console} uyku modunda. Önce uyandırın; uyandırmazsanız bu iş, konsol yanıt verene kadar kuyrukta bekler.",
+    msg_conn_shop_silent_ps4:"PS4'teki mağaza yanıt vermiyor",
+    msg_conn_shop_silent_ps5:"PS5'teki mağaza yanıt vermiyor",
+    msg_lib_cached_banner:"{who} Son gönderdiği liste gösteriliyor.",
+    msg_lib_pc_silent:"Kitaplığın bulunduğu PC yanıt vermiyor — PKG MUTANT SHOP orada hâlâ açık mı?",
+    msg_lib_shop_silent_ps5:"PS5'teki mağaza yanıt vermiyor — Payload Manager üzerinden yeniden yükleyin.",
+    tm_moved_ok:"{p1} taşındı ✓",
     about:"Hakkında",
     app_version:"Uygulama sürümü",
     back:"Geri",
@@ -9749,6 +9853,14 @@ var I18N={
     gp_dest_console_default:"Instaluje na: domyślny dysk konsoli",
     gp_dest_console_only_tip:"Wybór dysku wymaga aplikacji na komputerze. Na samej konsoli przenieś grę tam, gdzie chcesz, poleceniem „Przenieś na inny dysk” w menu ⋯.",
     gp_dest_default_tip:"Instalacje PKG dla PS4/PS5 kierują się ustawieniem Miejsce instalacji w PS5 (Ustawienia > Pamięć). Zmień je na konsoli, aby instalować na pamięci rozszerzonej.",
+    gp_dest_default_tip_ps4:"Instalacje PKG trafiają tam, gdzie wskazuje ustawienie Installation Location na PS4 (Settings > Storage). Zmień je na konsoli, aby instalować na pamięci rozszerzonej.",
+    gp_tip_console_asleep:"{console} jest w trybie uśpienia. Wybudź konsolę albo zadanie poczeka w kolejce, aż konsola odpowie.",
+    msg_conn_shop_silent_ps4:"Sklep na PS4 nie odpowiada",
+    msg_conn_shop_silent_ps5:"Sklep na PS5 nie odpowiada",
+    msg_lib_cached_banner:"{who} Widoczna jest ostatnia otrzymana lista.",
+    msg_lib_pc_silent:"Komputer z biblioteką nie odpowiada — czy PKG MUTANT SHOP jest na nim nadal otwarty?",
+    msg_lib_shop_silent_ps5:"Sklep na PS5 nie odpowiada — wczytaj go ponownie w Payload Manager.",
+    tm_moved_ok:"Przeniesiono {p1} ✓",
     about:"O programie",
     app_version:"Wersja aplikacji",
     back:"Wstecz",
@@ -10407,6 +10519,14 @@ var I18N={
     gp_dest_console_default:"Installeert naar: standaard van de console",
     gp_dest_console_only_tip:"Een schijf kiezen kan alleen met de pc-app. Op de console zelf zet je de game waar je hem wilt met “Naar een andere schijf verplaatsen” in het ⋯-menu.",
     gp_dest_default_tip:"PS4/PS5 PKG-installaties volgen de eigen instelling Installatielocatie van de PS5 (Instellingen > Opslag). Wijzig die op de console om naar uitgebreide opslag te installeren.",
+    gp_dest_default_tip_ps4:"PKG-installaties volgen de eigen instelling Installation Location van de PS4 (Settings > Storage). Wijzig die op de console om naar uitgebreide opslag te installeren.",
+    gp_tip_console_asleep:"{console} slaapt. Maak de console eerst wakker, anders blijft dit in de wachtrij staan tot hij antwoordt.",
+    msg_conn_shop_silent_ps4:"De shop op de PS4 antwoordt niet",
+    msg_conn_shop_silent_ps5:"De shop op de PS5 antwoordt niet",
+    msg_lib_cached_banner:"{who} Dit is de laatst ontvangen lijst.",
+    msg_lib_pc_silent:"De pc met de bibliotheek antwoordt niet — staat PKG MUTANT SHOP daar nog open?",
+    msg_lib_shop_silent_ps5:"De shop op de PS5 antwoordt niet — laad hem opnieuw vanuit Payload Manager.",
+    tm_moved_ok:"{p1} verplaatst ✓",
     about:"Over",
     app_version:"App-versie",
     back:"Terug",
@@ -11261,6 +11381,11 @@ function fillConsoleSel(g,keep){
   if(!pick){ var on=list.filter(function(c){return c.online;}); pick=(on.length?on[0]:list[0]).id; }
   sel.value=pick;
   wrap.style.display="";
+  /* The same overlay treatment the destination picker directly below this one gets. It has had a
+     .selmarq of its own in the markup since it was added and nothing ever filled it, so
+     "Install on: Living room PS4 (offline)" was cut off with an ellipsis while the control under
+     it scrolled its whole text - and on a TV the cut-off half is the half that names the machine. */
+  syncDriveMarquee(sel);
 }
 function installsAsBackup(g){
   var b=g&&g.base&&g.base[0];
@@ -11294,6 +11419,14 @@ function backupDriveOf(g){
    lists the PCs, using it here offered another PC as an install destination and dropped every USB
    the console had not mounted yet. The destinations are a fixed set of places on the console; the
    live list only adds real free space and better labels to them. */
+/* THE PS4'S OWN DESTINATIONS, for the case where it has not answered yet. Its internal drive is
+   an HDD, it has no ext0/ext1 pair and no usb7 - ps4-app/onconsole/server_ps4.c's send_devices
+   reports internal plus usb0..usb6 and nothing else - so the eleven below were three ids the
+   console cannot honour, and a fallback entry carries no `free`, which reads downstream as
+   "fits": one of them could become the pre-selected destination with no user action at all. */
+var PS4_DESTS=[{id:"internal",label:"Internal HDD"},{id:"usb0",label:"USB0"},{id:"usb1",label:"USB1"},
+               {id:"usb2",label:"USB2"},{id:"usb3",label:"USB3"},{id:"usb4",label:"USB4"},
+               {id:"usb5",label:"USB5"},{id:"usb6",label:"USB6"}];
 var PS5_DESTS=[{id:"internal",label:"Internal SSD"},{id:"ext0",label:"Extended (ext0)"},
                {id:"ext1",label:"Extended (ext1)"},{id:"usb0",label:"USB0"},{id:"usb1",label:"USB1"},
                {id:"usb2",label:"USB2"},{id:"usb3",label:"USB3"},{id:"usb4",label:"USB4"},
@@ -11316,6 +11449,11 @@ function consoleDevices(cid){
   for(var i=0;i<list.length;i++){
     if(list[i]&&String(list[i].id)===String(cid)&&list[i].devices) return list[i].devices;
   }
+  /* ...but not for a PS4. The flat `ps5` key is one console's list under a name from when a PS5
+     was the only console there could be; handing it to a PS4 that is simply missing from this
+     answer describes the wrong machine. An empty list is the honest "we do not know yet", and it
+     is what makes ps5Destinations() fall back to the PS4's own ids rather than the PS5's. */
+  if(cid&&consolePlat(cid)==="ps4") return [];
   return d.ps5||[];
 }
 function ps5Destinations(cid){
@@ -11332,7 +11470,10 @@ function ps5Destinations(cid){
      With no live list - the console is asleep, or a PC answered from its static fallback - the old
      behaviour stands and everything is offered, because refusing everything would be worse. */
   var haveLive=live.length>0;
-  var out=PS5_DESTS.map(function(d){
+  /* A console that does not state a platform is a PS5, the same rule as everywhere else, so
+     nothing that is not explicitly a PS4 loses the eleven-id list it has always had. */
+  var base=(cid&&consolePlat(cid)==="ps4")?PS4_DESTS:PS5_DESTS;
+  var out=base.map(function(d){
     var l=byId[d.id];
     if(!l) return {id:d.id,label:d.label,detected:haveLive?false:undefined};
     /* The console says which are really plugged in; the PC keeps a fixed list and says nothing,
@@ -11351,7 +11492,10 @@ function ps5Destinations(cid){
 var state = {
   games: [], installed: new Set(), running: "", filter: "all", plat: "all", sort: "name", search: "",
   current: null, online: false, empty: true, health: null, config: null,
-  console: "", consoles: [], consoleById: {},
+  /* The picked console survives a reload. loadConsoles() discards anything here that no longer
+     names a known console, and "all" is deliberately not restored - it is a view, not a target. */
+  console: (function(){try{var v=localStorage.getItem("pms.console")||"";return v==="all"?"":v;}catch(e){return "";}})(),
+  consoles: [], consoleById: {},
   queue: [],          // local/simulated tasks
   serverTasks: [],    // polled from companion
   drives: [],         // real drives from /api/storage — no fabricated usage
@@ -11944,7 +12088,7 @@ function buildCard(g){
 /* ============================ RENDER: DRIVES ============================ */
 function loadStorage(){
   if(API===null){state.drives=[];renderDrives();return;}
-  api("/api/storage").then(function(s){
+  api("/api/storage"+conQS()).then(function(s){
     state.drives=(s.drives||[]);renderDrives();
   }).catch(function(){state.drives=[];renderDrives();});
 }
@@ -11954,8 +12098,11 @@ function loadDevices(){                          // [B6] PC drives + PS5 install
 }
 /* Is the cached list worth building a picker from? Older than 20 s, or the PC's static fallback -
    eleven ids with no free-space figure on any of them - and the answer is no. */
-function devicesStale(){
-  var list=state.devices&&state.devices.ps5;
+/* PER CONSOLE. The flat `ps5` key is whichever console answered first, so with a PS4 selected the
+   PS5's free-space figures could declare the cache "fresh" and the PS4's picker was never re-read
+   for the rest of that 20 s window - and the mirror image leaves a PS5 panel blind. */
+function devicesStale(cid){
+  var list=cid?consoleDevices(cid):(state.devices&&state.devices.ps5);
   if(!list||!list.length) return true;
   if(Date.now()-(state.devicesAt||0)>20000) return true;
   return !list.some(function(x){return x&&x.free!=null;});
@@ -12223,7 +12370,7 @@ function openDrawer(g,repaint){
      space, no `detected` - sat in it for the rest of the session: the picker offered USB7 on a
      console with one stick and could never say "not enough room". Ask again whenever the cached
      list is stale or blind, and repaint from the fresh answer if this panel is still the one open. */
-  if(devicesStale()) loadDevices().then(function(d){ if(d&&state.current===g) fillDriveSel(g,st,isMount,true); });
+  if(devicesStale(panelConsole(g))) loadDevices().then(function(d){ if(d&&state.current===g) fillDriveSel(g,st,isMount,true); });
   $("#installAll").onclick=function(){
     if(st==="none"){ if(g.base&&g.base[0]) installItem(g,g.base[0],"base",$("#installAll")); else toast(tsub("tm_no_installable_base_for",{p1:g.name})); }
     else if(st==="upd"&&g.updates&&g.updates.length){ installItem(g,g.updates[g.updates.length-1],"update",$("#installAll")); }
@@ -12263,18 +12410,25 @@ function openDrawer(g,repaint){
         ? t("gp_tip_install_update")
         : tsub("gp_tip_reinstall",{console:_dev}));
     }
+    /* SAY IT BEFORE THE PRESS, not sixty seconds after it. An offline console is already tagged in
+       the picker, but the button beside it stayed fully primary and the job then sat until the
+       transfer timed out and the queue held it with "PS5 is not reachable" - which reads as
+       "installing is broken" rather than "that console is asleep". Only an explicit false: a
+       console whose state we have not been told is not one to warn about. */
+    var _pcid=panelConsole(g);
+    var _pc=state.consoleById&&state.consoleById[_pcid];
+    if(_pc&&_pc.online===false){
+      var _pt=_ia.getAttribute("data-tip")||"";
+      _ia.classList.add("tip");
+      _ia.setAttribute("data-tip",(_pt?_pt+" ":"")+tsub("gp_tip_console_asleep",{console:(_pc.name||_pc.id)}));
+    }
   }
-  // "Send to PS5" — FTP the PKG to the console for the Debug Package Installer (works without DPI). Only for PC-folder PKGs.
-  var sendBtn=$("#sendPkg");
-  sendBtn.style.display="none";   // primary Install now does the full FTP + on-console AppInstallPkg
-  sendBtn.onclick=function(){
-    if(API===null){toast(t("tm_needs_the_companion_running"));return;}
-    var it=g.base[0];sendBtn.disabled=true;sendBtn.textContent=t("gp_send_sending");openDock(true);
-    api("/api/install",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({install_key:it.install_key,title_id:g.title_id,name:g.name,via:"ftp",console:state.console||""})})
-    .then(function(r){if(r.error){toast(errText(r,t("tm_the_console_would_not_take_it")),"err");}else{toast(tsub("tm_sending_to_watch_the_queue",{p1:g.name,p2:r.dest}),"ok");pollQueue();}sendBtn.disabled=false;sendBtn.textContent=t("gp_btn_send_to_ps5");})
-    .catch(function(){toast(t("tm_the_pc_running_the_library_did_not"),"err");sendBtn.disabled=false;sendBtn.textContent=t("gp_btn_send_to_ps5");});
-  };
+  /* "Send to PS5" is gone. It was set to display:none on every single paint, so no press could
+     ever reach this handler, and nothing behind it was alive either: no server reads the
+     `via:"ftp"` flag it sent, and the POST omitted drive/kind/mode, so un-hiding it would have
+     fired an ordinary install to the default drive and then toasted r.dest, which the ordinary
+     install lane does not always return. The primary Install already does the FTP copy plus the
+     on-console AppInstallPkg, which is what this button was asking for. */
 
   // [B8] Queue button + [B12] overflow (⋯) actions
   var qb=$("#queueBtn");
@@ -12376,7 +12530,11 @@ function fillDriveSel(g,st,isMount,keep){
     // "Installation location" system setting - the app cannot override it, so say so plainly.
     var o2=el("option");o2.value="internal";o2.textContent=t("gp_dest_console_default");ds.appendChild(o2);
     ds.disabled=true;ds.classList.add("tip");
-    ds.setAttribute("data-tip",t("gp_dest_default_tip"));
+    /* THE SENTENCE IS ABOUT A PLATFORM'S OWN SYSTEM SETTING, so it has to name the right
+       platform. This is the hover text on the disabled destination control for the FIRST install
+       of any PKG, and it is reached with no platform gate at all - so it pointed a PS4 owner at a
+       PS5 menu path, and at "Extended Storage", which is a PS5 word. */
+    ds.setAttribute("data-tip",t(consolePlat(panelConsole(g))==="ps4"?"gp_dest_default_tip_ps4":"gp_dest_default_tip"));
   }
   syncDriveMarquee();
 }
@@ -12386,9 +12544,10 @@ function fillDriveSel(g,st,isMount,keep){
    .selwrap). Measured, not assumed: the overlay is shown hidden for one layout pass so its width
    can be read; if the text fits, nothing changes and the select paints its own text. The speed
    follows the length so every message reads at the same pace. Reduced motion keeps the select's
-   own ellipsis instead. Re-run on every rebuild, on change, and on resize. */
-function syncDriveMarquee(){
-  var ds=$("#driveSel"); if(!ds) return;
+   own ellipsis instead. Re-run on every rebuild, on change, and on resize. Both pickers in the
+   panel footer are driven through here - pass the <select>; no argument still means #driveSel. */
+function syncDriveMarquee(sel){
+  var ds=sel||$("#driveSel"); if(!ds) return;
   var wrap=ds.parentNode, mq=wrap&&wrap.querySelector?wrap.querySelector(".selmarq"):null;
   if(!wrap||!mq||!wrap.classList||!wrap.classList.contains("selwrap")) return;
   var span=mq.firstChild; if(!span){span=el("span");mq.appendChild(span);}
@@ -12421,7 +12580,14 @@ if(!window._mqWired){
   window._mqWired=true;
   var _mqSel=$("#driveSel");
   if(_mqSel) _mqSel.addEventListener("change",function(){syncDriveMarquee();});
-  window.addEventListener("resize",function(){ if(state&&state.current) syncDriveMarquee(); });
+  /* No change listener for the console picker: its own onchange repaints the whole panel through
+     openDrawer(), and fillConsoleSel() re-runs the marquee at the end of that. A resize repaints
+     nothing, so both pickers have to be re-measured here. */
+  window.addEventListener("resize",function(){
+    if(!state||!state.current) return;
+    syncDriveMarquee();
+    var pcs=$("#panelConsoleSel"); if(pcs) syncDriveMarquee(pcs);
+  });
 }
 /* A PS5 backup runs from whichever drive it sits on, so "installing" one really means
    putting it on the drive you want it to live on. Copy first, verify, then remove the
@@ -12430,7 +12596,19 @@ function moveGame(g){
   var src=g.local_path||(g.base&&g.base[0]&&g.base[0].path);
   if(!src){toast(t("tm_nothing_to_move"),"err");return;}
   api("/api/devices").then(function(d){
-    var drives=(d&&d.ps5)||[];
+    /* THE DRIVES OF THE CONSOLE THIS PANEL IS ABOUT. `ps5` is the flat first-console key, which
+       the companion fills from whichever console answered first, so a PS5 backup was offered the
+       PS4's drives whenever the PS5 was asleep or the PS4 sorted first in config.json. Falls back
+       to the flat key when the named console is not in this answer - an older companion, or a
+       console that has not been probed - so this is never worse than what it replaces. */
+    var _mvC=panelConsole(g)||state.console||"";
+    var drives=(function(){
+      var lst=(d&&d.consoles)||[];
+      for(var i=0;i<lst.length;i++){
+        if(lst[i]&&String(lst[i].id)===String(_mvC)&&lst[i].devices) return lst[i].devices;
+      }
+      return (d&&d.ps5)||[];
+    })();
     var here=(g.source||"").toLowerCase();
     /* Only drives that are actually plugged in. The list used to include every id the console
        could ever have - USB1 through USB7 on a console with one USB drive - each offering an
@@ -12488,7 +12666,7 @@ function pollMove(){
       _moveT=setTimeout(pollMove,4000);
       return;
     }
-    if(m.done) toast(m.ok?("Moved "+(m.name||"")+" ✓")
+    if(m.done) toast(m.ok?tsub("tm_moved_ok",{p1:(m.name||"")})
                             :errText(m,t("tm_the_move_did_not_finish_nothing_was")),m.ok?"ok":"err");
     loadLibrary();
   }).catch(function(){
@@ -12709,6 +12887,19 @@ function infoSection(title,msg,count){
   s.insertAdjacentHTML("beforeend",cheatNote(msg));   // cheatNote returns HTML text, not a node
   return s;
 }
+/* WHICH CONSOLE THE MODS PANEL IS ABOUT. The mod engine is a PS5 capability, so the panel's
+   console is named on the wire ONLY when it is a console we know and is not a PS4: an explicit
+   name out-ranks the companion's want="ps5" fallback, so naming a PS4 would turn every read and
+   write in this section into "Mods and cheats are not available on the PS4 yet". Unnamed, the PC
+   resolved these to whichever console matched the requester's address and then to config order -
+   so a phone, or a second PS5, read and wrote the machine the panel was not about. */
+function modsConsole(g){
+  var id=panelConsole(g);
+  if(!id||id==="all") return "";
+  if(!state.consoleById||!state.consoleById[id]) return "";
+  return consolePlat(id)==="ps4"?"":id;
+}
+function modsConsoleQ(g,sep){var id=modsConsole(g);return id?((sep||"?")+"console="+encodeURIComponent(id)):"";}
 function cheatSection(g){
   var s=el("div","sec");
   s.appendChild(el("h3",null,esc(t("gp_sec_mods_patches"))+' <span class="count" id="cheatCount">…</span>'));
@@ -12734,7 +12925,15 @@ function cheatSection(g){
 
   // Defer until the drawer has finished opening — keeps the panel snappy on the console browser.
   setTimeout(function(){
-  api("/api/mods/"+encodeURIComponent(g.title_id)).then(function(r){
+  api("/api/mods/"+encodeURIComponent(g.title_id)+modsConsoleQ(g)).then(function(r){
+    /* A CONSOLE THAT SAYS "I DO NOT DO THIS" IS NOT AN UNREACHABLE CONSOLE. The PS4 payload
+       answers /api/mods with {"ok":false,"unsupported":true,"platform":"ps4"} and no "reachable"
+       key, so this line told a healthy PS4 owner - on a page that very console had just drawn -
+       to go and load the app on it. The refusal is tested first; only a console that never
+       answered at all is unreachable. The same 400 comes back from a companion with no console
+       set up, and that one is still reported as unreachable. */
+    if(r.unsupported===true||String(r.platform||"").toLowerCase()==="ps4"){cc().textContent="—";
+      body.innerHTML=cheatNote(t("gp_mods_ps5_only"));return;}
     if(!r.reachable){cc().textContent="—";
       body.innerHTML=cheatNote(t("gp_mods_unreachable"));return;}
     if(!r.ok){cc().textContent="0";
@@ -12790,7 +12989,8 @@ function cheatSection(g){
       off.onclick=function(){
         off.disabled=true;
         api("/api/mods/"+encodeURIComponent(g.title_id)+"/disable-all",{method:"POST",
-          headers:{"Content-Type":"application/json"},body:"{}"},65000)   /* the PC's own 60 s, plus a little */
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({console:modsConsole(g)})},65000)   /* the PC's own 60 s, plus a little */
         .then(function(r){
           // This used to toast "All mods disabled" no matter what came back, so a refusal
           // (game not running, engine unreachable) still read as success.
@@ -12862,7 +13062,13 @@ function applyModBtn(g,m,btn,info){
 function refreshModsQuiet(){
   var g=MODS.game, body=MODS.body;
   if(!g||!body||!document.body.contains(body)) return;
-  api("/api/mods/"+encodeURIComponent(g.title_id)).then(function(r){
+  /* ?state=1 - THIS REFRESH READS r.mods AND NOTHING ELSE. The plain GET made the companion
+     compose the whole patch document first, which is a second console round trip per toggle, and
+     on a title with no installed version - most PS5 titles, they expose no APP_VER - that round
+     trip reads the whole app.db and walks its b-tree. The flag is additive, so a companion that
+     has not been updated answers exactly as it does today, and both console servers strip the
+     ?query before routing. */
+  api("/api/mods/"+encodeURIComponent(g.title_id)+"?state=1"+modsConsoleQ(g,"&")).then(function(r){
     if(MODS.body!==body) return;               // drawer moved on while we were fetching
     if(!r||!r.ok||!r.mods) return;
     r.mods.forEach(function(nm){
@@ -12918,7 +13124,7 @@ function modToggleRow(g,m,info){
       headers:{"Content-Type":"application/json"},
       /* The PC gives the console 60 s for a mod action; the 12 s default here gave up first,
          said "did not answer" and re-armed the button while the toggle was still going through. */
-      body:JSON.stringify({index:m.index,on:turnOn,name:m.name||""})},65000)
+      body:JSON.stringify({index:m.index,on:turnOn,name:m.name||"",console:modsConsole(g)})},65000)
     .then(function(r){
       if(r&&r.ok!==false){
         m.on=turnOn;
@@ -12965,7 +13171,7 @@ function patchRow(g,p,i,info){
     // versions did NOT match, which is the one case the check exists to stop.
     api("/api/mods/"+encodeURIComponent(g.title_id)+"/apply",{method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({index:idx,name:p.name||p.file||""})},65000)   /* the PC's own 60 s, plus a little */
+      body:JSON.stringify({index:idx,name:p.name||p.file||"",console:modsConsole(g)})},65000)   /* the PC's own 60 s, plus a little */
     .then(function(r){
       if(r&&r.ok){
         toast(tsub("tm_patch_applied",{p1:(r.detail?(" — "+r.detail):"")}),"ok");
@@ -13226,8 +13432,13 @@ function renderQueue(){
      second argument and treats the call as a plain toggle, which would flip this class on every
      repaint. The rule is enforced by tools/check_web.py now; this was the last place doing it. */
   if(dock){ if(sum.busy) dock.classList.add("busy"); else dock.classList.remove("busy"); }
-  $("#qn").textContent=tasks.filter(function(t){return t.state!=="playable"&&t.state!=="error"&&t.state!=="canceled";}).length
-                      || tasks.length;
+  /* THE BADGE ANSWERS "HOW MANY ARE STILL PENDING", so when the answer is none it has to say
+     none. The `|| tasks.length` fallback turned that zero back into the number of rows, so three
+     finished installs left the pill reading "All done" beside a yellow 3 until the clear-finished
+     icon was pressed. (The callback parameter is `x`, not `t`: `t` is the translator.) */
+  $("#qn").textContent=tasks.filter(function(x){
+    return x.state!=="playable"&&x.state!=="error"&&x.state!=="canceled";
+  }).length;
   var held=tasks.filter(function(t){return t.state==="held";}).length;    // [B8]
   var sq=$("#startQueue");
   if(sq){sq.style.display=held?"":"none";sq.textContent=t("ui_start_queue")+" ("+held+")";}
@@ -13298,7 +13509,7 @@ function renderQueue(){
        a PS4's - on a row that prints that console's own name two fields along. */
     var where=isMountT?driveLabelOf(tk.drive)
                       :tsub("msg_q_console_decides_drive",
-                            {console:(tk.console?consoleName(tk.console):t("gp_where_console"))});
+                            {console:(tk.console?consoleLabel(tk.console):t("gp_where_console"))});
     var nm=esc(tk.name), sub=esc(tk.kind)+(tk.console?' · '+esc(consoleName(tk.console)):'')+' · '+esc(where);
     var tEl=row.querySelector(".qn .t"), kEl=row.querySelector(".qn .k");
     if(tEl.innerHTML!==nm) tEl.innerHTML=nm;
@@ -13542,6 +13753,22 @@ function paintCheatsCard(h){
   var hasPs5=(state.consoles||[]).some(function(c){return String(c.platform||"").toLowerCase()!=="ps4";});
   note.textContent=t(hasPs5?"gp_mods_ps5_only_switch":"gp_mods_ps5_only");
 }
+/* THE CONNECTION ROW, from one place. It was painted only inside openSettings(), so the panel
+   could sit open with a green "Connected to 10.0.0.99" beside a header pill that had already gone
+   red - and it read h.connected/h.ps5_ip whatever console the page was about, so a PS4 owner
+   reading Settings through the PC was told "Not answering" about a console that was working.
+   Same rule the header pill follows: herePlatform() when a console is reading the page, the
+   picker on a PC, and a console that does not state a platform is a PS5. */
+function paintConnRow(h){
+  h=h||state.health||{};
+  var _hp=herePlatform(h);
+  if(!_hp&&state.console&&state.console!=="all") _hp=consolePlat(state.console);
+  var _p4=(_hp==="ps4");
+  var _con=_p4?!!(h.on_console||h.ps4_online):!!(h.connected||h.on_console);
+  var _ip=_p4?(h.on_console?(h.lan_ip||h.ps4_ip||""):(h.ps4_ip||"")):(h.ps5_ip||"");
+  setLed("ledCon", _con?"on":"off");
+  setTxt("conState", _con?(t("msg_set_connected_to")+(_ip||t("msg_set_the_ps5"))):t("msg_set_not_answering"));
+}
 function paintServices(h,selfIp){
   var ip=selfIp||h.lan_ip||h.ps5_ip||"";
   /* THREE states, not two. ShadowMount binds loopback-only, so the PC genuinely cannot see it -
@@ -13552,7 +13779,14 @@ function paintServices(h,selfIp){
      shadowmount:false because false is the truthful answer to "is it running". The row read
      that as a fault and painted a red alarm light on a console that was working perfectly,
      every time Settings was opened on the PS4. Grey, and a sentence that says why. */
-  if(herePlatform(h)==="ps4"){
+  /* ...and a fleet with no PS5 in it at all is the same "not applicable", even when the page is
+     being read on the PC: an amber "cannot tell from this PC" about a PS5-only service, on a
+     machine that has no PS5, is an alarm colour for nothing. ONLY that case - amber is still the
+     correct painting when a PS5 exists and simply cannot be reached from here. A console that
+     does not state a platform counts as a PS5, which is what console_list's own default encodes;
+     a console serving this page sends no console_list at all and keeps the test above. */
+  var _anyPs5=(h.console_list||[]).some(function(c){return String(c.platform||"ps5").toLowerCase()!=="ps4";});
+  if(herePlatform(h)==="ps4" || (!h.on_console && h.console_list!==undefined && !_anyPs5)){
     setTxt("setSmp",t("msg_svc_backups_not_ps4"));
     setLed("ledSmp","");
   }else if(h.shadowmount===null||h.shadowmount===undefined){
@@ -13573,7 +13807,18 @@ function paintServices(h,selfIp){
      Two machines' ports are not interchangeable, and the only reason it looked right is that both
      default to 8710. Health now states the console's port; the literal is the last resort. */
   var shopPort=(state.config&&state.config.console&&state.config.console.shop_port)||h.shop_port||8710;
-  if(h.on_console||h.engine==="pms-spawn"||h.engine==="pms"){
+  /* THE ROW IS ABOUT THE CONSOLE THIS PAGE IS DESCRIBING. engine_ready and connected are PS5
+     facts, so a PS4 serving files on its own :8710 read as "not reachable" - directly under the
+     grey "Game backups - not on the PS4" row, which made the whole card look broken on a console
+     that was working. Same rule as the header pill. */
+  var _svcHp=herePlatform(h);
+  if(!_svcHp&&state.console&&state.console!=="all") _svcHp=consolePlat(state.console);
+  if(_svcHp==="ps4"){
+    var ip4=(h.on_console?(h.lan_ip||h.ps4_ip||""):(h.ps4_ip||""));
+    var ok4=!!(h.on_console||h.ps4_online);
+    setTxt("setFiles", ok4?((ip4?ip4+":"+shopPort:"")+t("msg_svc_built_in_suffix")):t("msg_svc_not_reachable"));
+    setLed("ledFiles", ok4?"on":"off");
+  }else if(h.on_console||h.engine==="pms-spawn"||h.engine==="pms"){
     /* The words have to agree with the light. Printing the address next to a red LED read as
        "it is there" while the LED said the opposite, which is the kind of small contradiction
        that makes someone stop trusting the whole panel. */
@@ -13605,6 +13850,9 @@ function refreshHealth(){
        it. It used to be dpi_online - "is a third-party daemon listening on 12800" - which is
        permanently false in our own lane even while installs are working. */
     state.health=h;state.online=!!(h.on_console||h.connected);
+    /* The Settings connection row was a snapshot taken when the panel opened, so it stayed green
+       beside a header pill that had already gone red. It follows the poll now, while it is open. */
+    try{ var _sh=$("#settings"); if(_sh&&_sh.classList.contains("show")) paintConnRow(h); }catch(e){}
     /* The shutdown shortcut only means something when a console is actually there. Health already
        says so every few seconds, so the header button follows it without a probe of its own. */
     var _rq=$("#restQuick");
@@ -13648,7 +13896,7 @@ function refreshHealth(){
       // were running. Paint the same status from what the console reports about itself.
       // While a lost PC is being looked for, the pill says that instead - it is the truer thing.
       if(_pcLost) setConn("err",t("msg_conn_companion_lost"));
-      else setConn("online","On-console · works with the PC off");
+      else setConn("online",t("msg_conn_on_console"));
       var cip=h.lan_ip||h.ps5_ip||"127.0.0.1";
       paintServices(h,cip);
       fillLibPath(h);
@@ -13683,7 +13931,7 @@ function refreshHealth(){
       setConn("online",_nm+_ip+
         (_rdy?t("msg_conn_install_ready"):t("msg_conn_engine_not_ready")));
     } else {
-      setConn("offline",_nm+_ip+" · offline");
+      setConn("offline",_nm+_ip+t("msg_conn_offline_suffix"));
     }
     fillLibPath(h);
     paintServices(h,h.ps5_ip);
@@ -13697,7 +13945,13 @@ function refreshHealth(){
        silent one IS the console's shop - blaming a PC companion there sent people to the wrong
        machine. */
     var consoleApi=(PROFILE.onConsole&&API===PROFILE.consoleApi);
-    setConn("err",consoleApi?"The shop on the PS5 is not answering":"The PC companion is not answering");
+    /* NAME THE MACHINE THAT WENT QUIET, in the reader's language. consoleApi is true only when
+       this page is being served BY a console, and PROFILE.platform is set from that console's own
+       /api/health at boot - so on a PS4 this row named a console the owner may not even have, on
+       the machine they were looking at. PROFILE.*, never state.*: only PROFILE survives a PC
+       upgrade, and this is the moment the PC stopped answering. */
+    setConn("err",consoleApi?t(PROFILE.platform==="ps4"?"msg_conn_shop_silent_ps4":"msg_conn_shop_silent_ps5")
+                            :t("msg_conn_companion_not_answering"));
     setLed("ledFiles","off");setLed("ledSmp","off");setLed("ledEngine","off");
     setLed("ledShop","off");setLed("ledPld","off");
     companionLost();
@@ -13760,6 +14014,12 @@ function consoleName(id){return (state.consoleById[id]&&state.consoleById[id].na
 function conQS(sep){
   var c=state.console;
   if(!c||c==="all") return "";
+  /* AND NOT A NAME NOTHING ANSWERS TO. The picked console is remembered between page loads now, so
+     for the moment before /api/consoles comes back it can be an id from a fleet that has since
+     been reconfigured. Most routes fall straight through such a name, but /api/installed reads it
+     as "that console did not answer" and drops back to the PC's own file - so send nothing until
+     the console is one we have actually been told about. */
+  if(!state.consoleById||!state.consoleById[c]) return "";
   return (sep||"?")+"console="+encodeURIComponent(c);
 }
 /* "PS4" or "PS5" for the console currently chosen in the picker - what to CALL it on screen.
@@ -13774,12 +14034,26 @@ function loadConsoles(){
   api("/api/consoles").then(function(r){
     state.consoles=r.consoles||[];state.consoleById={};
     state.consoles.forEach(function(c){state.consoleById[c.id]=c;});
-    var sel=$("#consoleSel");sel.innerHTML="";
+    var sel=$("#consoleSel");
+    /* DO NOT REBUILD A LIST THAT HAS NOT CHANGED. This runs on a 30 s timer, and emptying the
+       <select> while its native popup is open swaps the options out from under the reader - then
+       `sel.value=state.console` below re-forces the committed value, so a D-pad highlight that
+       had been moved but not yet pressed is thrown away. The control this happens to is the one
+       that decides which console receives an install. Same shape as gridSignature(). */
+    var _csig=state.consoles.map(function(c){
+      return c.id+"\u0001"+c.name+"\u0001"+(c.online?1:0);
+    }).join("\u0002");
+    if(sel._pmsSig!==_csig){
+      sel._pmsSig=_csig;
+      sel.innerHTML="";
+      state.consoles.forEach(function(c){
+        var o=el("option");o.value=c.id;o.textContent="🎮 "+c.name+(c.online?" ●":" ○");sel.appendChild(o);
+      });
+      if(state.consoles.length>1){var oa=el("option");oa.value="all";oa.textContent="🎮 All consoles";sel.appendChild(oa);}
+    }
+    /* After the rebuild, not before it: an empty list still has to clear a select that was
+       populated a moment ago. */
     if(!state.consoles.length){sel.style.display="none";return;}
-    state.consoles.forEach(function(c){
-      var o=el("option");o.value=c.id;o.textContent="🎮 "+c.name+(c.online?" ●":" ○");sel.appendChild(o);
-    });
-    if(state.consoles.length>1){var oa=el("option");oa.value="all";oa.textContent="🎮 All consoles";sel.appendChild(oa);}
     /* WHICH CONSOLE THIS PAGE MEANS - and it is NOT "the first one in the list".
        This read state.consoles[0].id, and the list is in config order, so on a setup with a PS5
        and a PS4 every install pressed ON THE PS4 was sent to the PS5. With the PS5 switched off
@@ -13848,16 +14122,22 @@ function loadLibrary(){
     /* KEEP THE LAST GOOD LIST. showEmpty() wiped state.games, which threw away the cached library
        painted a moment earlier and left the console staring at an empty grid with a PC-only
        instruction. The banner says who is not answering, in words for the machine you are on. */
-    var who=state.onConsole ? "The shop on the PS5 is not answering — load it again from Payload Manager."
-          : PROFILE.onConsole ? "The PC with the library is not answering — is PKG MUTANT SHOP still open on it?"
-          : "Companion not reachable. Start it with start.cmd, then reload this page.";
+    /* A PS4 has no Payload Manager - it loads payloads through GoldHEN - so the PS5 recovery step
+       was an instruction the reader could not follow, on a console this app may be the only thing
+       running on. The house wording for this exact state is already written and translated. */
+    var who=state.onConsole ? (PROFILE.platform==="ps4" ? t("msg_eng_detail_shop_down_ps4")
+                                                       : t("msg_lib_shop_silent_ps5"))
+          : PROFILE.onConsole ? t("msg_lib_pc_silent")
+          : t("gp_lib_unreachable");
     if(state.games.length){
-      $("#demoBanner").style.display="flex";$("#demoText").textContent=who+" Showing the last list it sent.";
+      /* `who` is translated now, so the sentence it is glued to has to be too - half a banner in
+         the reader's language and half in English is worse than either. */
+      $("#demoBanner").style.display="flex";$("#demoText").textContent=tsub("msg_lib_cached_banner",{who:who});
       return;
     }
     showEmpty(who);
   });
-  api("/api/installed").then(function(r){state.installed=new Set(r.installed||[]);renderGrid(true);}).catch(function(){});
+  api("/api/installed"+conQS()).then(function(r){state.installed=new Set(r.installed||[]);renderGrid(true);}).catch(function(){});
 }
 function showEmpty(msg){
   state.games=[];state.empty=true;
@@ -13905,10 +14185,25 @@ $("#consoleSel").onchange=function(){
      something else happened to repaint it. */
   try{ if($("#settings").classList.contains("show")){ refreshEngine(); paintCheatsCard(state.health); } }catch(e){}
   try{ loadDevices(); }catch(e){}
+  /* THE DRIVES STRIP, THE PILL AND THE CHOICE ITSELF. Without these the tiles went on showing the
+     other machine's drives until something else happened to ask, and the pill waited out the 6 s
+     health tick - so the picker looked dead. Remembered as well, because state.console was
+     re-guessed from location.hostname on every single page load. */
+  try{ localStorage.setItem("pms.console",state.console); }catch(e){}
+  try{ loadStorage(); }catch(e){}
+  try{ refreshHealth(); }catch(e){}
   try{ if(state.current) openDrawer(state.current,true); }catch(e){}
 };
 $("#dclose").onclick=dismissPanel;$("#dback").onclick=dismissPanel;$("#scrim").onclick=dismissPanel;
-$("#openSettings").onclick=function(){openSettings();};
+$("#openSettings").onclick=function(){
+  /* A FRESH OPEN STARTS CLEAN. Closing Settings throws away whatever was typed, so the amber
+     "Not saved yet" that survived into the next open was standing over fields that held exactly
+     what is saved - the panel accusing itself of holding work that no longer exists. Cleared on
+     the opener rather than inside openSettings(), so that no repaint of the panel can wipe the
+     green "Saved" the Save button has just written. */
+  var ss=$("#saveState"); if(ss){ss.textContent="";ss.className="savestate";ss.style.color="";}
+  openSettings();
+};
 /* Helper autostart is the first thing to rule out when the console misbehaves after
    loading the app: those payloads are not ours and they run continuously. */
 function refreshAutostart(){
@@ -14074,17 +14369,22 @@ function engineDetailText(e){
      silence - the panel exists to say what is missing, and an empty line says nothing. */
   return k?tsub(k,{port:(e&&e.pldmgr_port)||8084}):((e&&e.detail)||"");
 }
-function refreshEngine(){
+/* `quiet` = a background refresh. The "checking" repaint below is the right thing to say when a
+   person pressed something and the wrong thing on a timer: it would blink the row amber every
+   tick. No existing caller passes it, so every hand-driven path behaves exactly as it did. */
+function refreshEngine(quiet){
   var box=$("#engState"); if(!box) return Promise.resolve(null);
   if(API===null){ setTxt("engState",t("msg_eng_demo")); return Promise.resolve(null); }
   /* Say we are asking. With the console off this call waits out its TCP timeouts - measured at
      ~9 seconds - and the rows sat blank for all of it, which reads as broken rather than busy.
      Every message in this app is supposed to be true at the moment it is on screen; "checking"
      is the true thing to say while we are checking. */
-  setTxt("engState",t("msg_eng_checking"));
-  setLed("ledEngine","warn");
-  var _d=$("#engDetail");
-  if(_d){ _d.style.color=""; _d.textContent=t("msg_eng_asking_console"); }
+  if(!quiet){
+    setTxt("engState",t("msg_eng_checking"));
+    setLed("ledEngine","warn");
+    var _d=$("#engDetail");
+    if(_d){ _d.style.color=""; _d.textContent=t("msg_eng_asking_console"); }
+  }
   return api("/api/engine/state"+conQS()).then(function(e){
     /* The console has no /api/engine/state and answers unknown /api/ paths with a bare {}.
        {} is truthy and e.ok is undefined - not false - so the old guard let it through and this
@@ -14167,8 +14467,7 @@ function refreshEngine(){
 function repaintSettingsWords(){
   var sh=$("#settings"); if(!sh||!sh.classList.contains("show")) return;
   var h=state.health||{};
-  var _con=!!(h.connected||h.on_console);
-  setTxt("conState", _con?(t("msg_set_connected_to")+(h.ps5_ip||t("msg_set_the_ps5"))):t("msg_set_not_answering"));
+  paintConnRow(h);
   modeNote();
   var rn=$("#restNote");
   if(rn){
@@ -14184,6 +14483,22 @@ function repaintSettingsWords(){
   if(sc&&sc.textContent&&sc.textContent.indexOf("—")<0) sc.textContent=t("msg_set_consoles_none");
   var ss=$("#setSources");
   if(ss&&ss.textContent&&ss.textContent.indexOf("·")<0) ss.textContent=t("msg_set_sources_none");
+}
+/* THE FLEET LIST, from one place. It was filled where the panel opens and nowhere else, so a
+   console that woke up or went to sleep while Settings sat open never changed its light. */
+function paintSettingsFleet(){
+  if(API===null) return;
+  api("/api/consoles").then(function(r){
+    /* Shown only when there is more than one console to tell apart. With a single PS5 it just
+       repeated the Connection row two lines above it. */
+    var _sc=$("#setConsoles");
+    if(_sc) _sc.style.display=((r.consoles||[]).length!==1)?"":"none";
+    if(!_sc) return;
+    _sc.innerHTML=(r.consoles||[]).map(function(x){
+      /* The port here used to be dpi_port (12800) - a daemon this app no longer talks to. The
+         address alone is what identifies a console; its port is in the field at the top. */
+      return led(x.online)+" "+esc(x.name)+" — "+esc(x.ip);}).join("<br>")||t("msg_set_consoles_none");
+  }).catch(function(){});
 }
 function openSettings(){
   var c=state.config||{};
@@ -14202,7 +14517,14 @@ function openSettings(){
   /* THE PORT BOX USED TO BE dpi.port_v2 - 12800 - which is the port of a daemon this app no longer
      ships, starts or talks to. Typing in it changed nothing and saving it wrote a dead setting.
      It is the shop's own port on the console now, which is the port everything actually uses. */
-  $("#setPort").value=(c.console&&c.console.shop_port)||h.companion_port||8710;
+  /* NEVER companion_port. That is the port THIS PC listens on; this box is the CONSOLE's port,
+     and both ELFs bind theirs as a compile-time constant (ps5-app/onconsole/server.c:52 and
+     ps4-app/onconsole/server_ps4.c:74, both #define PORT 8710). Run the companion on any other
+     port - a second instance, PMS_CONFIG, the test harness on 8791 - and this box offered that
+     port; one Save then aimed every console call at a closed one, on both consoles at once, with
+     nothing on screen to explain it. Health states the console's port; the literal is the last
+     resort. */
+  $("#setPort").value=(c.console&&c.console.shop_port)||h.shop_port||8710;
   // The ownership checkbox was removed from the panel; keep whatever was already saved.
   function pick(id,v,dflt){var e=$(id); if(e) e.value=String(v===undefined||v===null?dflt:v);}
   pick("#setParallel",(c.queue||{}).max_parallel,2);
@@ -14224,9 +14546,7 @@ function openSettings(){
   /* One plain line for "are we actually talking to the PS5". Everything else in that card is a
      detail underneath it, and the panel had no such row at all - you had to read the engine block
      and work it out. */
-  var _con=!!(h.connected||h.on_console);
-  setLed("ledCon", _con?"on":"off");
-  setTxt("conState", _con?(t("msg_set_connected_to")+(h.ps5_ip||t("msg_set_the_ps5"))):t("msg_set_not_answering"));
+  paintConnRow(h);
   paintPcOnly();
   setTxt("aboutCompanion",h.lan_ip?(h.lan_ip+":"+(h.companion_port||"8710")):"—");
   refreshEngine();
@@ -14240,17 +14560,7 @@ function openSettings(){
          s.helpers - null as a red "not running", in different words - and the next health tick
          put the three-state version back, so the row flickered between two truths every 6 s. */
     }).catch(function(){});
-    api("/api/consoles").then(function(r){
-      /* Shown only when there is more than one console to tell apart. With a single PS5 it just
-         repeated the Connection row two lines above it. */
-      var _sc=$("#setConsoles");
-      if(_sc) _sc.style.display=((r.consoles||[]).length!==1)?"":"none";
-      if(!_sc) return;
-      _sc.innerHTML=(r.consoles||[]).map(function(x){
-        /* The port here used to be dpi_port (12800) - a daemon this app no longer talks to. The
-           address alone is what identifies a console; its port is in the field at the top. */
-        return led(x.online)+" "+esc(x.name)+" — "+esc(x.ip);}).join("<br>")||t("msg_set_consoles_none");
-    }).catch(function(){});
+    paintSettingsFleet();
     // Real paths straight from the console, so they can be reached over FTP from here.
     api("/api/network").then(function(d){ renderDevices(d); }).catch(function(){});
     refreshAutostart();
@@ -14264,6 +14574,13 @@ function openSettings(){
          with a controller. `.has` marks the ones the server actually reported. */
       function tip(id,v){
         var e=$(id); if(!e) return;
+        /* ONCE A REAL FOLDER IS IN HERE, THE TOOLTIP IS DATA AND NOT A LABEL ANY MORE.
+           applyI18n() rewrites every [data-i18n-tip] from its key, so changing language replaced
+           the MC4 folder - the only place that path is shown anywhere - with the generic words
+           "MC4 cheats", and nothing refetched it until Settings was reopened. The key stays in
+           the markup for the state before this answer arrives, and is dropped the moment there
+           is something better than a label to show. */
+        if(v) e.removeAttribute("data-i18n-tip");
         e.setAttribute("data-tip", v || "not set up yet");
         e.className = v ? "chip tip has" : "chip tip";
       }
@@ -14341,7 +14658,12 @@ function fillLibPath(h){
   var p=(h&&h.library_paths)||[];
   /* Backslash doubled: "C:\Mutant Games" is C:Mutant Games in a JS string literal - \M is not
      an escape, so the backslash was silently dropped and the panel showed a path nobody has. */
-  setTxt("setLib", p.length? p.join("  ·  ") : "C:\\Mutant Games");
+  /* THE LITERAL IS A PC DEFAULT AND NOTHING ELSE. With the PC off, asleep or lost this row is
+     answered by the console's own API, which has no games folder to name at all - its library is
+     built from app.db plus whatever drives are mounted - and the panel then stated a Windows
+     drive letter that does not exist on the machine being held. A dash is the honest answer. */
+  var _onCon=!!(state.onConsole||(h&&h.on_console));
+  setTxt("setLib", p.length? p.join("  ·  ") : (_onCon? "—" : "C:\\Mutant Games"));
 }
 $("#saveSettings").onclick=function(){
   // content_ownership_ack is intentionally NOT sent: the checkbox is gone, and echoing a
@@ -14373,7 +14695,32 @@ $("#saveSettings").onclick=function(){
         setTimeout(function(){ss.className="savestate";},1800);}
       /* Re-read the config we just wrote rather than trusting what was typed: coerce_config() on
          the PC repairs anything out of range, and the panel should show what was actually kept. */
-      api("/api/config").then(function(cfg){state.config=cfg;openSettings();}).catch(function(){});
+      /* REPAINT ONLY WHAT THIS SAVE COULD HAVE CHANGED. openSettings() re-fires every request the
+         panel makes - refreshPs4App, the engine probe (whose own comment measures ~9 seconds of
+         TCP timeouts with the console off), /api/sources, /api/consoles, /api/network, the 5 s
+         autostart relay and the cheat-paths probe - so pressing Save went quiet for seconds at a
+         time, on the console's own single main thread. An address or the port is the only thing
+         here that changes what any of those would answer, so that save still pays for the full
+         fan-out; every other save just shows what the PC actually kept. */
+      var _was=state.config||{};
+      var _reprobe=(patch.ps5_ip!==(_was.ps5_ip||""))
+                 ||(patch.ps4_ip!==(_was.ps4_ip||""))
+                 ||(patch.console.shop_port!==((_was.console&&_was.console.shop_port)||8710));
+      api("/api/config").then(function(cfg){
+        state.config=cfg;
+        if(_reprobe){ openSettings(); return; }
+        /* The same fallbacks openSettings() uses, so what lands in the boxes after a save is what
+           it would have painted. coerce_config() on the PC repairs anything out of range, which
+           is why this reads the answer back rather than trusting what was typed. */
+        var _h=state.health||{};
+        $("#setIp").value=(cfg.ps5_ip)||_h.ps5_ip||"";
+        var _i4b=$("#setIp4"); if(_i4b) _i4b.value=(cfg.ps4_ip)||"";
+        $("#setPort").value=(cfg.console&&cfg.console.shop_port)||_h.companion_port||8710;
+        function _spick(id,v,dflt){var e=$(id); if(e) e.value=String(v===undefined||v===null?dflt:v);}
+        _spick("#setParallel",(cfg.queue||{}).max_parallel,2);
+        _spick("#setVerify",((cfg.integrity||{}).verify_before_install===false)?0:1,1);
+        _spick("#setAutoScan",((cfg.maintenance||{}).auto_rescan===false)?0:1,1);
+      }).catch(function(){});
       refreshHealth();
     })
     .catch(function(){toast(t("tm_could_not_save_the_pc_did_not"),"err");});
@@ -14689,9 +15036,15 @@ function resolveApi(done){
     return box;
   }
   /* Walk up by hand rather than using closest(): the target can be an <svg> child inside a
-     button, and this keeps working on the console's browser regardless. */
+     button, and this keeps working on the console's browser regardless. CAPPED AT FOUR, because
+     this runs on every single mouseover and the console's stick cursor produces a continuous
+     stream of them while it sweeps across the grid - walking to the document root each time is
+     work done for nothing. Measured against every data-tip in this file: the owner is always a
+     <button>, a <select> or a chip <span>, and the deepest a moused element ever sits below one
+     is the <path> inside a button's <svg>, which is two hops. A data-tip put on a container
+     would need this raised. */
   function owner(n){
-    while(n && n!==document){
+    for(var d=0; n && n!==document && d<4; d++){
       if(n.getAttribute && n.getAttribute("data-tip")) return n;
       n=n.parentNode;
     }
@@ -14766,6 +15119,23 @@ function boot(){
       IVS.push(setInterval(refreshHealth,6000));
       IVS.push(setInterval(retryCompanion,20000));   // pick up a PC that wakes after the page loaded
       IVS.push(setInterval(loadConsoles,30000));      // a console that comes online shows up without a reload
+      /* SETTINGS IS A LIVE PANEL, NOT A SNAPSHOT. Every LED in the Installing card, the fleet
+         list and the Devices list froze at the values they had when the panel opened, so
+         "Ready to install: yes" sat green beside a header pill that had already gone red, and
+         the only way to refresh was the Test button or closing and reopening the panel.
+         In-flight guarded, because /api/engine/state blocks on a ~4 s shop probe plus
+         spawn_status() and a sleeping console has been measured at ~9 s of TCP timeouts - a bare
+         interval would overlap itself. Only runs while the panel is actually on screen. */
+      IVS.push(setInterval(function(){
+        var sh=$("#settings"); if(!sh||!sh.classList.contains("show")) return;
+        if(window._setPollBusy) return;
+        window._setPollBusy=true;
+        var done=function(){ window._setPollBusy=false; };
+        try{ paintConnRow(state.health); }catch(e){}
+        try{ paintSettingsFleet(); }catch(e){}
+        try{ api("/api/network").then(renderDevices).catch(function(){}); }catch(e){}
+        try{ var p=refreshEngine(true); if(p&&p.then) p.then(done,done); else done(); }catch(e){ done(); }
+      },10000));
       /* Fast while something is MOVING - qSummary's own idea of live, which leaves out held and
          submitted rows: a queue waiting for Start used to be polled at this rate indefinitely. */
       IVS.push(setInterval(function(){if(qSummary(allTasks()).busy)pollQueue();},1200));
