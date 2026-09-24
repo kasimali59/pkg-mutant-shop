@@ -109,9 +109,28 @@ class SourceEngine:
                 return v[0]
         return None
 
+    # A BOUND, because this is keyed by (source, FILENAME) and nothing ever removed an entry.
+    # One per source per package probed, kept for the life of the process: on a library of a few
+    # hundred titles across several sources it is a slow leak of dictionary entries that are
+    # already stale - the TTL is 30 seconds and they were being held for hours.
+    _CACHE_MAX = 4096
+
     def _store(self, key, probe):
+        now = time.time()
         with self._lock:
-            self._cache[key] = (probe, time.time())
+            self._cache[key] = (probe, now)
+            if len(self._cache) <= self._CACHE_MAX:
+                return
+            # Drop what the TTL has already expired; that is almost always everything that needs to
+            # go, and it costs one pass over a dictionary that only gets this big by leaking.
+            for k in [k for k, v in self._cache.items() if now - v[1] >= self.ttl]:
+                self._cache.pop(k, None)
+            # Still over? Then the entries are genuinely live and the cap is the backstop: drop the
+            # oldest until it fits, so a pathological library cannot grow this without limit.
+            if len(self._cache) > self._CACHE_MAX:
+                for k, _ in sorted(self._cache.items(), key=lambda kv: kv[1][1])[
+                        :len(self._cache) - self._CACHE_MAX]:
+                    self._cache.pop(k, None)
 
     def probe_all(self, filename=None, force=False):
         """Probe every source concurrently (cached). Returns list of probe dicts."""

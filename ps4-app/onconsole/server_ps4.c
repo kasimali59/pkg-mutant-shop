@@ -483,6 +483,51 @@ static int port_listening(int port) {
     return up;
 }
 
+/* WHICH FTP THIS CONSOLE IS RUNNING, or 0 when it is running none.
+ *
+ * /api/health, /api/engine/state and /api/sources each stated "ftp_online":true and port 2121
+ * whatever was there, so the Files row in Settings sat green and printed an address to type on a
+ * PS4 where no FTP had ever been loaded. FTP is not ours: it is GoldHEN's, and it is up only if the
+ * owner loaded it. /api/helpers was the one route that asked; now they all ask the same function,
+ * which is also the only way anyone reading this can tell an answer from an assertion.
+ *
+ * 2121 first - GoldHEN's own, which onconsole/README.md documents as what this console runs - then
+ * 1337, where the other PS4 FTP payloads listen. The PC companion already tries that pair in that
+ * order (FTP_FALLBACKS in companion/server.py), so this asks rather than deciding for the user.
+ *
+ * MEMOISED FOR A MOMENT, because the page asks three of these routes the one question inside a
+ * single refresh. The window is far shorter than the 6 s poll, so an FTP the owner has just loaded
+ * still lights up on the next tick. The probe runs OUTSIDE the lock: a connect is bounded by the
+ * kernel's retries rather than by the timeouts set above, and holding the lock across it would
+ * queue every other request thread behind whoever happened to be probing. A thread arriving while a
+ * probe is in flight takes the previous answer, which is no worse than probing alone. */
+#define FTP_PROBE_TTL_MS 2000
+static pthread_mutex_t g_ftp_lock = PTHREAD_MUTEX_INITIALIZER;
+static long long       g_ftp_at;
+static int             g_ftp_port;
+static int             g_ftp_busy;
+
+static int ftp_live_port(void) {
+    pthread_mutex_lock(&g_ftp_lock);
+    int fresh = g_ftp_at && (now_ms() - g_ftp_at) <= FTP_PROBE_TTL_MS;
+    if (fresh || g_ftp_busy) {
+        int have = g_ftp_port;
+        pthread_mutex_unlock(&g_ftp_lock);
+        return have;
+    }
+    g_ftp_busy = 1;
+    pthread_mutex_unlock(&g_ftp_lock);
+
+    int p = port_listening(2121) ? 2121 : (port_listening(1337) ? 1337 : 0);
+
+    pthread_mutex_lock(&g_ftp_lock);
+    g_ftp_port = p;
+    g_ftp_at   = now_ms();
+    g_ftp_busy = 0;
+    pthread_mutex_unlock(&g_ftp_lock);
+    return p;
+}
+
 /* ------------------------------------------------------- the PS4's app.db
  *
  * DIFFERENT SCHEMA FROM THE PS5, same path. The PS5 keeps one tbl_contentinfo; the PS4 keeps a
@@ -2168,7 +2213,7 @@ static int usb_scan_cached(void) {
 
 static char *build_library_json_locked(void) {
     static ps4_title_t rows[MAX_TITLES];
-    int n = read_console_titles(rows, MAX_TITLES);
+    int n = console_titles_cached(rows, MAX_TITLES);
 
     /* SMALLER RATHER THAN NOTHING. This runs inside a shared system daemon whose heap this payload
        does not own, and after enough hot-reloads a 256 KB request can simply fail - which used to
@@ -2245,7 +2290,7 @@ static char *build_library_json_locked(void) {
 
 static char *build_installed_json_locked(void) {
     static ps4_title_t rows[MAX_TITLES];
-    int n = read_console_titles(rows, MAX_TITLES);
+    int n = console_titles_cached(rows, MAX_TITLES);
     size_t cap = 32 * 1024, len = 0;
     char *buf = (char *)malloc(cap);
     if (!buf) return NULL;
@@ -2320,7 +2365,7 @@ static char *build_installed_json(void) {
 
 static void storage_json(char *out, size_t outsz) {
     static ps4_title_t rows[MAX_TITLES];
-    int n = read_console_titles(rows, MAX_TITLES);
+    int n = console_titles_cached(rows, MAX_TITLES);
     long long games = 0;
     int count = 0;
     for (int i = 0; i < n; i++)
@@ -2869,7 +2914,7 @@ static void tile_installed_ver(char *out, size_t outsz) {
     out[0] = 0;
     static ps4_title_t rows[MAX_TITLES];
     pthread_mutex_lock(&g_scan_lock);
-    int n = read_console_titles(rows, MAX_TITLES);
+    int n = console_titles_cached(rows, MAX_TITLES);
     for (int i = 0; i < n; i++)
         if (!strcmp(rows[i].tid, PS4_TILE_TID)) { snprintf(out, outsz, "%s", rows[i].ver); break; }
     pthread_mutex_unlock(&g_scan_lock);
@@ -3198,16 +3243,31 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
     if (q) *q = 0;
 
     if (!strcmp(path, "/api/health")) {
+        /* MEASURED, not asserted - see ftp_live_port(). ftp_port is 0 when nothing is listening,
+           and the page prints the port only when ftp_online is true, so that 0 is never shown. */
+        int fport = ftp_live_port();
+        /* running_title STAYS EMPTY, and that is something checked rather than something
+           forgotten. This payload has no honest way to learn which game is running: what it reads
+           of the console is app.db, which is the list of what is INSTALLED - tbl_appbrowse_<userid>
+           and tbl_appinfo, neither of which knows anything about a running process - and nothing
+           else it reads knows either. The PS5 half answers this with
+           sceSystemServiceGetAppIdOfRunningBigApp and sceKernelGetAppInfo, but those signatures are
+           read off the PS5 side of this repo, not out of any PS4 header we hold; inferring one is
+           how this project once crashed a console, and here we are inside a SHARED system daemon
+           where that takes the whole process down with us. So the field waits for a PS4 signature
+           somebody can actually read. The page treats empty as "no game to highlight", which is the
+           harmless reading of not knowing. */
         char out[700];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"on_console\":true,\"server\":\"on-console\",\"platform\":\"ps4\","
                  "\"connected\":true,\"version\":\"%s\",\"built\":\"%s %s\",\"ps5_ip\":\"%s\","
                  "\"lan_ip\":\"%s\",\"companion_port\":%d,\"shop_port\":%d,"
-                 "\"engine\":\"pms-bgft\",\"engine_ready\":%s,\"ftp_online\":true,\"ftp_port\":2121,"
+                 "\"engine\":\"pms-bgft\",\"engine_ready\":%s,\"ftp_online\":%s,\"ftp_port\":%d,"
                  "\"shadowmount\":false,\"shadowmount_port\":0,\"running_title\":\"\","
                  "\"uptime_s\":%lld,\"conns\":%lld}",
                  SHOP_VERSION, __DATE__, __TIME__, lan_ip_str(), lan_ip_str(), PORT, PORT,
                  g_bgft_ready ? "true" : "false",
+                 fport ? "true" : "false", fport,
                  g_boot_ms ? (now_ms() - g_boot_ms) / 1000 : 0, g_conns_served);
         send_json(fd, out);
         return;
@@ -3260,15 +3320,19 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         return;
     }
     if (!strcmp(path, "/api/engine/state")) {
+        /* The same measured answer /api/health gives. All the routes that name this port move
+           together: correcting one and leaving the others asserting is the exact miss that cost
+           this project a follow-up release when the ShadowMount port was fixed everywhere but two. */
+        int fport = ftp_live_port();
         char out[700];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"platform\":\"ps4\",\"mode\":\"bgft\",\"ours\":true,"
                  "\"name\":\"PKG MUTANT SHOP engine\",\"shop_port\":%d,\"shop_ok\":true,"
                  "\"shop_version\":\"%s\",\"ready\":%s,\"busy\":%s,\"busy_for\":0,"
-                 "\"console_ip\":\"%s\",\"shadowmount\":false,\"ftp_port\":2121,"
+                 "\"console_ip\":\"%s\",\"shadowmount\":false,\"ftp_port\":%d,"
                  "\"state\":\"%s\",\"detail\":\"%s\",\"how\":\"%s\"}",
                  PORT, SHOP_VERSION, g_bgft_ready ? "true" : "false",
-                 g_job.active ? "true" : "false", lan_ip_str(),
+                 g_job.active ? "true" : "false", lan_ip_str(), fport,
                  /* "engine-down", NOT "shop-down". The shop is plainly up - it is serving the
                     page this sentence is read on. What did not start is the console's transfer
                     service, and saying "shop-down" sent the reader off to re-run the jailbreak
@@ -3962,14 +4026,16 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
                                    g_pcs[i].name[0] ? g_pcs[i].name : g_pcs[i].ip);
         }
         pthread_mutex_unlock(&g_pcs_lock);
+        int fport = ftp_live_port();
         char o[1200];
         snprintf(o, sizeof(o),
                  "{\"sources\":[{\"name\":\"this PS4\",\"ok\":true,\"latency_ms\":0,"
                  "\"kind\":\"local\"}%s],\"best\":\"on-console\","
                  "\"local_paths\":[\"/user/app\",\"/mnt/usb0..usb7\"],"
                  "\"helpers\":{\"shadowmount\":false,\"shadowmount_port\":0,"
-                 "\"ftp\":true,\"ftp_port\":2121},"
-                 "\"on_console\":true,\"platform\":\"ps4\"}", pcsrc);
+                 "\"ftp\":%s,\"ftp_port\":%d},"
+                 "\"on_console\":true,\"platform\":\"ps4\"}",
+                 pcsrc, fport ? "true" : "false", fport);
         send_json(fd, o);
         return;
     }
@@ -3992,7 +4058,7 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
      * the companion moves files over our own file API on this port. Claiming somebody else's server
      * is up is how a panel ends up showing a green light for something that is not there. */
     if (!strcmp(path, "/api/helpers")) {
-        int ftp = port_listening(2121);
+        int ftp = ftp_live_port();      /* the same one answer the other three give */
         char out[340];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"platform\":\"ps4\",\"shadowmount\":false,"

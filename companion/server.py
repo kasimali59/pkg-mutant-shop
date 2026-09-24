@@ -4624,6 +4624,17 @@ class Ps5Bridge:
         def say(m):
             if log:
                 log(m)
+        # NOT TO A PS4, AND THE REASON IS NOT STORAGE. Cheats are applied by writing a running
+        # game's memory through a kernel read/write, and the PS4's jailbreak gives a payload
+        # userland only - its own server answers every /api/cheat, /api/mods and /api/patch route
+        # with "not available on the PS4 yet". So this would have pushed up to 7022 files, one FTP
+        # upload at a time, over the link an install may be using, to fill a folder nothing on that
+        # console will ever read. The 15-minute background thread already asks for a PS5 by name;
+        # this is the manual button, which asked for whatever console the request resolved to.
+        if self.is_ps4():
+            return {"ok": False, "unsupported": True, "platform": "ps4",
+                    "error": "Cheats need a PS5. The PS4 has no engine to run them, so there is "
+                             "nothing for these files to do there."}
         if not os.path.isdir(CHEATS_DIR):
             # The cheat library is embedded in the ELF, not in the exe (it would roughly
             # triple the download for a copy the console already carries). Say that, instead of
