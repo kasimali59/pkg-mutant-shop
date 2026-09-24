@@ -12887,12 +12887,19 @@ function infoSection(title,msg,count){
   s.insertAdjacentHTML("beforeend",cheatNote(msg));   // cheatNote returns HTML text, not a node
   return s;
 }
-/* WHICH CONSOLE THE MODS PANEL IS ABOUT. The mod engine is a PS5 capability, so the panel's
-   console is named on the wire ONLY when it is a console we know and is not a PS4: an explicit
-   name out-ranks the companion's want="ps5" fallback, so naming a PS4 would turn every read and
-   write in this section into "Mods and cheats are not available on the PS4 yet". Unnamed, the PC
-   resolved these to whichever console matched the requester's address and then to config order -
-   so a phone, or a second PS5, read and wrote the machine the panel was not about. */
+/* WHICH CONSOLE THE MODS PANEL IS ABOUT. The mod engine is a PS5 capability - it writes a running
+   game's memory through a kernel read/write the PS4 port does not have - so the panel's console is
+   named on the wire ONLY when it is a console we know and is not a PS4. Naming a PS4 would send
+   every read and write in this section to a machine whose payload can only answer "Mods and cheats
+   are not available on the PS4 yet"; leaving it unnamed lets the PC resolve it, which lands on a
+   console that can actually serve it. Unnamed for a PS5 was the bug being fixed: the PC resolved
+   these to whichever console matched the requester's address and then to config order, so a phone,
+   or a second PS5, read and wrote the machine the panel was not about.
+
+   An earlier version of this comment said an explicit name "out-ranks the companion's want='ps5'
+   fallback". That was true when it was written and stopped being true in the same pass, when the
+   mods POST dropped its want= so that a read and a write of one panel could not resolve to
+   different consoles. Neither /api/mods route passes want= now. */
 function modsConsole(g){
   var id=panelConsole(g);
   if(!id||id==="all") return "";
@@ -13785,8 +13792,15 @@ function paintServices(h,selfIp){
      correct painting when a PS5 exists and simply cannot be reached from here. A console that
      does not state a platform counts as a PS5, which is what console_list's own default encodes;
      a console serving this page sends no console_list at all and keeps the test above. */
-  var _anyPs5=(h.console_list||[]).some(function(c){return String(c.platform||"ps5").toLowerCase()!=="ps4";});
-  if(herePlatform(h)==="ps4" || (!h.on_console && h.console_list!==undefined && !_anyPs5)){
+  var _cl=h.console_list||[];
+  var _anyPs5=_cl.some(function(c){return String(c.platform||"ps5").toLowerCase()!=="ps4";});
+  /* AN EMPTY FLEET IS NOT A PS4-ONLY FLEET. _cl.length is the difference between "every console
+     here is a PS4" and "no console is configured yet", and without it a brand new install - where
+     DEFAULT_CONFIG ships consoles:[] and health still sends console_list - told the owner that game
+     backups are not a PS4 thing, on a PC that had no console of any kind. With nothing configured
+     the row falls through to the probe branches below, which is what it did before this test
+     existed. */
+  if(herePlatform(h)==="ps4" || (!h.on_console && _cl.length && !_anyPs5)){
     setTxt("setSmp",t("msg_svc_backups_not_ps4"));
     setLed("ledSmp","");
   }else if(h.shadowmount===null||h.shadowmount===undefined){
@@ -14028,7 +14042,17 @@ function consolePlat(id){
   var c=state.consoleById[id||state.console];
   return (c&&String(c.platform||"").toLowerCase()==="ps4")?"ps4":"ps5";
 }
-function consoleLabel(id){return consolePlat(id)==="ps4"?"PS4":"PS5";}
+/* WHAT TO CALL A CONSOLE IN A SENTENCE. The owner's own name for it, when they have given it one
+   - they named it so it would be used - and the platform word only as the fallback.
+   Replacing consoleName() with a bare platform word here turned "Living Room decides the drive"
+   into "PS5 decides the drive" for anyone who had renamed a console, which is a loss on a PS5-only
+   setup that gained nothing. consoleName()'s own fallback was the raw config id ("living"), which
+   is worse than either, so this ends at the platform word. */
+function consoleLabel(id){
+  var c=state.consoleById&&state.consoleById[id];
+  var nm=c&&c.name?String(c.name).trim():"";
+  return nm||(consolePlat(id)==="ps4"?"PS4":"PS5");
+}
 function loadConsoles(){
   if(API===null)return;
   api("/api/consoles").then(function(r){
