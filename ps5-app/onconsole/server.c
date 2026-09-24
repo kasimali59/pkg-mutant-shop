@@ -994,12 +994,23 @@ static int ver_cmp(const char *a, const char *b) {
     }
 }
 
+/* A COMPANION THAT HAS NOT ANNOUNCED ITSELF FOR THIS LONG IS NOT THERE ANY MORE.
+   Nothing ever evicted one. A companion started once on a spare port stayed in this list for as
+   long as the payload was loaded, and the page walked down to it whenever the real PC was briefly
+   away - which is exactly how the owner saw their browser reaching for :8791, a port that had not
+   existed for hours. Same value the PS4 port already uses. */
+#define PC_STALE_MS (10 * 60 * 1000LL)
+
 static void pc_register(const char *ip, int port) {
     if (!ip || !ip[0] || port <= 0) return;
     pthread_mutex_lock(&g_pcs_lock);
     int slot = -1, oldest = 0;
     for (int i = 0; i < PC_MAX; i++) {
-        if (!strcmp(g_pcs[i].ip, ip) && g_pcs[i].port == port) { slot = i; break; }
+        /* KEYED ON THE ADDRESS ALONE. Keying on (ip, port) meant a companion that moved to another
+           port took a SECOND slot instead of updating its own, and with nothing ageing entries out
+           the abandoned one outlived it. One machine is one entry; the newest port it announced is
+           the one it is on. */
+        if (!strcmp(g_pcs[i].ip, ip)) { slot = i; break; }
         if (!g_pcs[i].ip[0]) { slot = i; break; }
         if (g_pcs[i].last_ms < g_pcs[oldest].last_ms) oldest = i;
     }
@@ -2058,8 +2069,10 @@ static void best_pc_base(char *out, size_t outsz) {
     memcpy(pcs, g_pcs, sizeof(pcs));
     pthread_mutex_unlock(&g_pcs_lock);
     int best = -1;
+    long long now_pc = now_ms_local();
     for (int i = 0; i < PC_MAX; i++) {
         if (!pcs[i].ip[0]) continue;
+        if (now_pc - pcs[i].last_ms > PC_STALE_MS) continue;   /* gone quiet - do not send anyone there */
         if (best < 0) { best = i; continue; }
         int c = ver_cmp(pcs[i].ver, pcs[best].ver);
         if (c > 0 || (c == 0 && pcs[i].last_ms > pcs[best].last_ms)) best = i;
@@ -5665,8 +5678,13 @@ static void handle(int fd, const char *rawpath, const char *req) {
                       g_local_title_count, g_local_title_count);
         pthread_mutex_lock(&g_pcs_lock);
         int f3 = 1;
+        /* Each of these rows is printed with "online":true, which is a CLAIM rather than a reading -
+           so a companion that stopped announcing itself stayed in the Devices card with a green
+           light beside it for as long as the payload was loaded. */
+        long long now_net = now_ms_local();
         for (int i = 0; i < PC_MAX && l < sizeof(o) - 200; i++) {
             if (!g_pcs[i].ip[0]) continue;
+            if (now_net - g_pcs[i].last_ms > PC_STALE_MS) continue;
             l += snprintf(o + l, sizeof(o) - l,
                           "%s{\"id\":\"%s\",\"name\":\"%s\",\"lan_ip\":\"%s\","
                           "\"url\":\"http://%s:%d\",\"online\":true,"
@@ -5686,7 +5704,9 @@ static void handle(int fd, const char *rawpath, const char *req) {
            rather than pretending to scan. */
         int n2 = 0;
         pthread_mutex_lock(&g_pcs_lock);
-        for (int i = 0; i < PC_MAX; i++) if (g_pcs[i].ip[0]) n2++;
+        long long now_scan = now_ms_local();
+        for (int i = 0; i < PC_MAX; i++)
+            if (g_pcs[i].ip[0] && now_scan - g_pcs[i].last_ms <= PC_STALE_MS) n2++;
         pthread_mutex_unlock(&g_pcs_lock);
         char o[160];
         snprintf(o, sizeof(o), "{\"ok\":true,\"found\":%d,\"peers\":[]}", n2);
@@ -5700,8 +5720,10 @@ static void handle(int fd, const char *rawpath, const char *req) {
         l += snprintf(o + l, sizeof(o) - l, "{\"pcs\":[");
         pthread_mutex_lock(&g_pcs_lock);
         int f2 = 1;
+        long long now_pcs = now_ms_local();
         for (int i = 0; i < PC_MAX && l < sizeof(o) - 120; i++) {
             if (!g_pcs[i].ip[0]) continue;
+            if (now_pcs - g_pcs[i].last_ms > PC_STALE_MS) continue;
             char enm[96], evr[32];
             json_escape(g_pcs[i].name, enm, sizeof(enm));
             json_escape(g_pcs[i].ver, evr, sizeof(evr));
@@ -5926,6 +5948,57 @@ static void handle(int fd, const char *rawpath, const char *req) {
         spawn_lane_release();
         ilog("install: cleaned up - ready for the next one");
         send_json(fd, "{\"ok\":true,\"cleaned\":true}");
+        return;
+    }
+    if (!strcmp(path, "/api/engine/state")) {
+        /* THE SETTINGS ENGINE PANEL, WITH NO PC IN THE ROOM.
+         *
+         * This was a companion-only endpoint. A PS5 serving its own page answered the unknown-/api/
+         * stub {}, web/index.html treats a missing `state` as "no answer", and the panel fell to its
+         * honest "Can't tell from here" with three dark LEDs - printed by the very console it could
+         * not tell anything about, on a page that console was serving. The PS4 build has answered
+         * this from the console for a release; this is the same answer for the lane a PS5 uses.
+         *
+         * NO `platform` KEY, deliberately: a console that does not name a platform is a PS5, which
+         * is the rule /api/health and the page already follow. Saying it here would be the first
+         * place in the project that contradicts it by naming the default.
+         *
+         * The busy read is COPIED FIELD FOR FIELD from /api/engine/spawn-status below rather than
+         * re-derived, so the two routes cannot drift into disagreeing about the same latch. */
+        int have_res2 = (access(SPAWN_RES_PATH, F_OK) == 0);
+        pthread_mutex_lock(&g_spawn_lock);
+        int  latched2 = g_spawn_busy;
+        long started2 = g_spawn_started;
+        pthread_mutex_unlock(&g_spawn_lock);
+        int busy2 = latched2 && !have_res2 && (time(NULL) - started2) < SPAWN_STALE_SECS;
+        long long busy_for2 = busy2 ? (long long)(time(NULL) - started2) : 0;
+        int pld2 = port_open(PLDMGR_PORT);
+        struct stat est;
+        long long elogsz = (stat(SHOP_DATA_DIR "/install.log", &est) == 0)
+                           ? (long long)est.st_size : 0;
+        char eo[1100];
+        snprintf(eo, sizeof(eo),
+                 "{\"ok\":true,\"mode\":\"spawn\",\"ours\":true,"
+                 "\"name\":\"PKG MUTANT SHOP engine\",\"shop_port\":%d,\"shop_ok\":true,"
+                 "\"shop_version\":\"%s\",\"pldmgr_port\":%d,\"ready\":%s,"
+                 "\"busy\":%s,\"busy_for\":%lld,\"log_bytes\":%lld,"
+                 "\"console_ip\":\"%s\",\"on_console\":true,"
+                 "\"state\":\"%s\",\"detail\":\"%s\",\"how\":\"%s\"}",
+                 PORT, SHOP_VERSION, PLDMGR_PORT,
+                 pld2 ? "true" : "false",
+                 busy2 ? "true" : "false", busy_for2, elogsz, lan_ip_str(),
+                 /* Same three words the page's own branches expect, and the same reasoning the PS4
+                    route records: what is missing when Payload Manager is not answering is the
+                    ENGINE's way to start, not the shop - which is plainly up, since it is serving
+                    the page this is read on. */
+                 busy2 ? "busy" : (pld2 ? "ready" : "engine-down"),
+                 busy2 ? "An install is being handed to the console right now."
+                       : (pld2 ? "Ready - installs can start straight away."
+                               : "Payload Manager is not answering, and a new installer is started "
+                                 "through it for every install. Load it again on the console."),
+                 "A fresh installer is started for every install and exits once the console has "
+                 "accepted the package. Nothing stays running, so nothing can wedge.");
+        send_json(fd, eo);
         return;
     }
     if (!strcmp(path, "/api/engine/log")) {
@@ -6653,8 +6726,10 @@ static void handle(int fd, const char *rawpath, const char *req) {
         char pcsrc[420] = {0};
         size_t pl = 0;
         pthread_mutex_lock(&g_pcs_lock);
+        long long now_src = now_ms_local();
         for (int i = 0; i < PC_MAX && pl < sizeof(pcsrc) - 90; i++) {
             if (!g_pcs[i].ip[0]) continue;
+            if (now_src - g_pcs[i].last_ms > PC_STALE_MS) continue;   /* "ok":true is a claim */
             pl += snprintf(pcsrc + pl, sizeof(pcsrc) - pl,
                            ",{\"name\":\"%s\",\"ok\":true,\"kind\":\"peer\",\"titles\":%d}",
                            g_pcs[i].name[0] ? g_pcs[i].name : g_pcs[i].ip, g_pcs[i].count);

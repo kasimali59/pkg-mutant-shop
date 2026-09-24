@@ -172,10 +172,14 @@ def stage0(c):
 
 def stage1(c):
     print("\n%s== stage 1  read-only endpoints ==%s" % (B, X))
-    # /api/engine/state is a COMPANION endpoint - it asks the console health questions and adds
-    # the PC's own view. The console answers {} for it via its unknown-/api/ stub, so checking it
-    # here was testing the harness, not the app. It is checked against the companion below.
+    # /api/engine/state USED TO BE companion-only. It was, and this comment used to say so: the
+    # console answered {} through its unknown-/api/ stub, so checking it here tested the harness
+    # rather than the app. Both payloads answer it for real now - which is the whole point, since
+    # the Settings engine panel is read most often on a console with no PC in the room - so it is
+    # checked in both places. The companion's own answer is still checked further down.
     checks = [
+        ("/api/engine/state", lambda j: isinstance(j, dict) and j.get("ok")
+                                        and isinstance(j.get("state"), str)),
         ("/api/engine/spawn-status", lambda j: isinstance(j, dict) and "busy" in j),
         ("/api/engine/log", lambda j: True),
         ("/api/sources", lambda j: isinstance(j, dict)),
