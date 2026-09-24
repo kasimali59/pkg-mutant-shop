@@ -815,7 +815,7 @@ static void *g_bgft_heap = NULL;
 
 /* the one job we are following, so /api/engine/job can answer the companion */
 static pthread_mutex_t g_job_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct {
+static struct job_slot {
     int  active;
     OrbisBgftTaskId task;
     char tid[16];
@@ -856,6 +856,136 @@ static struct {
     char want_cid[64];
     char want_type[8];
 } g_job;
+
+/* ---------------------------------------------------------------- claiming the slot
+ *
+ * THE BUSY CHECK WAS CHECK-THEN-ACT, AND THE GAP WAS A WHOLE BGFT REGISTRATION WIDE.
+ *
+ * Every route that starts a transfer read `active` under the lock, RELEASED the lock, called
+ * bgft_install_url() - which registers a task with the console and starts it - and only then took
+ * the lock again to fill the slot in. Two requests arriving inside that gap both read "not busy",
+ * both registered a task, and the second overwrote the slot: the first task went on downloading
+ * with nothing following it, while progress, the finished check and the cancel button all described
+ * the second package. That is the exact failure the busy check was added to prevent - it narrowed
+ * the window instead of closing it. Five routes had the shape: install_local_pkg,
+ * /api/engine/install-spawn, /api/queue/start, a row's /retry, and POST /api/install. (The
+ * mode:"queued" branch never did: it tests and fills under one lock hold, which is the pattern
+ * this brings to the rest.)
+ *
+ * The test and the claim happen under ONE lock hold now, and the registration runs against a slot
+ * that is already marked taken. Between the claim and the commit the slot is active while
+ * task is still BGFT_INVALID_TASK_ID, and g_job_claim holds that claim's token.
+ *
+ * WHY NOTHING ASKS BGFT ABOUT THAT SLOT. What the service does when handed a task id it never
+ * issued is not written down in bgft.h, in any header this builds against, or anywhere in this
+ * repo - and this payload runs as root inside a shared system daemon, where finding out by trying
+ * is how you take the console down with you. The file already encodes the answer as a convention:
+ * bgft_release() returns early on BGFT_INVALID_TASK_ID rather than passing it on. Everything that
+ * could otherwise reach the service during a claim now follows that same convention - job_refresh()
+ * skips its poll, the stranded-task sweeper does not run, and the two cancel routes guard the stop
+ * call they were making unguarded. No invalid id is handed to BGFT, so what it would do with one
+ * stays unknown and stays irrelevant.
+ */
+static struct job_slot g_job_before;      /* the row as it was, for an abort to put back */
+static long long       g_job_claim;       /* which claim is outstanding, or 0 for none */
+static long long       g_job_claim_seq;   /* hands out claim tokens; never reused */
+static long long       g_job_claim_ms;    /* when, so a leaked claim cannot wedge the slot */
+/* WHY A TOKEN AND NOT A FLAG. The first version of this committed against a boolean - "is a claim
+   outstanding" - and that is not the question. A cancel arriving mid-registration clears the claim,
+   which is correct and is what lets the committer know to hand its task back; but it also leaves
+   the slot free, so a SECOND install can claim it before the first returns from bgft_install_url.
+   The first would then find the boolean set again, believe the claim was still its own, and write
+   its task id over the second one's row: two live tasks, one slot, and the loser downloading with
+   nothing following it. That is the bug this change removes, reintroduced by the fix for it.
+   A token makes the test identity instead of existence - you can only commit the claim you
+   opened. */
+
+/* Long enough that no honest registration reaches it - bgft_install_url is a handful of service
+   calls and has never been seen to take seconds - and short enough that if a claim ever did leak,
+   the console frees itself instead of needing the payload reloaded. That lock-out, arrived at by a
+   different route, is a bug this shop has already shipped once. */
+#define JOB_CLAIM_TIMEOUT_MS (3 * 60 * 1000LL)
+
+typedef enum {
+    JOB_CLAIM_FRESH,   /* a new install: the slot must be free, or holding a finished job */
+    JOB_CLAIM_DIRECT,  /* the same, for the console's own installer - no task, ever */
+    JOB_CLAIM_HELD,    /* /api/queue/start: a queued row waiting to be released */
+    JOB_CLAIM_RETRY    /* a row that failed and still knows the url it failed on */
+} job_claim_kind;
+
+/* What a caller needs out of the row it just claimed. A FRESH caller brings its own and passes
+   NULL; HELD and RETRY have nothing else to install from, which is the whole point of a queue on a
+   console with no PC in the room. */
+typedef struct {
+    char uri[1024];
+    char cid[64];
+    char type[8];
+    char name[160];
+    long long size;
+} job_claim_out;
+
+/* The claim's TOKEN when the slot is taken, or 0 - in which case nothing was touched and the
+   caller must refuse. The caller MUST reach job_claim_abort(tok), or a commit that tests the token,
+   on every path out. */
+static long long job_claim(job_claim_kind kind, job_claim_out *out) {
+    pthread_mutex_lock(&g_job_lock);
+    int ok = 0;
+    switch (kind) {
+    case JOB_CLAIM_FRESH:
+    case JOB_CLAIM_DIRECT:
+        /* The same test the routes each used to spell out for themselves, in one place. */
+        ok = !(g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error"));
+        break;
+    case JOB_CLAIM_HELD:
+        ok = g_job.held && !g_job.active && g_job.uri[0];
+        break;
+    case JOB_CLAIM_RETRY:
+        ok = g_job.uri[0] && (!g_job.active || !strcmp(g_job.state, "error"));
+        break;
+    }
+    if (!ok || g_job_claim) { pthread_mutex_unlock(&g_job_lock); return 0; }
+
+    g_job_before = g_job;
+    if (out) {
+        snprintf(out->uri,  sizeof(out->uri),  "%s", g_job.uri);
+        snprintf(out->cid,  sizeof(out->cid),  "%s", g_job.want_cid);
+        snprintf(out->type, sizeof(out->type), "%s", g_job.want_type);
+        snprintf(out->name, sizeof(out->name), "%s", g_job.name);
+        out->size = g_job.want_size;
+    }
+    /* FRESH and DIRECT start from nothing; HELD and RETRY keep the url they are about to reuse. */
+    if (kind == JOB_CLAIM_FRESH || kind == JOB_CLAIM_DIRECT) memset(&g_job, 0, sizeof(g_job));
+    g_job.active   = 1;
+    g_job.held     = 0;
+    g_job.released = 0;
+    g_job.direct   = (kind == JOB_CLAIM_DIRECT);
+    g_job.task     = BGFT_INVALID_TASK_ID;
+    snprintf(g_job.state, sizeof(g_job.state), "downloading");
+    snprintf(g_job.msg, sizeof(g_job.msg), "Handing it to the console");
+    g_job_claim    = ++g_job_claim_seq;
+    g_job_claim_ms = now_ms();
+    long long mine = g_job_claim;
+    pthread_mutex_unlock(&g_job_lock);
+    return mine;
+}
+
+/* Put the row back exactly as it was. A held row is held again and a failed row can still be
+   retried - which is why this restores a copy rather than clearing the slot. */
+static void job_claim_abort(long long tok) {
+    pthread_mutex_lock(&g_job_lock);
+    /* Only OUR claim. If a cancel already took it, the row belongs to whatever came after and
+       restoring the copy we saved would undo their work as well as ours. */
+    if (tok && g_job_claim == tok) {
+        g_job = g_job_before;
+        g_job_claim = 0;
+    }
+    pthread_mutex_unlock(&g_job_lock);
+}
+
+/* Call with the lock HELD, from inside a commit: is the slot still the one we claimed? */
+static int job_claim_is_mine_locked(long long tok) {
+    return tok && g_job_claim == tok;
+}
 
 /* Handles from dlopen, kept so we can search them by name.
    RTLD_DEFAULT ALONE IS NOT ENOUGH: measured on 13.52, every BGFT symbol came back NULL from the
@@ -1303,6 +1433,23 @@ static void job_refresh(void) {
        answers every progress call with an error - which read as "no error, no bytes yet" and
        rewrote a job that had already failed back to "downloading". The verdict is reached once. */
     if (!g_job.active || g_job.released) { pthread_mutex_unlock(&g_job_lock); return; }
+    /* A CLAIMED SLOT HAS NOTHING TO ASK ABOUT YET. The registration is still in flight, so
+       g_job.task is BGFT_INVALID_TASK_ID and handing that to the service is the one thing this
+       design will not do - see the claim block beside g_job. The commit is milliseconds away.
+
+       The deadline is insurance. A claim can only leak if a thread dies between claiming and
+       committing, which would take this whole daemon with it - but a slot that could then never be
+       freed except by reloading the payload is a lock-out, and this shop has shipped one of those
+       before. Three minutes, then the row goes back to exactly what it was. */
+    if (g_job_claim) {
+        if (g_job_claim_ms && now_ms() - g_job_claim_ms > JOB_CLAIM_TIMEOUT_MS) {
+            g_job = g_job_before;
+            g_job_claim = 0;
+            ilog("job: a claim was never committed - the slot has been put back");
+        }
+        pthread_mutex_unlock(&g_job_lock);
+        return;
+    }
     OrbisBgftTaskId task = g_job.task;
     char tid[16];
     snprintf(tid, sizeof(tid), "%s", g_job.tid);
@@ -2359,15 +2506,15 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
         return -3;
     }
     job_refresh();
-    pthread_mutex_lock(&g_job_lock);
-    int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
-    pthread_mutex_unlock(&g_job_lock);
-    if (busy) {
+    /* TEST AND CLAIM UNDER ONE LOCK - see the claim block beside g_job. */
+    long long claim = job_claim(JOB_CLAIM_FRESH, NULL);
+    if (!claim) {
         snprintf(err, errsz, "An install is already running on this PS4");
         return -4;
     }
     int tok = localpkg_register(local);
     if (tok < 0) {
+        job_claim_abort(claim);
         snprintf(err, errsz, "Too many packages are already queued from this console - reload the "
                              "shop and try again");
         return -5;
@@ -2403,10 +2550,21 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
     snprintf(uri, sizeof(uri), "http://%s:%d/pkgfile/%d.pkg", lan_ip_str(), (int)PORT, tok);
     const char *label = title[0] ? title : local;
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
-    if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat), err, errsz, &task) != 0)
+    if (bgft_install_url(uri, label, cid, size, pkg_type_for_category(cat), err, errsz, &task) != 0) {
+        job_claim_abort(claim);
         return -6;
+    }
 
     pthread_mutex_lock(&g_job_lock);
+    /* THE CLAIM CAN BE TAKEN WHILE THE REGISTRATION IS IN FLIGHT - a cancel arriving in that window
+       clears it. Filling a slot somebody else now owns would orphan a task, which is the whole
+       thing this change exists to stop, so the task just made is handed straight back instead. */
+    if (!job_claim_is_mine_locked(claim)) {
+        pthread_mutex_unlock(&g_job_lock);
+        bgft_release(task);
+        snprintf(err, errsz, "That install was stopped before it started");
+        return -7;
+    }
     memset(&g_job, 0, sizeof(g_job));
     g_job.active = 1;
     g_job.task = task;
@@ -2421,6 +2579,7 @@ static int install_local_pkg(const char *local, char *err, size_t errsz) {
     job_baseline_locked();
     snprintf(g_job.state, sizeof(g_job.state), "downloading");
     snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is installing it from its own storage");
+    g_job_claim = 0;
     pthread_mutex_unlock(&g_job_lock);
     ilog("install: local package %s (%s, %s, %lld bytes) -> task %d",
          local, cid, pkg_type_for_category(cat), size, (int)task);
@@ -2495,10 +2654,10 @@ static int install_direct_start(const char *local, char *err, size_t errsz) {
     /* Same staleness guard as the other lanes: a job that finished but has not been polled still
        reads "downloading", and refusing on that would block every install after the first. */
     job_refresh();
-    pthread_mutex_lock(&g_job_lock);
-    int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
-    pthread_mutex_unlock(&g_job_lock);
-    if (busy) {
+    /* Claimed the same way as every other lane, and for the same reason - the gap here is file I/O
+       rather than a service call, which is wider, not narrower. */
+    long long dclaim = job_claim(JOB_CLAIM_DIRECT, NULL);
+    if (!dclaim) {
         snprintf(err, errsz, "An install is already running on this PS4 - wait for it to finish");
         return -5;
     }
@@ -2539,11 +2698,17 @@ static int install_direct_start(const char *local, char *err, size_t errsz) {
             ilog("direct: refused %s - category '%s' for %s, which the console %s and whose "
                  "app.pkg is %lld bytes", local, cat, btid[0] ? btid : "?",
                  listed ? "lists" : "does not list", base_bytes);
+            job_claim_abort(dclaim);
             return -7;
         }
     }
 
     pthread_mutex_lock(&g_job_lock);
+    if (!job_claim_is_mine_locked(dclaim)) {   /* taken from us - see install_local_pkg */
+        pthread_mutex_unlock(&g_job_lock);
+        snprintf(err, errsz, "That install was stopped before it started");
+        return -8;
+    }
     memset(&g_job, 0, sizeof(g_job));
     g_job.active = 1;
     g_job.direct = 1;
@@ -2562,6 +2727,7 @@ static int install_direct_start(const char *local, char *err, size_t errsz) {
     job_baseline_locked();
     snprintf(g_job.state, sizeof(g_job.state), "downloading");
     snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is installing it from its own storage");
+    g_job_claim = 0;
     pthread_mutex_unlock(&g_job_lock);
 
     char ipath[1100];
@@ -3143,10 +3309,8 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
            polls /api/engine/job - so a finished or failed install looked "still running" to the
            very next request and the shop refused it. */
         job_refresh();
-        pthread_mutex_lock(&g_job_lock);
-        int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
-        pthread_mutex_unlock(&g_job_lock);
-        if (busy) {
+        long long sclaim = job_claim(JOB_CLAIM_FRESH, NULL);
+        if (!sclaim) {
             send_status(fd, "409 Conflict", "application/json",
                         "{\"ok\":false,\"busy\":true,\"error\":\"An install is already running on this PS4\"}");
             return;
@@ -3155,6 +3319,7 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
         int rc = bgft_install_url(uri, name, cid, psize, ptype, err, sizeof(err), &task);
         if (rc != 0) {
+            job_claim_abort(sclaim);
             char esc[300], out[600];
             json_escape(err, esc, sizeof(esc));
             snprintf(out, sizeof(out), "{\"ok\":false,\"queued\":false,\"error\":\"%s\"}", esc);
@@ -3162,6 +3327,13 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
             return;
         }
         pthread_mutex_lock(&g_job_lock);
+        if (!job_claim_is_mine_locked(sclaim)) {   /* taken from us - see install_local_pkg */
+            pthread_mutex_unlock(&g_job_lock);
+            bgft_release(task);
+            send_json(fd, "{\"ok\":false,\"queued\":false,"
+                          "\"error\":\"That install was stopped before it started\"}");
+            return;
+        }
         memset(&g_job, 0, sizeof(g_job));
         g_job.active = 1;
         g_job.task = task;
@@ -3188,6 +3360,7 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
+        g_job_claim = 0;
         long long jid = g_job.job_id;
         pthread_mutex_unlock(&g_job_lock);
 
@@ -3400,20 +3573,18 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         return;
     }
     if (!strcmp(path, "/api/queue/start")) {
-        /* Release the held install. Everything needed to start it is already in the slot. */
-        pthread_mutex_lock(&g_job_lock);
-        int can = g_job.held && !g_job.active;
-        char uri[1024], qcid[64], qtype[8], qnm[160];
-        long long qsize = g_job.want_size;
-        snprintf(uri, sizeof(uri), "%s", g_job.uri);
-        snprintf(qcid, sizeof(qcid), "%s", g_job.want_cid);
-        snprintf(qtype, sizeof(qtype), "%s", g_job.want_type);
-        snprintf(qnm, sizeof(qnm), "%s", g_job.name);
-        pthread_mutex_unlock(&g_job_lock);
-        if (!can || !uri[0]) { send_json(fd, "{\"ok\":true,\"started\":0}"); return; }
+        /* Release the held install. Everything needed to start it is already in the slot, and it
+           is read out under the same lock that claims the row - two callers pressing Start at once
+           used to both read "held" and both register a task for it. */
+        job_claim_out q;
+        long long qclaim = job_claim(JOB_CLAIM_HELD, &q);
+        if (!qclaim) { send_json(fd, "{\"ok\":true,\"started\":0}"); return; }
+        const char *uri = q.uri, *qcid = q.cid, *qtype = q.type, *qnm = q.name;
+        long long qsize = q.size;
         char err[256] = {0};
         OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
         if (bgft_install_url(uri, qnm, qcid, qsize, qtype, err, sizeof(err), &task) != 0) {
+            job_claim_abort(qclaim);
             char esc[300], out[420];
             json_escape(err, esc, sizeof(esc));
             snprintf(out, sizeof(out), "{\"ok\":false,\"started\":0,\"error\":\"%s\"}", esc);
@@ -3421,11 +3592,19 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
             return;
         }
         pthread_mutex_lock(&g_job_lock);
+        if (!job_claim_is_mine_locked(qclaim)) {   /* taken from us - see install_local_pkg */
+            pthread_mutex_unlock(&g_job_lock);
+            bgft_release(task);
+            send_json(fd, "{\"ok\":false,\"started\":0,"
+                          "\"error\":\"That install was stopped before it started\"}");
+            return;
+        }
         g_job.held = 0; g_job.active = 1; g_job.task = task;
         g_job.job_id = now_ms(); g_job.started_ms = now_ms();
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
+        g_job_claim = 0;
         pthread_mutex_unlock(&g_job_lock);
         send_json(fd, "{\"ok\":true,\"started\":1}");
         return;
@@ -3511,10 +3690,15 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         int done = g_job.active && (!strcmp(g_job.state, "installed") || !strcmp(g_job.state, "error"));
         OrbisBgftTaskId live = (g_job.active && !done) ? g_job.task : BGFT_INVALID_TASK_ID;
         if (done) g_job.active = 0;
+        /* NOT WHILE A CLAIM IS OUTSTANDING. The sweep frees every task of ours except `keep`, and
+           during a claim `keep` is BGFT_INVALID_TASK_ID - so a registration that completed a moment
+           earlier, but has not committed its id yet, is a task this would free out from under the
+           install that just started it. */
+        int claiming = (g_job_claim != 0);
         pthread_mutex_unlock(&g_job_lock);
         /* The companion calls this between installs. Sweeping here is what clears tasks left by a
            payload reload or a crash, which no longer have a job to finish them. */
-        int freed = bgft_sweep_ours(live);
+        int freed = claiming ? 0 : bgft_sweep_ours(live);
         char out[96];
         snprintf(out, sizeof(out), "{\"ok\":true,\"cleaned\":true,\"freed\":%d}", freed);
         send_json(fd, out);
@@ -3526,9 +3710,16 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         int act = g_job.active;
         pthread_mutex_unlock(&g_job_lock);
         int rc = -1;
-        if (act && bgft_stop_fn) rc = bgft_stop_fn(t);
+        /* THE SAME GUARD bgft_release() APPLIES ONE LINE DOWN. A direct install has no task at all
+           and a claim has not been given one yet, so both hold BGFT_INVALID_TASK_ID - and this
+           called stop with it. What the service does with an id it never issued is written down
+           nowhere, and this payload is inside a shared system daemon: the answer is not to ask. */
+        if (act && t != BGFT_INVALID_TASK_ID && bgft_stop_fn) rc = bgft_stop_fn(t);
         if (act) bgft_release(t);
         pthread_mutex_lock(&g_job_lock);
+        /* A cancel that lands during a claim takes the slot from whoever claimed it; their commit
+           sees this cleared and hands its task back instead of installing behind this. */
+        g_job_claim = 0;
         if (act) { g_job.released = 1;
                    snprintf(g_job.state, sizeof(g_job.state), "error");
                    snprintf(g_job.msg, sizeof(g_job.msg), "Stopped from the shop"); }
@@ -3861,9 +4052,10 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         int qact = g_job.active;
         pthread_mutex_unlock(&g_job_lock);
         int qrc = -1;
-        if (qact && bgft_stop_fn) qrc = bgft_stop_fn(qt);
+        if (qact && qt != BGFT_INVALID_TASK_ID && bgft_stop_fn) qrc = bgft_stop_fn(qt);  /* see /api/engine/cancel */
         if (qact) bgft_release(qt);
         pthread_mutex_lock(&g_job_lock);
+        g_job_claim = 0;        /* see /api/engine/cancel */
         if (qact) { g_job.released = 1;
                     snprintf(g_job.state, sizeof(g_job.state), "error");
                     snprintf(g_job.msg, sizeof(g_job.msg), "Stopped from the shop"); }
@@ -3887,20 +4079,18 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
     if (!strncmp(path, "/api/queue/", 11) && strstr(path, "/retry")) {
         /* The slot still holds the url from the attempt that failed, which is the whole point of
            retry on a console with no PC: there is nothing to re-send from anywhere. */
-        pthread_mutex_lock(&g_job_lock);
-        int can = !g_job.active && g_job.uri[0];
-        if (!can) can = (!strcmp(g_job.state, "error")) && g_job.uri[0];
-        char uri[1024], rcid[64], rtype[8], rnm[160];
-        long long rsize = g_job.want_size;
-        snprintf(uri, sizeof(uri), "%s", g_job.uri);
-        snprintf(rcid, sizeof(rcid), "%s", g_job.want_cid);
-        snprintf(rtype, sizeof(rtype), "%s", g_job.want_type);
-        snprintf(rnm, sizeof(rnm), "%s", g_job.name);
-        pthread_mutex_unlock(&g_job_lock);
-        if (!can) { send_json(fd, "{\"ok\":false,\"error\":\"There is nothing here to try again\"}"); return; }
+        job_claim_out rq;
+        long long rclaim = job_claim(JOB_CLAIM_RETRY, &rq);
+        if (!rclaim) {
+            send_json(fd, "{\"ok\":false,\"error\":\"There is nothing here to try again\"}");
+            return;
+        }
+        const char *uri = rq.uri, *rcid = rq.cid, *rtype = rq.type, *rnm = rq.name;
+        long long rsize = rq.size;
         char err[256] = {0};
         OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
         if (bgft_install_url(uri, rnm, rcid, rsize, rtype, err, sizeof(err), &task) != 0) {
+            job_claim_abort(rclaim);
             char esc[300], out[420];
             json_escape(err, esc, sizeof(esc));
             snprintf(out, sizeof(out), "{\"ok\":false,\"error\":\"%s\"}", esc);
@@ -3908,11 +4098,19 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             return;
         }
         pthread_mutex_lock(&g_job_lock);
+        if (!job_claim_is_mine_locked(rclaim)) {   /* taken from us - see install_local_pkg */
+            pthread_mutex_unlock(&g_job_lock);
+            bgft_release(task);
+            send_json(fd, "{\"ok\":false,"
+                          "\"error\":\"That install was stopped before it started\"}");
+            return;
+        }
         g_job.held = 0; g_job.active = 1; g_job.task = task;
         g_job.job_id = now_ms(); g_job.started_ms = now_ms();
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
+        g_job_claim = 0;
         pthread_mutex_unlock(&g_job_lock);
         send_json(fd, "{\"ok\":true,\"retried\":true}");
         return;
@@ -3978,6 +4176,13 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             int busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
             if (!busy) {
                 memset(&g_job, 0, sizeof(g_job));
+                /* "NO TASK" IS -1 EVERYWHERE, NEVER 0. memset leaves task at 0, and 0 is a value
+                   BGFT really does issue - the sweepers accept it, and observed ids are small
+                   (00000075, 00000077). Only -1 is guarded, so a zeroed slot that ever reached a
+                   stop call would be asking the service to stop somebody else's task. Nothing
+                   reaches one today, because a held row is not active; this makes that safety a
+                   property of the struct rather than of the routes that read it. */
+                g_job.task = BGFT_INVALID_TASK_ID;
                 g_job.held = 1;
                 g_job.job_id = now_ms();
                 snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
@@ -4006,10 +4211,8 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
            described the second package. install_local_pkg has had this guard for a while; the url
            branch never got it. The PS5 build refuses the second request outright, and so does
            this now - with the same sentence the local lane uses. */
-        pthread_mutex_lock(&g_job_lock);
-        int inst_busy = g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
-        pthread_mutex_unlock(&g_job_lock);
-        if (inst_busy) {
+        long long iclaim = job_claim(JOB_CLAIM_FRESH, NULL);
+        if (!iclaim) {
             send_json(fd, "{\"ok\":false,\"busy\":true,"
                           "\"error\":\"An install is already running on this PS4\"}");
             return;
@@ -4021,6 +4224,7 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
            passed "" and 0 and then reported the console's refusal as if the package were at
            fault. */
         if (bgft_install_url(uri, nm, cid, psize, ptype, err, sizeof(err), &task) != 0) {
+            job_claim_abort(iclaim);
             char esc[300], out[500];
             json_escape(err, esc, sizeof(esc));
             snprintf(out, sizeof(out), "{\"ok\":false,\"error\":\"%s\"}", esc);
@@ -4028,6 +4232,13 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             return;
         }
         pthread_mutex_lock(&g_job_lock);
+        if (!job_claim_is_mine_locked(iclaim)) {   /* taken from us - see install_local_pkg */
+            pthread_mutex_unlock(&g_job_lock);
+            bgft_release(task);
+            send_json(fd, "{\"ok\":false,"
+                          "\"error\":\"That install was stopped before it started\"}");
+            return;
+        }
         memset(&g_job, 0, sizeof(g_job));
         g_job.active = 1; g_job.task = task; g_job.job_id = now_ms(); g_job.started_ms = now_ms();
         g_job.expect = psize;
@@ -4035,8 +4246,18 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
         pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
+        g_job_claim = 0;
         pthread_mutex_unlock(&g_job_lock);
         send_json(fd, "{\"ok\":true,\"queued\":true}");
+        return;
+    }
+    /* THE QUEUE BUTTONS ARE POSTs AND THEIR HANDLERS ARE GET BRANCHES, so Start queue and Clear
+       both fell through to the 200 {} at the bottom of this function: two dead buttons on any page
+       a PS4 serves, answering exactly like a success. Found while racing this route - the race test
+       drives them with GET and passed, then the same two calls by POST did nothing at all. The PS5
+       build delegates these the same way, for the same reason. */
+    if (!strcmp(path, "/api/queue/start") || !strcmp(path, "/api/queue/clear")) {
+        handle_get(fd, rawpath, NULL);
         return;
     }
     /* THE SAVE BUTTON PAINTED GREEN AND SAVED NOTHING, and only the POST half of it. handle_get
