@@ -61,6 +61,9 @@ python3 "$TOOLS/check_web.py"      || { echo "ABORT: the UI script is broken - n
 python3 "$TOOLS/i18n_report.py" --check || { echo "ABORT: a language is missing keys the app uses." >&2; exit 1; }
 python3 "$TOOLS/message_report.py" --check || { echo "ABORT: a user-facing message is off house style." >&2; exit 1; }
 
+# The 304 lane, and the two copies of etag_matches() that must stay identical.
+python3 "$TOOLS/test_etag.py" || { echo "ABORT: the conditional-GET lane is broken, or the two copies have drifted." >&2; exit 1; }
+
 # Embed the current UI. Same generator the PS5 build uses, writing OUR copy of the bundle.
 python3 "$HERE/../../ps5-app/onconsole/gen_web_bundle.py" "$WEB" "$HERE/web_bundle.h" \
   || { echo "ABORT: could not regenerate web_bundle.h." >&2; exit 1; }

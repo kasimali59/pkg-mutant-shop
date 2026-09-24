@@ -248,21 +248,67 @@ static const char *ctype_for(const char *path) {
 
 /* Artwork is immutable for a title and is the expensive thing to re-fetch; the app shell must
    always revalidate or loading a new build leaves the old UI cached. Same policy as the PS5. */
-static int send_file(int fd, const char *path) {
+
+/* CONDITIONAL GET - the other half of the ETag this server has always sent.
+ *
+ * send_file() has emitted `ETag: "<size>-<mtime>"` on every static file since caching was added,
+ * and the comment above it says an unchanged shell then "costs only a 304". It could not: nothing
+ * read If-None-Match back, so a browser that asked "still the same?" was answered with the whole
+ * file every time. On the app shell that is ~810 KB per reload, down one console's accept loop,
+ * queued behind the install engine.
+ *
+ * Matching is a SUBSTRING SEARCH over the header line, not an equality test, because the value may
+ * be a list and because a cache is allowed to hand back a weakened tag (`W/"..."`) for one it
+ * revalidates - an equality test would miss both and silently never hit. `*` matches whatever the
+ * server holds, which is what the spec says it means. */
+/* Defined further down, next to the other request helpers; declared here because this is
+   the first thing in the file that needs it. */
+static const char *strcasestr_local(const char *hay, const char *needle);
+static int etag_matches(const char *req, const char *etag) {
+    if (!req || !etag || !etag[0]) return 0;
+    const char *h = strcasestr_local(req, "if-none-match:");
+    if (!h) return 0;
+    h += 14;
+    const char *end = strstr(h, "\r\n");
+    if (!end) end = h + strlen(h);
+    size_t span = (size_t)(end - h);
+    if (memchr(h, '*', span)) return 1;
+    size_t n = strlen(etag);
+    if (n == 0 || n > span) return 0;
+    for (size_t i = 0; i + n <= span; i++)
+        if (!memcmp(h + i, etag, n)) return 1;
+    return 0;
+}
+
+/* `req` is the raw request text, or NULL from a caller with no request in hand. NULL means "never
+   a 304", which is what every caller did before this parameter existed. */
+static int send_file_req(int fd, const char *path, const char *req) {
     int f = open(path, O_RDONLY);
     if (f < 0) return -1;
     struct stat st;
     if (fstat(f, &st) != 0 || !S_ISREG(st.st_mode)) { close(f); return -1; }
     const char *ct = ctype_for(path);
     int is_img = ct && (strstr(ct, "image/") || strstr(ct, "font"));
+    const char *cache = is_img ? "public, max-age=604800, immutable"
+                               : "no-cache, must-revalidate";
+    char etag[64];
+    snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
+             (unsigned long long)st.st_size, (unsigned long long)st.st_mtime);
+    if (etag_matches(req, etag)) {
+        close(f);
+        char h3[320];
+        int n3 = snprintf(h3, sizeof(h3),
+            "HTTP/1.1 304 Not Modified\r\nETag: %s\r\nCache-Control: %s\r\n"
+            "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", etag, cache);
+        write_all(fd, h3, (size_t)n3);
+        return 0;
+    }
     char hdr[640];
     int n = snprintf(hdr, sizeof(hdr),
                      "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lld\r\n"
-                     "Cache-Control: %s\r\nETag: \"%llx-%llx\"\r\n"
+                     "Cache-Control: %s\r\nETag: %s\r\n"
                      "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                     ct, (long long)st.st_size,
-                     is_img ? "public, max-age=604800, immutable" : "no-cache, must-revalidate",
-                     (unsigned long long)st.st_size, (unsigned long long)st.st_mtime);
+                     ct, (long long)st.st_size, cache, etag);
     write_all(fd, hdr, (size_t)n);
     char buf[65536];
     for (;;) {
@@ -273,6 +319,7 @@ static int send_file(int fd, const char *path) {
     close(f);
     return 0;
 }
+static int send_file(int fd, const char *path) { return send_file_req(fd, path, NULL); }
 
 /* --------------------------------------------------------------- json/string */
 
@@ -2898,18 +2945,18 @@ static void tile_start(void) {
 static void tile_start(void) { ilog("tile: lite build - no package to install"); }
 #endif
 
-static void serve_static(int fd, const char *path) {
+static void serve_static(int fd, const char *path, const char *req) {
     if (strstr(path, "..")) { send_status(fd, "403 Forbidden", "text/plain", "no"); return; }
     char full[700];
     if (!strcmp(path, "/") || path[0] == 0)
         snprintf(full, sizeof(full), "%s/index.html", WEB_ROOT);
     else
         snprintf(full, sizeof(full), "%s%s", WEB_ROOT, path);
-    if (send_file(fd, full) != 0)
+    if (send_file_req(fd, full, req) != 0)
         send_status(fd, "404 Not Found", "text/plain", "not found");
 }
 
-static void handle_get(int fd, const char *rawpath) {
+static void handle_get(int fd, const char *rawpath, const char *req) {
     char path[1024];
     snprintf(path, sizeof(path), "%s", rawpath);
     char *q = strchr(path, '?');
@@ -3689,7 +3736,7 @@ static void handle_get(int fd, const char *rawpath) {
     }
 
     if (!strcmp(path, "/") || path[0] == 0 || strncmp(path, "/api/", 5)) {
-        serve_static(fd, path);
+        serve_static(fd, path, req);
         return;
     }
     /* Unknown /api/ stays a quiet 200 {} - the shared page probes routes that only one console
@@ -4121,7 +4168,7 @@ static void *conn_thread(void *arg) {
         return NULL;
     }
     if (is_get || is_head) {
-        handle_get(fd, path);
+        handle_get(fd, path, buf);
     } else if (is_post) {
         /* THE BODY IS BOUNDED BY THE ROOM ACTUALLY LEFT IN buf, NOT BY sizeof(buf).
          *

@@ -541,7 +541,42 @@ static const char *ctype_for(const char *path) {
 static int icon_exists(const char *tid);   /* defined with the icon server below */
 static void best_pc_base(char *out, size_t outsz);  /* best companion base URL, defined below */
 
-static int send_file(int fd, const char *path) {
+
+/* CONDITIONAL GET - the other half of the ETag this server has always sent.
+ *
+ * send_file() has emitted `ETag: "<size>-<mtime>"` on every static file since caching was added,
+ * and the comment above it says an unchanged shell then "costs only a 304". It could not: nothing
+ * read If-None-Match back, so a browser that asked "still the same?" was answered with the whole
+ * file every time. On the app shell that is ~810 KB per reload, down one console's accept loop,
+ * queued behind the install engine.
+ *
+ * Matching is a SUBSTRING SEARCH over the header line, not an equality test, because the value may
+ * be a list and because a cache is allowed to hand back a weakened tag (`W/"..."`) for one it
+ * revalidates - an equality test would miss both and silently never hit. `*` matches whatever the
+ * server holds, which is what the spec says it means. */
+/* Defined further down, next to the other request helpers; declared here because this is
+   the first thing in the file that needs it. */
+static const char *strcasestr_local(const char *hay, const char *needle);
+static int etag_matches(const char *req, const char *etag) {
+    if (!req || !etag || !etag[0]) return 0;
+    const char *h = strcasestr_local(req, "if-none-match:");
+    if (!h) return 0;
+    h += 14;
+    const char *end = strstr(h, "\r\n");
+    if (!end) end = h + strlen(h);
+    size_t span = (size_t)(end - h);
+    if (memchr(h, '*', span)) return 1;
+    size_t n = strlen(etag);
+    if (n == 0 || n > span) return 0;
+    for (size_t i = 0; i + n <= span; i++)
+        if (!memcmp(h + i, etag, n)) return 1;
+    return 0;
+}
+
+/* `req` is the raw request text, or NULL from callers that have no request in hand (the log file,
+   the spawn result). NULL simply means "never a 304", which is the behaviour every caller had
+   before this parameter existed. */
+static int send_file_req(int fd, const char *path, const char *req) {
     int f = open(path, O_RDONLY);
     if (f < 0) return -1;
     struct stat st;
@@ -562,12 +597,24 @@ static int send_file(int fd, const char *path) {
     int is_img = ct && (strstr(ct, "image/") || strstr(ct, "font"));
     const char *cache = is_img ? "public, max-age=604800, immutable"
                                : "no-cache, must-revalidate";
+    char etag[64];
+    snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
+             (unsigned long long)st.st_size, (unsigned long long)st.st_mtime);
+    if (etag_matches(req, etag)) {
+        /* Same bytes as the copy the browser already holds. No body, and the file is not read. */
+        close(f);
+        char h3[320];
+        int n3 = snprintf(h3, sizeof(h3),
+            "HTTP/1.1 304 Not Modified\r\nETag: %s\r\nCache-Control: %s\r\n"
+            "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", etag, cache);
+        write_all(fd, h3, (size_t)n3);
+        return 0;
+    }
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lld\r\n"
-        "Cache-Control: %s\r\nETag: \"%llx-%llx\"\r\n"
+        "Cache-Control: %s\r\nETag: %s\r\n"
         "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-        ct, (long long)st.st_size, cache,
-        (unsigned long long)st.st_size, (unsigned long long)st.st_mtime);
+        ct, (long long)st.st_size, cache, etag);
     write_all(fd, hdr, (size_t)n);
     char buf[65536];
     for (;;) {
@@ -578,6 +625,7 @@ static int send_file(int fd, const char *path) {
     close(f);
     return 0;
 }
+static int send_file(int fd, const char *path) { return send_file_req(fd, path, NULL); }
 
 /* ---------------- library scan (no sqlite; filenames + dirs carry everything) ---------------- */
 /* Map a contentLocation-ish label. Homebrew backups live on ext storage. */
@@ -2514,14 +2562,14 @@ static int qparam(const char *raw, const char *key, char *out, size_t outsz) {
 
 
 /* sanitize a request path into a real file under WEB_ROOT (no traversal) */
-static void serve_static(int fd, const char *path) {
+static void serve_static(int fd, const char *path, const char *req) {
     if (strstr(path, "..")) { send_status(fd, "403 Forbidden", "text/plain", "no"); return; }
     char full[600];
     if (!strcmp(path, "/") || path[0] == 0)
         snprintf(full, sizeof(full), "%s/index.html", WEB_ROOT);
     else
         snprintf(full, sizeof(full), "%s%s", WEB_ROOT, path);
-    if (send_file(fd, full) != 0)
+    if (send_file_req(fd, full, req) != 0)
         send_status(fd, "404 Not Found", "text/plain", "not found");
 }
 
@@ -3475,7 +3523,7 @@ static intptr_t cheat_entry_addr(const cheat_entry_t *e, intptr_t base, int abs_
 static void rewrite_for_install(const char *in, char *out, size_t outsz);
 static int install_pkg_local(const char *path, char *cid_out, size_t cid_sz);
 
-static void handle(int fd, const char *rawpath);
+static void handle(int fd, const char *rawpath, const char *req);
 static const char *strcasestr_local(const char *hay, const char *needle);
 static int pm_get(const char *path);   /* Payload Manager :8084 - spawns our installer */
 /* Only one spawned install at a time: they share one request file.
@@ -4704,14 +4752,14 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         }
         char fwd[64];
         snprintf(fwd, sizeof(fwd), "/api/game/delete-backup?tid=%s", tid);
-        handle(fd, fwd);            /* one implementation, two verbs */
+        handle(fd, fwd, NULL);      /* one implementation, two verbs; an API route, never static */
         return;
     }
     /* The UI drives the queue with POST; delegate to the same handlers the GET side
        uses so start / clear / cancel behave identically either way. */
     if (!strcmp(path, "/api/queue/start") || !strcmp(path, "/api/queue/clear") ||
         !strcmp(path, "/api/queue")) {
-        handle(fd, path);
+        handle(fd, path, NULL);
         return;
     }
     if (!strncmp(path, "/api/queue/", 11) && strstr(path, "/dismiss")) {
@@ -5569,7 +5617,7 @@ static void *notify_probe_thread(void *arg) {
     return NULL;
 }
 
-static void handle(int fd, const char *rawpath) {
+static void handle(int fd, const char *rawpath, const char *req) {
     char path[1024];
     snprintf(path, sizeof(path), "%s", rawpath);
     char *qs = strchr(path, '?'); if (qs) *qs = 0;    /* route without the ?query */
@@ -7556,7 +7604,7 @@ static void handle(int fd, const char *rawpath) {
     } else if (!strncmp(path, "/api/", 5)) {
         send_json(fd, "{}");           /* stub: unknown API endpoints stay quiet so the UI doesn't error */
     } else {
-        serve_static(fd, path);
+        serve_static(fd, path, req);
     }
 }
 
@@ -9713,7 +9761,7 @@ int main(void) {
                    loop, or the UI and the cheat engine freeze for the whole install. */
                 if (pkgfile_serve(cl, path, buf) == 0) continue;   /* worker owns cl now */
             } else if (is_get) {
-                handle(cl, path);   /* handle() strips the ?query itself (register-pc needs it) */
+                handle(cl, path, buf);   /* handle() strips the ?query itself (register-pc needs it) */
             } else if (is_post) {
                 /* Read the whole body before answering: a short read here is what
                    made an earlier version of the PC side hang until the client

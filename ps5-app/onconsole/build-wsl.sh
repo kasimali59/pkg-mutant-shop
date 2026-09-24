@@ -57,6 +57,9 @@ python3 "$TOOLS/check_web.py" || { echo "ABORT: the UI script is broken - not bu
 python3 "$TOOLS/i18n_report.py" --check || { echo "ABORT: a language is missing keys the app uses - not building." >&2; exit 1; }
 python3 "$TOOLS/message_report.py" --check || { echo "ABORT: a user-facing message is off house style - not building." >&2; exit 1; }
 
+# The 304 lane, and the two copies of etag_matches() that must stay identical.
+python3 "$TOOLS/test_etag.py" || { echo "ABORT: the conditional-GET lane is broken, or the two copies have drifted." >&2; exit 1; }
+
 # Embed the current web/ UI into the ELF (self-extracted to WEB_ROOT on boot) so loading the ELF
 # updates the PS5 UI with no separate push. Regenerate the bundle header from web/ first.
 python3 "$HERE/gen_web_bundle.py" "$HERE/../../web" "$HERE/web_bundle.h" || { echo "ABORT: could not regenerate web_bundle.h - refusing to ship a console UI that is older than web/index.html." >&2; exit 1; }
