@@ -459,6 +459,30 @@ static const char *lan_ip_str(void) {
     return ip;
 }
 
+/* IS ANYTHING LISTENING ON ONE OF THIS CONSOLE'S OWN PORTS? Asked over loopback, because that is
+   the only address this process can ask about without going out onto the network at all, and
+   because a closed port there refuses at once rather than making the caller sit out a timeout.
+   The two timeouts are set anyway: this runs on a connection thread, and a probe that hung would
+   hold that thread for as long as it hung. Nothing is sent and nothing is read - the handshake IS
+   the whole question, and it is the only thing we can honestly say about software that is not
+   ours. */
+static int port_listening(int port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+    struct timeval tv;
+    tv.tv_sec = 1; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    int up = (connect(s, (struct sockaddr *)&a, sizeof(a)) == 0);
+    close(s);
+    return up;
+}
+
 /* ------------------------------------------------------- the PS4's app.db
  *
  * DIFFERENT SCHEMA FROM THE PS5, same path. The PS5 keeps one tbl_contentinfo; the PS4 keeps a
@@ -1707,6 +1731,32 @@ static int fs_param_path(const char *rawpath, char *out, size_t outsz) {
     if (!qparam(rawpath, "path", enc, sizeof(enc))) return 0;
     snprintf(out, outsz, "%s", enc);
     return out[0] == '/';
+}
+
+/* WHERE DELETE MAY ACT, AND NOWHERE ELSE.
+ *
+ * The PS5 build keeps a boundary of the same shape and lets it cover the drives, because on that
+ * console a drive holds folders the app itself fills: the backup watch folders and the cheat
+ * library. A PS4 is the other way round. Here the drives hold THE OWNER'S PACKAGES - usb_scan()
+ * walks /mnt/usb0..7 three levels deep and every package it finds is a row in /api/library - so a
+ * delete that reached them would be deleting the library this shop exists to serve. The PS5's
+ * delete lane learned the same lesson from the other end: a drive root is not a folder that exists
+ * to hold our things, and treating it as one hands the owner's own files the rules that were
+ * written for a scan folder.
+ *
+ * Nothing on this console needs more than this. The only caller that has ever had to remove a file
+ * here is the deploy and cleanup probe the tools write into the shop's own folder and then ask us
+ * to take away again.
+ *
+ * The folder itself is not deletable either way it is spelt: the root is compared WITH its
+ * trailing slash and something has to follow that slash, so neither /data/pkg-mutant-shop nor
+ * /data/pkg-mutant-shop/ passes and only a path INSIDE it does. Reads and listings stay unbounded,
+ * exactly as on the PS5 - the whole point of them is the console's own databases - but an
+ * unauthenticated GET that could unlink any path on a root process is an exposure with no user. */
+static int fs_deletable_path(const char *p) {
+    if (!p || p[0] != '/' || strstr(p, "..")) return 0;
+    size_t n = strlen(SHOP_DATA_DIR "/");
+    return !strncmp(p, SHOP_DATA_DIR "/", n) && p[n] != 0;
 }
 
 static void fs_send_stat(int fd, const char *path) {
@@ -3522,6 +3572,26 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
                           ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"could not create it\"}");
             return;
         }
+        /* THE ONE FILE OPERATION HERE THAT DESTROYS SOMETHING, so it is the one with a boundary -
+           see fs_deletable_path(). Without this route every deploy and cleanup run left its probe
+           file behind on the console: the tools write 4 KB through /api/fs/write, stat it, and then
+           ask for it to be removed, and the asking fell through to "unknown file operation".
+           unlink first and then rmdir, which is the order the PS5 uses. A folder with anything in
+           it is left alone, deliberately: nothing in this project needs to remove a tree from a
+           PS4, and a route that walks a directory is a route that can walk the wrong one. */
+        if (!strcmp(op, "delete")) {
+            if (!fs_deletable_path(p)) {
+                send_status(fd, "403 Forbidden", "application/json",
+                            "{\"ok\":false,\"error\":\"that path is outside the folder the shop "
+                            "may delete from\"}");
+                return;
+            }
+            int rc = unlink(p);
+            if (rc != 0) rc = rmdir(p);
+            send_json(fd, rc == 0 ? "{\"ok\":true}"
+                                  : "{\"ok\":false,\"error\":\"could not remove it\"}");
+            return;
+        }
         send_json(fd, "{\"ok\":false,\"error\":\"unknown file operation\"}");
         return;
     }
@@ -3685,6 +3755,35 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
                  "\"ftp\":true,\"ftp_port\":2121},"
                  "\"on_console\":true,\"platform\":\"ps4\"}", pcsrc);
         send_json(fd, o);
+        return;
+    }
+    /* WHAT IS RUNNING BESIDE THE SHOP ON THIS CONSOLE.
+     *
+     * The PS5 answers this because its backup mounter binds loopback-only and the PC therefore
+     * cannot see it; the console is the only one that can. This build answered nothing at all - the
+     * route fell through to the bare {} at the end of handle_get - and the companion overlays what
+     * a console says only when the reply carries ok:true, so silence was read as "it did not say"
+     * and the services panel had no answer about a PS4 at all. A missing route looks exactly like a
+     * broken one.
+     *
+     * So it answers, and only about things this console really has. There is no backup mounter here
+     * and none of the PS5's helper services, and shadowmount is stated as an explicit false rather
+     * than left out, because a missing key and a false one read the same to a caller using .get();
+     * the page has a PS4 branch that paints that row grey with a sentence instead of a red alarm.
+     *
+     * FTP IS PROBED, NOT DECLARED. It is the one thing named here that we do not ship: it belongs
+     * to the jailbreak, the owner may never have started it, and the shop does not need it because
+     * the companion moves files over our own file API on this port. Claiming somebody else's server
+     * is up is how a panel ends up showing a green light for something that is not there. */
+    if (!strcmp(path, "/api/helpers")) {
+        int ftp = port_listening(2121);
+        char out[340];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"shadowmount\":false,"
+                 "\"shadowmount_port\":0,\"ftp\":%s,\"ftp_port\":%d,"
+                 "\"shop\":true,\"shop_port\":%d,\"file_api\":true}",
+                 ftp ? "true" : "false", ftp ? 2121 : 0, PORT);
+        send_json(fd, out);
         return;
     }
     if (!strcmp(path, "/api/consoles")) {
@@ -3952,6 +4051,26 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         send_json(fd, "{\"ok\":true,\"saved\":false,\"on_console\":true,\"platform\":\"ps4\"}");
         return;
     }
+    /* THE GAME PANEL'S TWO DESTRUCTIVE VERBS, IN WORDS RATHER THAN {}.
+     *
+     * The GET side of these has said "not on a PS4" for a while. The POST side - which is how the
+     * page actually sends both of them - fell through to the bare {} at the end of this function,
+     * and the two buttons read that reply differently and were both wrong for it. Delete tests
+     * ok===false, so {} took the SUCCESS branch: the panel said the copy had been removed from the
+     * console and reloaded the library, about a game nothing had touched. Move tests !ok, so it
+     * showed its own fallback sentence and the owner was told the move could not be started with
+     * no reason given.
+     *
+     * The page shows message-or-error out of the body, so the reason has to be IN the reply. It is
+     * word for word the sentence the GET side already gives, because the same button must not get
+     * two different answers depending on which verb carried it. */
+    if (!strcmp(path, "/api/move") || !strcmp(path, "/api/game/delete") ||
+        !strcmp(path, "/api/game/delete-backup")) {
+        send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
+                      "\"error\":\"Game backups are a PS5 feature - a PS4 game is installed "
+                      "or it is not there\"}");
+        return;
+    }
     if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
         !strncmp(path, "/api/patch", 10)) {
         send_json(fd, "{\"ok\":false,\"unsupported\":true,"
@@ -4104,6 +4223,7 @@ static int route_changes_state(const char *rawpath, int is_post) {
     static const char *EXACT[] = {
         "/api/quit", "/api/notify", "/api/open", "/api/register-pc", "/api/install",
         "/api/engine/cancel", "/api/engine/spawn-cleanup", "/api/fs/write", "/api/fs/mkdir",
+        "/api/fs/delete",
         "/api/move", "/api/game/delete", "/api/game/delete-backup",
         "/api/rest/prepare", "/api/payloads/autostart",
         /* The queue's own controls: start releases a held install, clear throws a row away. */
