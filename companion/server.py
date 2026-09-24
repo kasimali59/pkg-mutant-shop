@@ -7268,8 +7268,15 @@ class Handler(BaseHTTPRequestHandler):
                                  "platform": plat, "online": ok,
                                  "shop_port": srv.cfg.get("console", {}).get("shop_port", 8710),
                                  "devices": devs})
-                if ok and not [x for x in consoles[:-1] if x["online"]]:
-                    ps5 = devs                              # first console that answered
+                # THE LEGACY `ps5` KEY MEANS THE PS5, not "whoever answered first". With the PS5
+                # asleep and the PS4 awake it carried the PS4's eight destinations, and every
+                # reader that falls back to it - consoleDevices() when the named console is absent,
+                # ps5Destinations() with no console - then offered a drive that is physically
+                # plugged into the other machine, with that machine's free space beside it.
+                # A PS4-only setup leaves it as the static fallback rather than the PS4's list.
+                if ok and plat != "ps4" and not [x for x in consoles[:-1]
+                                                 if x["online"] and x["platform"] != "ps4"]:
+                    ps5 = devs
             return self._json({"pc": enumerate_pc_drives(), "ps5": ps5, "consoles": consoles,
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", [])})
         if path == "/api/psn-block":
@@ -7330,6 +7337,20 @@ class Handler(BaseHTTPRequestHandler):
                            "online": bool(p.get("online")), "last_seen": p.get("last_seen")}
                           for p in (reg.known() if reg is not None else [])],
                 "console": {"ip": b.ip, "name": b.name, "online": b.pldmgr.alive()} if b else None,
+                # EVERY CONSOLE, BY NAME AND ADDRESS. Settings' "Open it on the TV" row reads
+                # d.consoles, and this route never sent one - so it fell back to a single address
+                # and the PS4's, the one thing you need to type into the PS4's own browser, was
+                # shown nowhere in the whole panel. (The comment above that row says it was fixed
+                # for exactly this case; it was written against a key nothing sent.)
+                #
+                # No probe here on purpose: this route is polled by the panel and the address is a
+                # FACT ABOUT THE CONFIGURATION, not about whether the console is awake. The LEDs
+                # beside it come from health, which does probe.
+                "consoles": [{"id": c.get("id"), "name": c.get("name") or c.get("ip"),
+                              "ip": c.get("ip"),
+                              "platform": str(c.get("platform") or "").lower() or "ps5",
+                              "shop_port": int(srv.cfg.get("console", {}).get("shop_port", 8710))}
+                             for c in srv.fleet.consoles],
                 "scanning": bool(reg.scanning) if reg is not None else False})
         if path == "/api/network/scan":
             if not self._origin_ok():

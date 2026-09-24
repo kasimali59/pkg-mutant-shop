@@ -1302,7 +1302,12 @@ html{scroll-behavior:smooth}
         </section>
 
         <!-- ================= CHEATS ================= -->
-        <section class="scard">
+        <!-- Everything in this card is a PS5 capability. paintCheatsCard() replaces its body with
+             one sentence when the console in question is a PS4, because every part of it is
+             otherwise a promise that console cannot keep: an Inbox path that prints "—", five
+             chips reading "not set up yet", and a hint telling the reader to drop .json/.shn/.mc4
+             files somewhere the PS4 will never look. -->
+        <section class="scard" id="cheatsCard">
           <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h4M8 10v4M15 11h.01M18 13h.01"/><rect x="2" y="6" width="20" height="12" rx="4"/></svg></span><span data-i18n="sec_cheats">Cheats &amp; mods</span></h3><div class="hact"><button class="btn ghost sm tip" id="cheatRescan" data-tip="File anything newly dropped into the watched folders, then re-read the library." data-i18n-tip="ui_tip_cheat_rescan" data-i18n="ui_btn_rescan">Rescan</button></div></div>
           <!-- Six spans, not one data-i18n: the file types stay bold and untranslated, and the words
                around them each carry their own key, so the sentence reads right in every language. -->
@@ -12228,6 +12233,43 @@ function herePlatform(h){
   if(h&&h.viewer_platform) return String(h.viewer_platform).toLowerCase();
   return "";
 }
+/* THE CHEATS CARD, OR ONE HONEST LINE INSTEAD OF IT.
+   Driven by herePlatform() and the console picker, NOT by the html.ps4 class: that class is only
+   set when the page is SERVED by a console, so a PC page whose only console is a PS4 - or whose
+   picker is on the PS4 - would have shown the dead card with no class to hide it. */
+function paintCheatsCard(h){
+  var card=$("#cheatsCard"); if(!card) return;
+  var plat=herePlatform(h)||(state.console&&state.console!=="all"?consolePlat(state.console):"");
+  var body=card.querySelector(".cbody")||card;
+  var note=card.querySelector("#cheatsNotPs4");
+  var rescan=$("#cheatRescan");
+  if(plat!=="ps4"){
+    if(note) note.style.display="none";
+    for(var i=0;i<card.children.length;i++){
+      var el2=card.children[i];
+      if(el2.id!=="cheatsNotPs4"&&el2.getAttribute&&el2.getAttribute("data-ps4hidden")==="1"){
+        el2.style.display=""; el2.removeAttribute("data-ps4hidden");
+      }
+    }
+    if(rescan) rescan.style.display="";
+    return;
+  }
+  /* Hide everything under the heading, then say why, once. */
+  for(var j=1;j<card.children.length;j++){
+    var el3=card.children[j];
+    if(el3.id==="cheatsNotPs4") continue;
+    if(el3.style.display!=="none"){ el3.style.display="none"; el3.setAttribute("data-ps4hidden","1"); }
+  }
+  if(rescan) rescan.style.display="none";
+  if(!note){
+    note=el("div","hint"); note.id="cheatsNotPs4";
+    note.style.cssText="padding:10px 0";
+    card.appendChild(note);
+  }
+  note.style.display="";
+  var hasPs5=(state.consoles||[]).some(function(c){return String(c.platform||"").toLowerCase()!=="ps4";});
+  note.textContent=t(hasPs5?"gp_mods_ps5_only_switch":"gp_mods_ps5_only");
+}
 function paintServices(h,selfIp){
   var ip=selfIp||h.lan_ip||h.ps5_ip||"";
   /* THREE states, not two. ShadowMount binds loopback-only, so the PC genuinely cannot see it -
@@ -12584,7 +12626,7 @@ $("#consoleSel").onchange=function(){
   /* REPAINT WHAT IS NOW ABOUT A DIFFERENT CONSOLE. Changing the picker used to change only which
      console the next install went to; every row in Settings went on describing the old one until
      something else happened to repaint it. */
-  try{ if($("#settings").classList.contains("show")) refreshEngine(); }catch(e){}
+  try{ if($("#settings").classList.contains("show")){ refreshEngine(); paintCheatsCard(state.health); } }catch(e){}
   try{ loadDevices(); }catch(e){}
   try{ if(state.current) openDrawer(state.current,true); }catch(e){}
 };
@@ -12898,6 +12940,7 @@ function openSettings(){
      user-agent sniff. */
   var _cn=$("#consoleNote");
   if(_cn) _cn.style.display=(state.onConsole||h.on_console)?"":"none";
+  paintCheatsCard(h);
   var _cnb=$("#consoleNoteBody");
   if(_cnb) _cnb.textContent=tsub("ui_console_note_body",
                                  {console:(herePlatform(h)==="ps4"?"PS4":"PS5")});
