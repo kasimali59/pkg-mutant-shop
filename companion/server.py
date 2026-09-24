@@ -8758,10 +8758,12 @@ class Handler(BaseHTTPRequestHandler):
         full, err = self._static_resolve(rel)
         if full is None:
             return self._plain(err[1], err[0])
+        # STAT, THEN DECIDE, THEN READ. This read the whole file before working out that it only
+        # had to send a 304 - 811 KB off disk per reload, for a ~150-byte answer, on the thread the
+        # browser is waiting on. Nothing in the decision needs the bytes: the ETag is size+mtime and
+        # the gzip test only wanted a length, which stat already has.
         try:
             st = os.stat(full)
-            with open(full, "rb") as f:
-                data = f.read()
         except OSError:
             return self._plain("read error", 500)
         ctype = guess_type(full)
@@ -8769,11 +8771,11 @@ class Handler(BaseHTTPRequestHandler):
         cache_ctl = ("public, max-age=604800" if safe.split("/")[0] == "assets"
                      else "no-cache")
         enc = None
-        if (ctype.split(";")[0] in self._GZIP_TYPES and len(data) > 1024
+        if (ctype.split(";")[0] in self._GZIP_TYPES and st.st_size > 1024
                 and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()):
             enc = "gzip"
         etag = '"%x-%x%s"' % (st.st_size, int(st.st_mtime), "-gz" if enc else "")
-        if (self.headers.get("If-None-Match") or "").strip() == etag:
+        if etag_matches(self.headers.get("If-None-Match"), etag):
             self.send_response(304)
             self.send_header("ETag", etag)
             self.send_header("Cache-Control", cache_ctl)
@@ -8782,6 +8784,11 @@ class Handler(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             return
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._plain("read error", 500)
         if enc:
             ck = (full, st.st_size, int(st.st_mtime))
             with _STATIC_LOCK:
@@ -9037,6 +9044,24 @@ class Handler(BaseHTTPRequestHandler):
                     agg["max"] = pos          # aggregate, for peers polling by key alone
                 if pos > tr["max"]:
                     tr["max"] = pos
+
+
+def etag_matches(header, etag):
+    """Does the client's If-None-Match cover the tag we hold?
+
+    A SUBSTRING search over the header, not an equality test - the same rule the two payloads use
+    (ps5-app/onconsole/server.c, ps4-app/onconsole/server_ps4.c), so all three servers answer a
+    reload the same way. Equality is wrong twice over: the value may be a LIST of tags, and any
+    cache between here and the browser is allowed to hand back a WEAKENED form of a tag it
+    revalidates (W/"..."). Either one misses, and a validator that never matches is invisible - it
+    just quietly puts the whole file back on the wire. "*" means whatever the server holds.
+    """
+    if not header or not etag:
+        return False
+    h = header.strip()
+    if "*" in h:
+        return True
+    return etag in h
 
 
 # Gzipped copies of static files, keyed by path -> ((path, size, mtime), bytes). See _static().
