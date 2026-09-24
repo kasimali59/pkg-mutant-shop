@@ -1425,6 +1425,14 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
 
 /* Defined below, with the app.db reader it uses. Declared here because job_refresh needs it. */
 static int console_lists_title(const char *tid);
+/* Both defined with the dashboard-app code further down; job_refresh needs them so that a finished
+   install of the icon records itself, whoever started it. Not in the LITE build: that payload is
+   the one that travels INSIDE the package, so it carries no package to compare against and has no
+   staleness to record. */
+#ifndef PMS_LITE
+static void tile_repair_mark(void);
+static int  tile_repair_tried(void);
+#endif
 
 /* Refresh g_job from the console's own progress. Called by /api/engine/job. */
 static void job_refresh(void) {
@@ -1593,6 +1601,13 @@ static void job_refresh(void) {
         titles_cache_drop();
         snprintf(g_job.state, sizeof(g_job.state), "installed");
         snprintf(g_job.msg, sizeof(g_job.msg), "Installed on this PS4");
+        /* A FINISHED REPAIR OF THE ICON RECORDS ITSELF, whoever started it. The PC's lane is the
+           one that works here - the console's own is refused with 0x80991404 - and nothing was
+           marking it, so /api/tile/status went on reporting the icon stale after every successful
+           repair and the PC reinstalled it every ten minutes for ever. */
+#ifndef PMS_LITE
+        if (!strcmp(g_job.tid, PS4_TILE_TID)) tile_repair_mark();
+#endif
         /* AND THE CONSOLE HAS TO AGREE THAT IT HAS IT. app.pkg appearing proves the files arrived;
            it does not prove the console registered the title, and the two really can disagree - a
            package written to /user/app with no row in app.db is a title that exists on disk and
@@ -3098,7 +3113,11 @@ static void *tile_thread(void *unused) {
                  "- leaving it alone");
             return NULL;
         }
-        tile_repair_mark();
+        /* NOT MARKED HERE. This used to burn the one attempt before making it, and THIS lane is
+           the one that cannot work: the download service refuses a package the console serves to
+           itself once PlayStation Network is blocked (0x80991404). So a failure here consumed the
+           attempt that the PC - which the service does accept a package from - was going to make.
+           The stamp is set when an install actually finishes, in job_refresh. */
         ilog("tile: the console reports %s but its copy is not the package this build carries "
              "- reinstalling it", have[0] ? have : "?");
         }
@@ -3447,7 +3466,13 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
 #ifdef PMS_LITE
         int stale = -1;
 #else
-        int stale = (onDisk > 0) ? (tile_bytes_match() ? 0 : 1) : -1;
+        /* THE STAMP COUNTS HERE TOO, and leaving it out cost this console an install of its own
+           icon every ten minutes. tile_bytes_match() cannot succeed on a firmware that re-wraps
+           app.pkg as it installs it - the size matches and the bytes do not - so without the stamp
+           this answer is "stale" for ever, and the PC's watchdog acts on it for ever. The console's
+           own repair path has always obeyed one-attempt-per-build; this is the same rule, told to
+           the only other thing that can act on it. */
+        int stale = (onDisk > 0) ? ((tile_bytes_match() || tile_repair_tried()) ? 0 : 1) : -1;
 #endif
         char out[420];
         /* `launchable` is reported separately from `registered` on purpose. A title can be installed,
@@ -4245,6 +4270,22 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         snprintf(g_job.name, sizeof(g_job.name), "%s", nm);
         snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
         pkg_content_id_from_url_name(uri, g_job.tid, sizeof(g_job.tid));
+        /* THE CATEGORY AND THE BASELINE, which this one lane was starting without.
+         *
+         * Without a baseline g_job.base_had/base_size/base_mtime stay 0, and job_refresh's
+         * `replaced` test is then true on the FIRST poll for any title that already has a file on
+         * disk - so a reinstall, an update or an add-on flipped to "installed" while the download
+         * was still running. A false success, of exactly the class this project has been caught by
+         * before, and the reason the rule is that nothing counts as finished until app.pkg CHANGES.
+         * Without the category, title_proof_facts also looks for the wrong file: an update proved
+         * by the base game's app.pkg is a job that can never fail honestly.
+         *
+         * The other three lanes have done both since they were written; this one was missed
+         * because it fills the slot by hand instead of sharing their block. */
+        if (!strcmp(ptype, "PS4GP"))      snprintf(g_job.cat, sizeof(g_job.cat), "gp");
+        else if (!strcmp(ptype, "PS4AC")) snprintf(g_job.cat, sizeof(g_job.cat), "ac");
+        else if (!strcmp(ptype, "PS4GD")) snprintf(g_job.cat, sizeof(g_job.cat), "gd");
+        job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         g_job_claim = 0;
         pthread_mutex_unlock(&g_job_lock);
