@@ -10216,10 +10216,57 @@ def main():
                         if plat:
                             c0["platform"] = plat
                 else:
-                    cfg["consoles"] = [{"id": "ps4" if plat == "ps4" else "ps5",
-                                        "name": "PS4" if plat == "ps4" else "PS5",
-                                        "ip": newip, "platform": plat or "ps5",
-                                        "ftp_port": cfg["ftp"].get("port", 2121)}]
+                    # NOTHING CONFIGURED AT ALL - so take EVERY console that confirmed, not the
+                    # first one. discover_ps5() returns them all, sorted confirmed-first and then
+                    # by ADDRESS, and this used to keep found[0]: with both machines awake a PS4 at
+                    # .87 sorted ahead of a PS5 at .99 and the PS5 was dropped. Measured on a bare
+                    # exe - one file, no config.json, which is exactly what gets carried to a second
+                    # PC - ps5_online came back false with the PS5 answering on 8710 and 8084.
+                    #
+                    # A guess is still never saved: only a host that CONFIRMED it is a console gets
+                    # an entry, which is the same rule the single-console path has always used.
+                    made, used_ids = [], set()
+                    for f in found:
+                        if not f.get("confirmed"):
+                            continue
+                        fp = str(f.get("platform") or "").lower()
+                        base_id = "ps4" if fp == "ps4" else "ps5"
+                        cid, n2 = base_id, 0
+                        while cid in used_ids:
+                            n2 += 1
+                            cid = "%s-%d" % (base_id, n2)
+                        used_ids.add(cid)
+                        made.append({"id": cid, "name": base_id.upper(),
+                                     "ip": f["ip"], "platform": fp or "ps5",
+                                     "ftp_port": cfg["ftp"].get("port", 2121)})
+                    if not made:
+                        # None of them would confirm. Keep the old behaviour exactly: try the best
+                        # guess for this run and do not write it down.
+                        made = [{"id": "ps4" if plat == "ps4" else "ps5",
+                                 "name": "PS4" if plat == "ps4" else "PS5",
+                                 "ip": newip, "platform": plat or "ps5",
+                                 "ftp_port": cfg["ftp"].get("port", 2121)}]
+                    cfg["consoles"] = made
+                    # The two legacy address keys still drive a great deal, so they follow the
+                    # list rather than the first thing discovered. ps5_ip must never point at a
+                    # PS4 - that is a lie about which console the PS5-only lanes should talk to.
+                    for c in made:
+                        if str(c.get("platform")).lower() == "ps4":
+                            cfg.setdefault("ps4_ip", "")
+                            if not cfg.get("ps4_ip"):
+                                cfg["ps4_ip"] = c["ip"]
+                        elif not cfg.get("ps5_ip"):
+                            cfg["ps5_ip"] = c["ip"]
+                    if len(made) > 1:
+                        print(" Auto-found %d consoles: %s"
+                              % (len(made), ", ".join("%s at %s" % (c["name"], c["ip"])
+                                                      for c in made)))
+                # ORDER THEM AGAIN. reconcile_consoles() runs inside load_config(), which is
+                # long finished by the time auto-find writes this list - so a fresh install came up
+                # with whatever order the scan returned, which is by ADDRESS, which put a PS4 at
+                # .87 in front of a PS5 at .99. consoles[0] still means "the console" to a great
+                # many routes, and it is supposed to be the PS5 on a fleet that has one.
+                reconcile_consoles(cfg)
                 fleet = Fleet(cfg)
                 # Only a host that CONFIRMED it is a console gets written to disk. A guess is good
                 # enough to try for this run, but must not outlive it - that is how the console
