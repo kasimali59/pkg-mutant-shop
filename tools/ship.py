@@ -79,8 +79,8 @@ def main():
         # RUNNING - which the companion exe usually is - is reported LOCKED on a release where it
         # did not change at all, and a real failure would be lost among the noise.
         if os.path.exists(dst) and sha(dst) == s:
-            print("[ok     ] %-26s %10d bytes  %s  (%s, already current)"
-                  % (name, os.path.getsize(dst), s[:16], what))
+            print("[ok     ] %-26s %10d bytes  build %s  (%s, already current)"
+                  % (name, os.path.getsize(dst), s[:8], what))
             continue
 
         if not check_only:
@@ -114,8 +114,8 @@ def main():
             bad += 1
             continue
 
-        print("[ok     ] %-26s %10d bytes  %s  (%s)"
-              % (name, os.path.getsize(dst), d[:16], what))
+        print("[ok     ] %-26s %10d bytes  build %s  (%s)"
+              % (name, os.path.getsize(dst), d[:8], what))
 
     print()
     if bad:
@@ -123,6 +123,10 @@ def main():
               % (bad, len(ARTIFACTS)))
         return 1
     print("all %d artifacts in %s match what was built." % (len(ARTIFACTS), DEST))
+    # The exe's build string is the first 8 of its sha256, which is exactly what the app reports as
+    # `build` in /api/health and prints in Settings > About. So a second PC can be compared against
+    # this line without trusting a version number that does not change when the code does.
+    print("the exe's build string is what Settings > About shows on any PC running it.")
     return 0
 
 

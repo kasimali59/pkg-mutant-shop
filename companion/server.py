@@ -41,6 +41,42 @@ import sources as source_engine
 
 VERSION = "3.64.0"
 
+_BUILD_ID = None
+
+
+def build_id():
+    """A short fingerprint of THIS artifact, beside the version.
+
+    A version number does not change when the code does, and two machines running "3.64.0" have
+    already turned out to be running different builds - a copy that silently failed, and an exe
+    rebuilt after a fix. There was no way to see that from either screen. This is what is actually
+    running: the exe's own bytes when frozen, the server plus the page when running from source.
+
+    Cheap and lazy: computed on the first call and kept. Hashing a 22 MB exe costs about a tenth of
+    a second, once, and only if something asks."""
+    global _BUILD_ID
+    if _BUILD_ID is not None:
+        return _BUILD_ID
+    h = hashlib.sha256()
+    try:
+        if getattr(sys, "frozen", False):
+            with open(sys.executable, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        else:
+            for p in (os.path.abspath(__file__),
+                      os.path.join(WEB_DIR, "index.html")):
+                try:
+                    with open(p, "rb") as f:
+                        h.update(f.read())
+                except OSError:
+                    pass
+    except Exception:
+        _BUILD_ID = ""
+        return _BUILD_ID
+    _BUILD_ID = h.hexdigest()[:8]
+    return _BUILD_ID
+
 # HOW LONG A PROBE ANSWER ON THE /api/health PATH STAYS GOOD.
 #
 # Four memos on that path were each written as 5.0 s "because health is polled every 6 s". Read
@@ -7377,6 +7413,10 @@ class Handler(BaseHTTPRequestHandler):
                 _peer = ""
             _viewer_plat = viewer_platform_for(cons, _peer)
             return self._json({"ok": True, "version": VERSION,
+                               # WHICH BUILD, not just which version - see build_id(). Two PCs
+                               # reporting the same version and behaving differently is what this
+                               # exists to make visible.
+                               "build": build_id(),
                                "running_title": _run.get("titleId") or "",
                                "running_name": _run.get("titleName") or "",
                                "ps5_ip": (_ps5 or {}).get("ip") or srv.cfg.get("ps5_ip") or "",
@@ -10286,6 +10326,58 @@ def main():
                           "so this is not being saved)" % newip)
     except Exception as e:
         print(" PS5 auto-find skipped: %s" % e)
+
+    # A PLATFORM THIS PC HAS NEVER HEARD OF, on a network where it is answering.
+    #
+    # The block above only runs when nothing is configured or the one configured console is not
+    # answering. On a PC that already knows a PS5, and whose PS5 is awake, it is skipped entirely -
+    # so a PS4 on the same network stays invisible for ever. That is what the owner's two PCs
+    # showed: identical exe, identical network, and one of them had no console picker, no PS4 drive
+    # tile and no PS4 anywhere, because its config named a PS5 and nothing ever looked again.
+    #
+    # Deliberately narrow. It ADDS ONLY: nothing already configured is renamed, re-addressed or
+    # removed, and it fires only for a platform with NO entry at all - so a console the owner took
+    # out of Settings does not reappear while another of its kind is still listed. And only a host
+    # that CONFIRMED it is a console is written down, which is the same rule the block above uses.
+    try:
+        have_plat = {str(c.get("platform") or "").lower() or "ps5"
+                     for c in (cfg.get("consoles") or [])}
+        if cfg.get("consoles"):                      # nothing configured is the case above
+            missing = [f for f in discover_ps5(cfg)
+                       if f.get("confirmed")
+                       and (str(f.get("platform") or "").lower() or "ps5") not in have_plat
+                       and not any(c.get("ip") == f["ip"] for c in cfg["consoles"])]
+            added_new = []
+            for f in missing:
+                fp = str(f.get("platform") or "").lower() or "ps5"
+                if fp in have_plat:                  # only the first of each kind
+                    continue
+                have_plat.add(fp)
+                used = {str(c.get("id") or "") for c in cfg["consoles"]}
+                cid, n3 = fp, 0
+                while cid in used:
+                    n3 += 1
+                    cid = "%s-%d" % (fp, n3)
+                cfg["consoles"].append({"id": cid, "name": fp.upper(), "ip": f["ip"],
+                                        "platform": fp,
+                                        "ftp_port": cfg.get("ftp", {}).get("port", 2121)})
+                if fp == "ps4" and not cfg.get("ps4_ip"):
+                    cfg["ps4_ip"] = f["ip"]
+                elif fp != "ps4" and not cfg.get("ps5_ip"):
+                    cfg["ps5_ip"] = f["ip"]
+                added_new.append("%s at %s" % (fp.upper(), f["ip"]))
+            if added_new:
+                reconcile_consoles(cfg)
+                fleet = Fleet(cfg)
+                try:
+                    save_config(cfg)
+                except Exception:
+                    pass
+                print(" Found a console this PC had never seen: %s - added, and the ones you "
+                      "already had are untouched" % ", ".join(added_new))
+    except Exception as e:
+        print(" second-console check skipped: %s" % e)
+
     dns = DnsBlocker(cfg)
     dns.start()
 
