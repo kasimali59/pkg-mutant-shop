@@ -7636,12 +7636,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "console did not answer: %s" % e}, 502)
         if path.startswith("/api/mods/"):
             tid = unquote(path[len("/api/mods/"):]).strip("/")
-            # ?state=1 is the quiet refresh the mods panel fires after every toggle. It reads
-            # r.mods and nothing else, so composing the patch document for it cost a console
-            # round trip per click - and on a title with no installed version that round trip
-            # makes the console read the whole app.db and walk its b-tree. Anything else, and
-            # anything unparseable, still means the full document the panel's first paint needs.
-            state_only = (parse_qs(u.query).get("state") or [""])[0] == "1"
             b = _bridge_for(srv, self)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
@@ -7693,8 +7687,7 @@ class Handler(BaseHTTPRequestHandler):
                                  for m in (doc.get("mods") or [])],
                         # Game patches live in their own XML library, so they are fetched
                         # separately — this was a hardcoded [] and kept 376 files invisible.
-                        "patches": ([] if state_only else b.mutant_patches(tid, installed_ver)),
-                        "candidates": [],
+                        "patches": b.mutant_patches(tid, installed_ver), "candidates": [],
                         "versions": doc.get("versions") or []})
             cr = b.cheats
             if not cr.alive():

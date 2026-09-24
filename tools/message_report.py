@@ -212,6 +212,53 @@ def web_messages():
     return out
 
 
+# KEYS RENDERED AS FRAGMENTS, NOT AS SENTENCES. These are composed into a queue status label -
+# the page builds err + " " + t("q_failed"), and the state word beside it - so "failed" and "Error"
+# are correct English in the only place they appear. Holding them to the bare-verb rule would be a
+# false positive, and a gate that cries wolf gets switched off.
+DICT_FRAGMENT_KEYS = ("q_failed", "msg_q_state_error")
+
+
+def dict_messages():
+    """Every sentence in the I18N dictionary, in EVERY language.
+
+    web_messages() only sees what reaches a toast()/confirm()/prompt() call, so a sentence that is
+    defined and translated but NOT YET WIRED to a control sat outside this gate completely. That is
+    exactly how a discovery message naming software this project does not ship lived in seven
+    languages under a green check: nothing called it, so nothing looked at it, and the day someone
+    wired it up it would have shipped without ever being read. A string that SHIPS is checked
+    whether or not anything calls it yet.
+
+    Checked, not listed: the report's job is to show the English the shop says, and 663 keys across
+    15 languages would drown it.
+    """
+    src = read(WEB)
+    i = src.find("var I18N=")
+    if i < 0:
+        return []
+    kv = re.compile(r'([A-Za-z_][A-Za-z0-9_]*):"((?:[^"\\]|\\.)*)"')
+    out = []
+    for m in re.finditer(r"\n  ([a-z]{2}):\{", src[i:]):
+        code = m.group(1)
+        j = src.index("{", i + m.start())
+        depth, k = 0, j
+        while k < len(src):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        for km in kv.finditer(src[j:k + 1]):
+            if km.group(1) in DICT_FRAGMENT_KEYS or not km.group(2).strip():
+                continue
+            out.append({"text": km.group(2), "file": "web/index.html",
+                        "line": src.count("\n", 0, j + km.start()) + 1,
+                        "where": "dictionary [%s] %s" % (code, km.group(1)), "who": "app"})
+    return out
+
+
 def queue_messages():
     src = read(COMPANION)
     out = []
@@ -364,12 +411,15 @@ def main():
     web = web_messages()
     que = queue_messages() + server_messages()
     allrows = con + web + que
+    # The dictionary is CHECKED but not rendered into the report - see dict_messages. With --check
+    # off this is exactly allrows, so the generated page is unchanged byte for byte.
+    check_rows = allrows + (dict_messages() if args.check else [])
 
-    bad = lint(allrows)
+    bad = lint(check_rows)
     if args.check:
         for r, why in bad:
             print("%s:%d  %s\n    %r" % (r["file"], r["line"], why, r["text"][:110]))
-        print("%d message(s) checked, %d off style" % (len(allrows), len(bad)))
+        print("%d message(s) checked, %d off style" % (len(check_rows), len(bad)))
         return 1 if bad else 0
 
     body = []

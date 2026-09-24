@@ -1185,9 +1185,10 @@ html{scroll-behavior:smooth}
          to give: a PS4 game with both consoles connected, since a PS4 game runs on either. -->
     <div class="selwrap" id="panelConsoleWrap" style="display:none"><select id="panelConsoleSel" aria-label="Install on which console" data-i18n-aria="ui_aria_install_console"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
     <div class="selwrap"><select id="driveSel" aria-label="Install destination" data-i18n-aria="ui_aria_install_dest"></select><div class="selmarq" aria-hidden="true"><span></span></div></div>
+    <button class="btn ghost tip" id="sendPkg"
+            data-tip="Copy the package onto the PS5's own drive first, then install it from there. Useful when you want the console to hold the file rather than stream it over the network." data-i18n-tip="ui_tip_send_pkg">📥 Send to PS5</button>
     <button class="btn ghost tip" id="queueBtn"
             data-tip="Add this to the queue instead of installing it now. Queued games install one after another."
-            data-i18n-tip="ui_tip_queue_add"
             data-i18n="queue_add">＋ Queue</button>
     <button class="btn primary" id="installAll" data-i18n="ui_install_base">Install base</button>
     <div style="position:relative">
@@ -1239,12 +1240,11 @@ html{scroll-behavior:smooth}
 
         <!-- ================= CONSOLE ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your PS5</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n-tip="ui_tip_test_console" data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span data-i18n="sec_console">Your PS5</span></h3><div class="hact"><button class="btn ghost sm tip needspc" id="discover" data-tip="Look for a PS5 on this network by trying the ports this app uses: the shop on 8710 and Payload Manager on 8084." data-i18n-tip="ui_tip_discover" data-i18n="ui_btn_find_it">Find it</button><button class="btn ghost sm tip needspc" id="testConsole" data-tip="Ask the console right now whether the shop is answering and whether an install could start." data-i18n="ui_btn_test">Test</button><button class="btn ghost sm tip needspc" id="openPs5" data-tip="Open the shop on the PS5's own screen. The app must already be loaded there." data-i18n-tip="ui_tip_open_ps5" data-i18n="ui_btn_open_on_ps5">Open on PS5</button></div></div>
           <div class="frow">
             <span class="flabel" data-i18n="ui_console_address">Console address</span>
             <!-- An address is fifteen characters. A full-width box for it just looked unfinished. -->
-            <input id="setIp" class="short" placeholder="192.168.1.50" aria-label="Console address"
-                   data-i18n-aria="ui_console_address"
+            <input id="setIp" class="short" placeholder="192.168.1.50" aria-label="PS5 address"
                    autocomplete="off" spellcheck="false">
           </div>
           <!-- The PS4 is a SECOND console, not an alternative to the first: a PC can drive both at
@@ -1305,7 +1305,7 @@ html{scroll-behavior:smooth}
           <div class="btnrow">
             <button class="btn ghost sm tip pconly" id="rescan" data-tip="Re-read the games folder now. It is watched automatically, so this is only needed if you have just copied files in." data-i18n-tip="ui_tip_rescan" data-i18n="ui_btn_rescan">Rescan</button>
             <button class="btn ghost sm tip pconly" id="prepareTree" data-tip="Create the PS4 and PS5 folders inside the games folder if they are missing." data-i18n-tip="ui_tip_create_folders" data-i18n="ui_btn_create_folders">Create folders</button>
-            <button class="btn ghost sm tip pconly pcseat" id="openFolder" data-tip="Open the games folder on this PC." data-i18n-tip="ui_tip_open_folder" data-i18n="ui_btn_open_folder">Open folder</button>
+            <button class="btn ghost sm tip pconly pcseat" id="openFolder" data-tip="Open the games folder on this PC." data-i18n="ui_btn_open_folder">Open folder</button>
           </div>
         </section>
 
@@ -1359,7 +1359,7 @@ html{scroll-behavior:smooth}
           <div class="svc"><span class="k"><span class="led" id="ledFiles"></span><span data-i18n="ui_file_transfer">File transfer</span></span><span class="v mono ell" id="setFiles">-</span></div>
           <div class="btnrow">
             <button class="btn ghost sm tip" id="autoStart" style="display:none" data-tip="Whether loading this app also starts the background services that let PS5 backups be played from a drive. Installing PKG files does not need them, so turning this off is safe - and it rules them out of a crash when the console wakes from rest." data-i18n-tip="ui_tip_autostart">Helpers: &hellip;</button>
-            <select class="sort tip" id="helperDelay" style="display:none" data-i18n-tip="ui_tip_helper_delay"
+            <select class="sort tip" id="helperDelay" style="display:none"
                     data-tip="How long to wait after the console starts before the helpers are loaded. Waking from rest brings the whole payload chain up at once, and starting them into a system that is still assembling itself is what makes a wake crash now and then. Longer is safer.">
               <option value="0" data-i18n="ui_helper_delay_now">Start helpers: immediately</option>
               <option value="15" data-i18n="ui_helper_delay_15">Start helpers: after 15s</option>
@@ -1391,11 +1391,11 @@ html{scroll-behavior:smooth}
 
         <!-- ================= ADVANCED ================= -->
         <section class="scard">
-          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-i18n="ui_btn_clear_state" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n-tip="ui_tip_eng_log" data-i18n="ui_btn_install_log">Install log</button></div></div>
+          <div class="chead"><h3><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5 1.8 1.8 2.5-2.5a4 4 0 0 1-4.8-4.8z"/></svg></span><span data-i18n="sec_advanced">Advanced</span></h3><div class="hact"><button class="btn ghost sm tip" id="engClear" data-i18n="ui_btn_clear_state" data-tip="Clear the hand-over files and the busy flag our installer leaves behind. Safe at any time - it never stops an install the console has already accepted." data-i18n-tip="ui_tip_eng_clear">Clear state</button><button class="btn ghost sm tip" id="engLog" data-tip="The console's own record of every install: what was asked for, what the installer answered, and when it was cleaned up. Kept even with this PC switched off." data-i18n="ui_btn_install_log">Install log</button></div></div>
           <div class="hint" style="margin-top:0" data-i18n="ui_advanced_hint">For working out why something is not happening. Nothing here is needed to use the app.</div>
           <div class="frow" style="margin-top:10px">
             <span class="flabel" data-i18n="ui_shop_port_label">Shop port on the console</span>
-            <input id="setPort" placeholder="8710" inputmode="numeric" aria-label="Shop port on the console" data-i18n-aria="ui_shop_port_label">
+            <input id="setPort" placeholder="8710" inputmode="numeric" aria-label="Shop port on the PS5">
           </div>
           <div class="svc"><span class="k" data-i18n="ui_console_ftp">Console FTP</span><span class="v mono ell" id="cpFtp">-</span></div>
           <div class="hint mono" id="engLogBox" style="display:none;white-space:pre-wrap;max-height:190px;overflow:auto;margin-top:6px;font-size:10.5px;line-height:1.5"></div>
@@ -2017,7 +2017,7 @@ var I18N={
     msg_log_no_answer:"The console did not answer. Load PKG MUTANT SHOP on it from Payload Manager.",
     msg_discover_scanning:"Scanning the network…",
     msg_discover_ports_prefix:" — ports ",
-    msg_discover_scan_failed:"Scan failed.",
+    msg_discover_scan_failed:"The network could not be scanned. Check this device is still on the network, then try again.",
     msg_helpers_label_prefix:"Helpers: ",
     msg_helpers_autostart:"auto-start",
     msg_helpers_off:"off",
@@ -2634,7 +2634,7 @@ var I18N={
     msg_log_no_answer:"La consola no respondió. Carga PKG MUTANT SHOP en ella desde Payload Manager.",
     msg_discover_scanning:"Explorando la red…",
     msg_discover_ports_prefix:" — puertos ",
-    msg_discover_scan_failed:"La exploración falló.",
+    msg_discover_scan_failed:"No se pudo escanear la red. Comprueba que este dispositivo sigue conectado y vuelve a intentarlo.",
     msg_helpers_label_prefix:"Ayudantes: ",
     msg_helpers_autostart:"inicio automático",
     msg_helpers_off:"desactivados",
@@ -3251,7 +3251,7 @@ var I18N={
     msg_log_no_answer:"A consola não respondeu. Carrega nela o PKG MUTANT SHOP pelo Payload Manager.",
     msg_discover_scanning:"A procurar na rede…",
     msg_discover_ports_prefix:" — portas ",
-    msg_discover_scan_failed:"A procura falhou.",
+    msg_discover_scan_failed:"Não foi possível analisar a rede. Verifique se este dispositivo continua ligado à rede e tente novamente.",
     msg_helpers_label_prefix:"Serviços: ",
     msg_helpers_autostart:"arranque automático",
     msg_helpers_off:"desligados",
@@ -3868,7 +3868,7 @@ var I18N={
     msg_log_no_answer:"La console n'a pas répondu. Chargez-y PKG MUTANT SHOP depuis Payload Manager.",
     msg_discover_scanning:"Analyse du réseau…",
     msg_discover_ports_prefix:" — ports ",
-    msg_discover_scan_failed:"L'analyse a échoué.",
+    msg_discover_scan_failed:"Impossible d’analyser le réseau. Vérifiez que cet appareil y est toujours connecté, puis réessayez.",
     msg_helpers_label_prefix:"Services : ",
     msg_helpers_autostart:"démarrage auto",
     msg_helpers_off:"désactivés",
@@ -4485,7 +4485,7 @@ var I18N={
     msg_log_no_answer:"Die Konsole hat nicht geantwortet. Lade PKG MUTANT SHOP dort im Payload Manager.",
     msg_discover_scanning:"Netzwerk wird durchsucht…",
     msg_discover_ports_prefix:" – Ports ",
-    msg_discover_scan_failed:"Die Suche ist fehlgeschlagen.",
+    msg_discover_scan_failed:"Das Netzwerk konnte nicht durchsucht werden. Prüfen Sie, ob dieses Gerät noch mit dem Netzwerk verbunden ist, und versuchen Sie es erneut.",
     msg_helpers_label_prefix:"Helfer: ",
     msg_helpers_autostart:"Autostart",
     msg_helpers_off:"aus",
@@ -5102,7 +5102,7 @@ var I18N={
     msg_log_no_answer:"本体が応答しませんでした。Payload Manager から PKG MUTANT SHOP を読み込んでください。",
     msg_discover_scanning:"ネットワークを調べています…",
     msg_discover_ports_prefix:" — ポート ",
-    msg_discover_scan_failed:"検索できませんでした。",
+    msg_discover_scan_failed:"ネットワークをスキャンできませんでした。このデバイスがネットワークに接続されているか確認して、もう一度お試しください。",
     msg_helpers_label_prefix:"補助サービス: ",
     msg_helpers_autostart:"自動で開始",
     msg_helpers_off:"オフ",
@@ -5719,7 +5719,7 @@ var I18N={
     msg_log_no_answer:"الجهاز لم يستجب. حمّل PKG MUTANT SHOP عليه من Payload Manager.",
     msg_discover_scanning:"جارٍ فحص الشبكة…",
     msg_discover_ports_prefix:" — المنافذ ",
-    msg_discover_scan_failed:"فشل الفحص.",
+    msg_discover_scan_failed:"تعذر فحص الشبكة. تأكد من أن هذا الجهاز لا يزال متصلاً بالشبكة، ثم حاول مرة أخرى.",
     msg_helpers_label_prefix:"المساعدات: ",
     msg_helpers_autostart:"تشغيل تلقائي",
     msg_helpers_off:"موقوفة",
@@ -5868,7 +5868,7 @@ var I18N={
     msg_delete_confirm_a:"从 PS5 删除 “",
     msg_delete_confirm_b:"”？\\n\\n这会从主机硬盘上移除该备份文件，所以主机下次扫描时它不会再出现。\\n\\n你在这台电脑上的副本不会被改动。\\n\\n如果它还显示在 PS5 主界面上，请在那里也删除一次。",
     msg_discover_ports_prefix:" — 端口 ",
-    msg_discover_scan_failed:"扫描失败。",
+    msg_discover_scan_failed:"无法扫描网络。请确认本机仍连接到网络，然后重试。",
     msg_discover_scanning:"正在扫描网络…",
     msg_drive_addon_tip:"补丁和重装必须装到与游戏相同的硬盘，所以这里会自动选好。",
     msg_drive_blind_tip:"主机没有回应，所以这里列出的是它可能有的全部位置，而不是此刻实际接着的那些。",
@@ -6526,7 +6526,7 @@ var I18N={
     msg_delete_confirm_a:"PS5 से हटाएँ “",
     msg_delete_confirm_b:"”?\\n\\nयह बैकअप फ़ाइल को कंसोल की ड्राइव से हटा देता है, इसलिए अगली बार कंसोल के स्कैन करने पर वह वापस नहीं आएगी।\\n\\nइस PC पर रखी आपकी कॉपी को कुछ नहीं होता।\\n\\nअगर यह PS5 की होम स्क्रीन पर अब भी दिख रहा है, तो उसे वहाँ से भी हटा दें।",
     msg_discover_ports_prefix:" — पोर्ट ",
-    msg_discover_scan_failed:"स्कैन नहीं हो सका।",
+    msg_discover_scan_failed:"नेटवर्क स्कैन नहीं हो सका। जाँच लें कि यह डिवाइस अब भी नेटवर्क से जुड़ा है, फिर दोबारा कोशिश करें।",
     msg_discover_scanning:"नेटवर्क स्कैन हो रहा है…",
     msg_drive_addon_tip:"पैच और दोबारा इंस्टॉल उसी ड्राइव पर जाने चाहिए जिस पर गेम है, इसलिए यह अपने आप चुनी जाती है।",
     msg_drive_blind_tip:"कंसोल जवाब नहीं दे रहा, इसलिए यहाँ अभी लगी ड्राइव नहीं, बल्कि हर वह जगह दिख रही है जो उसके पास हो सकती है।",
@@ -7184,7 +7184,7 @@ var I18N={
     msg_delete_confirm_a:"Удалить “",
     msg_delete_confirm_b:"” с PS5?\\n\\nФайл бэкапа удаляется с диска консоли, поэтому он не появится снова при следующем сканировании.\\n\\nВаша копия на этом ПК НЕ затрагивается.\\n\\nЕсли игра всё ещё видна на главном экране PS5, удалите её и оттуда.",
     msg_discover_ports_prefix:" — порты ",
-    msg_discover_scan_failed:"Не удалось выполнить сканирование.",
+    msg_discover_scan_failed:"Не удалось просканировать сеть. Убедитесь, что это устройство подключено к сети, и повторите попытку.",
     msg_discover_scanning:"Сканирование сети…",
     msg_drive_addon_tip:"Патчи и переустановки должны попадать на тот же диск, что и игра, поэтому он выбирается автоматически.",
     msg_drive_blind_tip:"Консоль не отвечает, поэтому здесь показаны все возможные места установки, а не только подключённые сейчас.",
@@ -7842,7 +7842,7 @@ var I18N={
     msg_delete_confirm_a:"Eliminare “",
     msg_delete_confirm_b:"” dalla PS5?\\n\\nQuesto rimuove il file di backup dall'unità della console, quindi non tornerà alla prossima scansione.\\n\\nLa tua copia su questo PC NON viene toccata.\\n\\nEliminalo anche dalla schermata home della PS5 se compare ancora lì.",
     msg_discover_ports_prefix:" — porte ",
-    msg_discover_scan_failed:"Scansione non riuscita.",
+    msg_discover_scan_failed:"Non è stato possibile eseguire la scansione della rete. Verifica che questo dispositivo sia ancora connesso, poi riprova.",
     msg_discover_scanning:"Scansione della rete…",
     msg_drive_addon_tip:"Le patch e le reinstallazioni devono andare sulla stessa unità del gioco, quindi la scelta è automatica.",
     msg_drive_blind_tip:"La console non risponde, quindi queste sono tutte le destinazioni possibili e non solo quelle collegate adesso.",
@@ -8500,7 +8500,7 @@ var I18N={
     msg_delete_confirm_a:"“",
     msg_delete_confirm_b:"”을(를) PS5에서 삭제할까요?\\n\\n콘솔 드라이브에서 백업 파일을 지우므로, 콘솔이 다음에 검색할 때 다시 나타나지 않습니다.\\n\\n이 PC에 있는 사본은 건드리지 않습니다.\\n\\nPS5 홈 화면에 아직 남아 있다면 거기서도 삭제하세요.",
     msg_discover_ports_prefix:" — 포트 ",
-    msg_discover_scan_failed:"검색에 실패했습니다.",
+    msg_discover_scan_failed:"네트워크를 검색하지 못했습니다. 이 기기가 네트워크에 연결되어 있는지 확인한 후 다시 시도해 주세요.",
     msg_discover_scanning:"네트워크를 검색하는 중…",
     msg_drive_addon_tip:"패치와 재설치는 게임과 같은 드라이브로 가야 하므로 자동으로 선택됩니다.",
     msg_drive_blind_tip:"콘솔이 응답하지 않아, 지금 연결된 드라이브가 아니라 있을 수 있는 모든 위치를 보여 줍니다.",
@@ -9158,7 +9158,7 @@ var I18N={
     msg_delete_confirm_a:"“",
     msg_delete_confirm_b:"” PS5'ten silinsin mi?\\n\\nBu, yedek dosyasını konsolun sürücüsünden kaldırır; böylece konsol bir daha taradığında geri gelmez.\\n\\nBu PC'deki kopyanıza DOKUNULMAZ.\\n\\nPS5 ana ekranında hâlâ görünüyorsa oradan da silin.",
     msg_discover_ports_prefix:" — portlar ",
-    msg_discover_scan_failed:"Tarama başarısız oldu.",
+    msg_discover_scan_failed:"Ağ taranamadı. Bu cihazın hâlâ ağa bağlı olduğunu kontrol edin, sonra yeniden deneyin.",
     msg_discover_scanning:"Ağ taranıyor…",
     msg_drive_addon_tip:"Yamalar ve yeniden kurulumlar oyunla aynı sürücüye gitmek zorunda, bu yüzden bu otomatik seçilir.",
     msg_drive_blind_tip:"Konsol yanıt vermiyor, bu yüzden burada şu anda takılı olanlar değil, olabilecek tüm hedefler listeleniyor.",
@@ -9816,7 +9816,7 @@ var I18N={
     msg_delete_confirm_a:"Usunąć „",
     msg_delete_confirm_b:"” z PS5?\\n\\nTo usuwa plik kopii z dysku konsoli, więc nie wróci przy następnym skanowaniu przez konsolę.\\n\\nTwoja kopia na tym komputerze NIE zostanie ruszona.\\n\\nUsuń ją też z ekranu głównego PS5, jeśli nadal tam widnieje.",
     msg_discover_ports_prefix:" — porty ",
-    msg_discover_scan_failed:"Skanowanie nie powiodło się.",
+    msg_discover_scan_failed:"Nie udało się przeskanować sieci. Sprawdź, czy to urządzenie nadal jest w sieci, i spróbuj ponownie.",
     msg_discover_scanning:"Skanowanie sieci…",
     msg_drive_addon_tip:"Patche i ponowne instalacje muszą trafić na ten sam dysk co gra, więc jest on wybierany automatycznie.",
     msg_drive_blind_tip:"Konsola nie odpowiada, więc to każde miejsce, jakie może mieć, a nie te, które są podłączone w tej chwili.",
@@ -10474,7 +10474,7 @@ var I18N={
     msg_delete_confirm_a:"“",
     msg_delete_confirm_b:"” van de PS5 verwijderen?\\n\\nDit haalt het back-upbestand van de schijf van de console, zodat het niet terugkomt als de console de volgende keer scant.\\n\\nJe kopie op deze pc blijft ONGEMOEID.\\n\\nVerwijder hem ook van het PS5-startscherm als hij daar nog staat.",
     msg_discover_ports_prefix:" — poorten ",
-    msg_discover_scan_failed:"Scan mislukt.",
+    msg_discover_scan_failed:"Het netwerk kon niet worden gescand. Controleer of dit apparaat nog met het netwerk verbonden is en probeer het opnieuw.",
     msg_discover_scanning:"Netwerk scannen…",
     msg_drive_addon_tip:"Patches en herinstallaties moeten naar dezelfde schijf als de game, dus dit wordt automatisch gekozen.",
     msg_drive_blind_tip:"De console antwoordt niet, dus dit zijn alle bestemmingen die hij kan hebben, niet alleen de schijven die nu aangesloten zijn.",
@@ -11261,11 +11261,6 @@ function fillConsoleSel(g,keep){
   if(!pick){ var on=list.filter(function(c){return c.online;}); pick=(on.length?on[0]:list[0]).id; }
   sel.value=pick;
   wrap.style.display="";
-  /* The same overlay treatment the destination picker directly below this one gets. It has had a
-     .selmarq of its own in the markup since it was added and nothing ever filled it, so
-     "Install on: Living room PS4 (offline)" was cut off with an ellipsis while the control under
-     it scrolled its whole text - and on a TV the cut-off half is the half that names the machine. */
-  syncDriveMarquee(sel);
 }
 function installsAsBackup(g){
   var b=g&&g.base&&g.base[0];
@@ -12269,12 +12264,17 @@ function openDrawer(g,repaint){
         : tsub("gp_tip_reinstall",{console:_dev}));
     }
   }
-  /* "Send to PS5" is gone. It was set to display:none on every single paint, so no press could
-     ever reach this handler, and nothing behind it was alive either: no server reads the
-     `via:"ftp"` flag it sent, and the POST omitted drive/kind/mode, so un-hiding it would have
-     fired an ordinary install to the default drive and then toasted r.dest, which the ordinary
-     install lane does not always return. The primary Install already does the FTP copy plus the
-     on-console AppInstallPkg, which is what this button was asking for. */
+  // "Send to PS5" — FTP the PKG to the console for the Debug Package Installer (works without DPI). Only for PC-folder PKGs.
+  var sendBtn=$("#sendPkg");
+  sendBtn.style.display="none";   // primary Install now does the full FTP + on-console AppInstallPkg
+  sendBtn.onclick=function(){
+    if(API===null){toast(t("tm_needs_the_companion_running"));return;}
+    var it=g.base[0];sendBtn.disabled=true;sendBtn.textContent=t("gp_send_sending");openDock(true);
+    api("/api/install",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({install_key:it.install_key,title_id:g.title_id,name:g.name,via:"ftp",console:state.console||""})})
+    .then(function(r){if(r.error){toast(errText(r,t("tm_the_console_would_not_take_it")),"err");}else{toast(tsub("tm_sending_to_watch_the_queue",{p1:g.name,p2:r.dest}),"ok");pollQueue();}sendBtn.disabled=false;sendBtn.textContent=t("gp_btn_send_to_ps5");})
+    .catch(function(){toast(t("tm_the_pc_running_the_library_did_not"),"err");sendBtn.disabled=false;sendBtn.textContent=t("gp_btn_send_to_ps5");});
+  };
 
   // [B8] Queue button + [B12] overflow (⋯) actions
   var qb=$("#queueBtn");
@@ -12386,10 +12386,9 @@ function fillDriveSel(g,st,isMount,keep){
    .selwrap). Measured, not assumed: the overlay is shown hidden for one layout pass so its width
    can be read; if the text fits, nothing changes and the select paints its own text. The speed
    follows the length so every message reads at the same pace. Reduced motion keeps the select's
-   own ellipsis instead. Re-run on every rebuild, on change, and on resize. Both pickers in the
-   panel footer are driven through here - pass the <select>; no argument still means #driveSel. */
-function syncDriveMarquee(sel){
-  var ds=sel||$("#driveSel"); if(!ds) return;
+   own ellipsis instead. Re-run on every rebuild, on change, and on resize. */
+function syncDriveMarquee(){
+  var ds=$("#driveSel"); if(!ds) return;
   var wrap=ds.parentNode, mq=wrap&&wrap.querySelector?wrap.querySelector(".selmarq"):null;
   if(!wrap||!mq||!wrap.classList||!wrap.classList.contains("selwrap")) return;
   var span=mq.firstChild; if(!span){span=el("span");mq.appendChild(span);}
@@ -12422,14 +12421,7 @@ if(!window._mqWired){
   window._mqWired=true;
   var _mqSel=$("#driveSel");
   if(_mqSel) _mqSel.addEventListener("change",function(){syncDriveMarquee();});
-  /* No change listener for the console picker: its own onchange repaints the whole panel through
-     openDrawer(), and fillConsoleSel() re-runs the marquee at the end of that. A resize repaints
-     nothing, so both pickers have to be re-measured here. */
-  window.addEventListener("resize",function(){
-    if(!state||!state.current) return;
-    syncDriveMarquee();
-    var pcs=$("#panelConsoleSel"); if(pcs) syncDriveMarquee(pcs);
-  });
+  window.addEventListener("resize",function(){ if(state&&state.current) syncDriveMarquee(); });
 }
 /* A PS5 backup runs from whichever drive it sits on, so "installing" one really means
    putting it on the drive you want it to live on. Copy first, verify, then remove the
@@ -12870,13 +12862,7 @@ function applyModBtn(g,m,btn,info){
 function refreshModsQuiet(){
   var g=MODS.game, body=MODS.body;
   if(!g||!body||!document.body.contains(body)) return;
-  /* ?state=1 - THIS REFRESH READS r.mods AND NOTHING ELSE. The plain GET made the companion
-     compose the whole patch document first, which is a second console round trip per toggle, and
-     on a title with no installed version - most PS5 titles, they expose no APP_VER - that round
-     trip reads the whole app.db and walks its b-tree. The flag is additive, so a companion that
-     has not been updated answers exactly as it does today, and both console servers strip the
-     ?query before routing. */
-  api("/api/mods/"+encodeURIComponent(g.title_id)+"?state=1").then(function(r){
+  api("/api/mods/"+encodeURIComponent(g.title_id)).then(function(r){
     if(MODS.body!==body) return;               // drawer moved on while we were fetching
     if(!r||!r.ok||!r.mods) return;
     r.mods.forEach(function(nm){
@@ -13240,13 +13226,8 @@ function renderQueue(){
      second argument and treats the call as a plain toggle, which would flip this class on every
      repaint. The rule is enforced by tools/check_web.py now; this was the last place doing it. */
   if(dock){ if(sum.busy) dock.classList.add("busy"); else dock.classList.remove("busy"); }
-  /* THE BADGE ANSWERS "HOW MANY ARE STILL PENDING", so when the answer is none it has to say
-     none. The `|| tasks.length` fallback turned that zero back into the number of rows, so three
-     finished installs left the pill reading "All done" beside a yellow 3 until the clear-finished
-     icon was pressed. (The callback parameter is `x`, not `t`: `t` is the translator.) */
-  $("#qn").textContent=tasks.filter(function(x){
-    return x.state!=="playable"&&x.state!=="error"&&x.state!=="canceled";
-  }).length;
+  $("#qn").textContent=tasks.filter(function(t){return t.state!=="playable"&&t.state!=="error"&&t.state!=="canceled";}).length
+                      || tasks.length;
   var held=tasks.filter(function(t){return t.state==="held";}).length;    // [B8]
   var sq=$("#startQueue");
   if(sq){sq.style.display=held?"":"none";sq.textContent=t("ui_start_queue")+" ("+held+")";}
@@ -13788,26 +13769,12 @@ function loadConsoles(){
   api("/api/consoles").then(function(r){
     state.consoles=r.consoles||[];state.consoleById={};
     state.consoles.forEach(function(c){state.consoleById[c.id]=c;});
-    var sel=$("#consoleSel");
-    /* DO NOT REBUILD A LIST THAT HAS NOT CHANGED. This runs on a 30 s timer, and emptying the
-       <select> while its native popup is open swaps the options out from under the reader - then
-       `sel.value=state.console` below re-forces the committed value, so a D-pad highlight that
-       had been moved but not yet pressed is thrown away. The control this happens to is the one
-       that decides which console receives an install. Same shape as gridSignature(). */
-    var _csig=state.consoles.map(function(c){
-      return c.id+"\u0001"+c.name+"\u0001"+(c.online?1:0);
-    }).join("\u0002");
-    if(sel._pmsSig!==_csig){
-      sel._pmsSig=_csig;
-      sel.innerHTML="";
-      state.consoles.forEach(function(c){
-        var o=el("option");o.value=c.id;o.textContent="🎮 "+c.name+(c.online?" ●":" ○");sel.appendChild(o);
-      });
-      if(state.consoles.length>1){var oa=el("option");oa.value="all";oa.textContent="🎮 All consoles";sel.appendChild(oa);}
-    }
-    /* After the rebuild, not before it: an empty list still has to clear a select that was
-       populated a moment ago. */
+    var sel=$("#consoleSel");sel.innerHTML="";
     if(!state.consoles.length){sel.style.display="none";return;}
+    state.consoles.forEach(function(c){
+      var o=el("option");o.value=c.id;o.textContent="🎮 "+c.name+(c.online?" ●":" ○");sel.appendChild(o);
+    });
+    if(state.consoles.length>1){var oa=el("option");oa.value="all";oa.textContent="🎮 All consoles";sel.appendChild(oa);}
     /* WHICH CONSOLE THIS PAGE MEANS - and it is NOT "the first one in the list".
        This read state.consoles[0].id, and the list is in config order, so on a setup with a PS5
        and a PS4 every install pressed ON THE PS4 was sent to the PS5. With the PS5 switched off
@@ -13936,15 +13903,7 @@ $("#consoleSel").onchange=function(){
   try{ if(state.current) openDrawer(state.current,true); }catch(e){}
 };
 $("#dclose").onclick=dismissPanel;$("#dback").onclick=dismissPanel;$("#scrim").onclick=dismissPanel;
-$("#openSettings").onclick=function(){
-  /* A FRESH OPEN STARTS CLEAN. Closing Settings throws away whatever was typed, so the amber
-     "Not saved yet" that survived into the next open was standing over fields that held exactly
-     what is saved - the panel accusing itself of holding work that no longer exists. Cleared on
-     the opener rather than inside openSettings(), so that no repaint of the panel can wipe the
-     green "Saved" the Save button has just written. */
-  var ss=$("#saveState"); if(ss){ss.textContent="";ss.className="savestate";ss.style.color="";}
-  openSettings();
-};
+$("#openSettings").onclick=function(){openSettings();};
 /* Helper autostart is the first thing to rule out when the console misbehaves after
    loading the app: those payloads are not ours and they run continuously. */
 function refreshAutostart(){
@@ -14300,13 +14259,6 @@ function openSettings(){
          with a controller. `.has` marks the ones the server actually reported. */
       function tip(id,v){
         var e=$(id); if(!e) return;
-        /* ONCE A REAL FOLDER IS IN HERE, THE TOOLTIP IS DATA AND NOT A LABEL ANY MORE.
-           applyI18n() rewrites every [data-i18n-tip] from its key, so changing language replaced
-           the MC4 folder - the only place that path is shown anywhere - with the generic words
-           "MC4 cheats", and nothing refetched it until Settings was reopened. The key stays in
-           the markup for the state before this answer arrives, and is dropped the moment there
-           is something better than a label to show. */
-        if(v) e.removeAttribute("data-i18n-tip");
         e.setAttribute("data-tip", v || "not set up yet");
         e.className = v ? "chip tip has" : "chip tip";
       }
@@ -14384,12 +14336,7 @@ function fillLibPath(h){
   var p=(h&&h.library_paths)||[];
   /* Backslash doubled: "C:\Mutant Games" is C:Mutant Games in a JS string literal - \M is not
      an escape, so the backslash was silently dropped and the panel showed a path nobody has. */
-  /* THE LITERAL IS A PC DEFAULT AND NOTHING ELSE. With the PC off, asleep or lost this row is
-     answered by the console's own API, which has no games folder to name at all - its library is
-     built from app.db plus whatever drives are mounted - and the panel then stated a Windows
-     drive letter that does not exist on the machine being held. A dash is the honest answer. */
-  var _onCon=!!(state.onConsole||(h&&h.on_console));
-  setTxt("setLib", p.length? p.join("  ·  ") : (_onCon? "—" : "C:\\Mutant Games"));
+  setTxt("setLib", p.length? p.join("  ·  ") : "C:\\Mutant Games");
 }
 $("#saveSettings").onclick=function(){
   // content_ownership_ack is intentionally NOT sent: the checkbox is gone, and echoing a
@@ -14421,32 +14368,7 @@ $("#saveSettings").onclick=function(){
         setTimeout(function(){ss.className="savestate";},1800);}
       /* Re-read the config we just wrote rather than trusting what was typed: coerce_config() on
          the PC repairs anything out of range, and the panel should show what was actually kept. */
-      /* REPAINT ONLY WHAT THIS SAVE COULD HAVE CHANGED. openSettings() re-fires every request the
-         panel makes - refreshPs4App, the engine probe (whose own comment measures ~9 seconds of
-         TCP timeouts with the console off), /api/sources, /api/consoles, /api/network, the 5 s
-         autostart relay and the cheat-paths probe - so pressing Save went quiet for seconds at a
-         time, on the console's own single main thread. An address or the port is the only thing
-         here that changes what any of those would answer, so that save still pays for the full
-         fan-out; every other save just shows what the PC actually kept. */
-      var _was=state.config||{};
-      var _reprobe=(patch.ps5_ip!==(_was.ps5_ip||""))
-                 ||(patch.ps4_ip!==(_was.ps4_ip||""))
-                 ||(patch.console.shop_port!==((_was.console&&_was.console.shop_port)||8710));
-      api("/api/config").then(function(cfg){
-        state.config=cfg;
-        if(_reprobe){ openSettings(); return; }
-        /* The same fallbacks openSettings() uses, so what lands in the boxes after a save is what
-           it would have painted. coerce_config() on the PC repairs anything out of range, which
-           is why this reads the answer back rather than trusting what was typed. */
-        var _h=state.health||{};
-        $("#setIp").value=(cfg.ps5_ip)||_h.ps5_ip||"";
-        var _i4b=$("#setIp4"); if(_i4b) _i4b.value=(cfg.ps4_ip)||"";
-        $("#setPort").value=(cfg.console&&cfg.console.shop_port)||_h.companion_port||8710;
-        function _spick(id,v,dflt){var e=$(id); if(e) e.value=String(v===undefined||v===null?dflt:v);}
-        _spick("#setParallel",(cfg.queue||{}).max_parallel,2);
-        _spick("#setVerify",((cfg.integrity||{}).verify_before_install===false)?0:1,1);
-        _spick("#setAutoScan",((cfg.maintenance||{}).auto_rescan===false)?0:1,1);
-      }).catch(function(){});
+      api("/api/config").then(function(cfg){state.config=cfg;openSettings();}).catch(function(){});
       refreshHealth();
     })
     .catch(function(){toast(t("tm_could_not_save_the_pc_did_not"),"err");});
@@ -14763,14 +14685,8 @@ function resolveApi(done){
   }
   /* Walk up by hand rather than using closest(): the target can be an <svg> child inside a
      button, and this keeps working on the console's browser regardless. */
-  /* CAPPED, because this runs on every single mouseover and the console's stick cursor produces
-     a continuous stream of them while it sweeps across the grid - walking to the document root
-     each time is work done for nothing. Measured against every data-tip in this file: the owner
-     is always a <button>, a <select> or a chip <span>, and the deepest a moused element ever
-     sits below one is the <path> inside a button's <svg>, which is two hops. Four is the cap, so
-     there is slack of two. A future data-tip on a container would need this raised. */
   function owner(n){
-    for(var d=0; n && n!==document && d<4; d++){
+    while(n && n!==document){
       if(n.getAttribute && n.getAttribute("data-tip")) return n;
       n=n.parentNode;
     }
