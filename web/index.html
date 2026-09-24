@@ -13670,7 +13670,12 @@ function refreshHealth(){
     var _nm=_p4?"PS4 ":"PS5 ";
     var _ip=(_p4?(h.ps4_ip||""):(h.ps5_ip||""));
     var _on=_p4?!!h.ps4_online:!!h.connected;
-    var _rdy=_p4?!!h.ps4_online:!!h.engine_ready;
+    /* READINESS IS NOT PRESENCE. This read ps4_online for both, so a PS4 whose BGFT symbols did
+       not resolve was announced as "ready to install" while the Engine row in Settings said the
+       install service had not started - two answers to one question, on screen together, and every
+       install then failed. ps4_engine_ready is the PS4's own flag. A PC companion too old to send
+       it falls back to the presence flag, which is what this line has always used. */
+    var _rdy=_p4?(h.ps4_engine_ready!=null?!!h.ps4_engine_ready:!!h.ps4_online):!!h.engine_ready;
     if(_on){
       // Our own engine is spawned per install, so there is no daemon to be "off" - the header
       // says whether the engine is ready, which is the thing that decides whether an install can

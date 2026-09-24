@@ -81,6 +81,33 @@ case("an address that moved updates the entry rather than adding one",
       "consoles": [{"id": "ps5", "platform": "ps5", "ip": "10.0.0.99"}]},
      [("ps5", "ps5", "10.0.0.98")])
 
+# THE RULE THAT HAS BEEN GOT WRONG ONCE AND FIXED TWICE.
+#
+# "A console that does not state a platform is a PS5" holds everywhere else in the companion, and
+# the sort key did not follow it: an entry with no `platform` sorted BEHIND the PS4, which put the
+# PS4 at consoles[0]. Dozens of routes still mean "the console" by consoles[0], so on a fleet whose
+# PS5 was added by hand - no platform field - the mods panel read the PS4 for every title and said
+# "no cheat file" while the PS5 beside it held the whole library.
+#
+# Two independent passes over this file later found and fixed the same line, which is the clearest
+# possible sign it should have been pinned by a test the first time. It is now.
+# ps4_ip is set so the PS4 entry survives - clearing an address removes the entry that setting
+# owns, which is the behaviour two cases above. `living` states no platform and no setting owns it,
+# so it keeps platform None: the point is WHERE IT SORTS, not what reconcile stamps on it.
+case("an entry that states no platform sorts with the PS5, not behind the PS4",
+     {"ps5_ip": "", "ps4_ip": "10.0.0.87",
+      "consoles": [{"id": "ps4", "platform": "ps4", "ip": "10.0.0.87"},
+                   {"id": "living", "ip": "10.0.0.99"}]},
+     [("living", None, "10.0.0.99"), ("ps4", "ps4", "10.0.0.87")])
+
+# And the ordering must be STABLE for entries that DO state one, or a config written through the
+# Settings panel would come back reshuffled every time it was read.
+case("two stated PS5s keep the order they were written in",
+     {"ps5_ip": "", "ps4_ip": "",
+      "consoles": [{"id": "lounge", "platform": "ps5", "ip": "10.0.0.99"},
+                   {"id": "spare", "platform": "ps5", "ip": "10.0.0.55"}]},
+     [("lounge", "ps5", "10.0.0.99"), ("spare", "ps5", "10.0.0.55")])
+
 bad = [n for n, ok in results if not ok]
 print("\n%d checks, %d failed" % (len(results), len(bad)))
 sys.exit(1 if bad else 0)

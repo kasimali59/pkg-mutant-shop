@@ -451,6 +451,30 @@ def _first_bridge(srv):
     return srv.fleet.bridge(srv.fleet.ids()[0]) if srv.fleet.consoles else None
 
 
+def _ps4_bridge(srv):
+    """The console that IS a PS4 - as the console itself reports it, not as config.json spells it.
+
+    /api/ps4/tile used to pick its console by reading the `platform` field of each config entry. A
+    hand-written entry has no such field (SETUP-REMOTE.md documents exactly that shape) and neither
+    does one written before PS4 support, so the Settings panel hid the PS4 dashboard-app card
+    entirely - console:false - while the PS4 was online, listed and installing games perfectly.
+    Bridge.is_ps4() answers from /api/health and remembers it, so a configured platform still wins
+    and an unstated one is learned instead of guessed.
+
+    Deliberately NOT _bridge_for(want="ps4"): that helper answers "the request came from a console"
+    before it ever looks at the platform, and the page open on the PS5 reaches this PC from the
+    PS5's own address - so it would hand back the PS5 for a route only a PS4 can serve."""
+    fleet = getattr(srv, "fleet", None)
+    for cid in (fleet.ids() if fleet else []):
+        b = fleet.bridge(cid)
+        try:
+            if b is not None and b.is_ps4():
+                return b
+        except Exception:
+            continue
+    return None
+
+
 _TID_NAME_RE = re.compile(r"^(?:CUSA|PPSA|PLAS|NPXS|NPUB|NPEB)\d{4,5}$", re.I)
 
 
@@ -1539,8 +1563,16 @@ def reconcile_consoles(cfg):
                          "platform": plat, "ftp_port": ftp_port})
     # PS5 first, so the many places that still mean "the console" by consoles[0] keep meaning the
     # PS5 on a machine that has both. Everything unrecognised keeps its relative order at the end.
-    order = {"ps5": 0, "ps4": 1}
-    cons.sort(key=lambda c: order.get(str((c or {}).get("platform") or "").lower(), 2))
+    # THE SAME RULE THE REST OF THIS FILE USES: a console that does not say what it is, is a PS5.
+    # This ranked ps5=0, ps4=1 and EVERYTHING ELSE=2, so an entry added to config.json by hand -
+    # the exact shape SETUP-REMOTE.md section 3 tells people to write, {"id":"living","ip":...}
+    # with no platform field - sorted BEHIND the PS4 and made consoles[0] the PS4. Every place that
+    # still means "the console" by consoles[0] then described the PS4: _bridge_for's final
+    # fallback (so /api/storage and /api/console/apps), /api/federation, the queue's pc-copy
+    # default target and _console_for_request. The test is `== "ps4"`, never `== "ps5"`, and
+    # list.sort is stable, so PS5s and unstated consoles keep their configured order among
+    # themselves and an ordinary ps5/ps4 config comes out exactly as it does today.
+    cons.sort(key=lambda c: 1 if str((c or {}).get("platform") or "").lower() == "ps4" else 0)
     return json.dumps(cons, sort_keys=True) != before
 
 
@@ -2905,6 +2937,19 @@ class Ps5Bridge:
         self._usbpkg_memo = (now, out)
         return [dict(g) for g in out]
 
+    def console_usb_packages_cached(self):
+        """What the last USB sweep of THIS console found, without asking it again. None if never.
+
+        /api/install needs to know which console a "local:" path belongs to, and it must not pay a
+        20 s library rebuild per console to find out - the Install button has a 60 s clock on it and
+        a console that is asleep spends every one of those seconds timing out. No TTL here on
+        purpose: build_library() asks EVERY console in one sweep, so the memo behind an item the
+        owner can see was filled by the same listing that put it on screen. A console that could not
+        be reached during that sweep never reached the line above, so it has no memo at all and
+        answers None - which the caller reads as "no evidence", not as "not here"."""
+        memo = getattr(self, "_usbpkg_memo", None)
+        return [dict(g) for g in memo[1]] if memo else None
+
     def cheat_paths(self):
         """Where the console keeps cheats, and which folders it watches for drop-ins."""
         try:
@@ -3321,6 +3366,26 @@ class Ps5Bridge:
     def is_ps4(self):
         return self.platform_id() == "ps4"
 
+    # ------------------------------------------------- what to CALL this console in a sentence
+    #
+    # Every failure the install lane can report named "the PS5" in the literal, so a PS4 owner
+    # watching a PS4 game fail was told to check a machine they may not even own. bridge.name is
+    # not the fix on its own: it is the owner's free text, and consoles_from_cfg's legacy
+    # single-console fallback hardcodes it to "PS5" for any config written before PS4 support,
+    # whatever the console turns out to be. These two read platform_id(), which asks the console.
+    def kind_label(self):
+        """"PS4" or "PS5", for a sentence a person reads."""
+        return "PS4" if self.is_ps4() else "PS5"
+
+    def reload_suffix(self):
+        """Where the shop is loaded from, when that differs by console.
+
+        Payload Manager is a PS5 payload; the PS4 loads payloads another way, so telling a PS4
+        owner to use it names a recovery they do not have. The jailbreak software is deliberately
+        not named in its place - the house style bans naming software this app does not ship, and
+        the owner already knows how they load payloads on their own console."""
+        return "" if self.is_ps4() else " from Payload Manager"
+
     # install_pms() lived here: the in-process /api/engine/install-url lane, which registers with
     # sceAppInstUtilAppInstallPkg (metadata only - a tile that crashes). Nothing called it from
     # this side any more, and on the console that route is a diagnostic behind allow-diagnostics.
@@ -3499,10 +3564,11 @@ class Ps5Bridge:
                            "do_not_reload": True}
         except Exception as e:
             inflight.pop(url, None)
-            return False, {"error": "PKG MUTANT SHOP on the PS5 did not answer - load it again "
-                                    "from Payload Manager",
+            return False, {"error": "PKG MUTANT SHOP on the %s did not answer - load it again%s"
+                                    % (self.kind_label(), self.reload_suffix()),
                            "detail": repr(e)[:200], "host": "pms-spawn",
-                           "hint": "is the PKG MUTANT SHOP ELF loaded on the PS5?"}
+                           "hint": "is the PKG MUTANT SHOP ELF loaded on the %s?"
+                                   % self.kind_label()}
         if not j.get("ok"):
             # This one really is pre-queue: the console answered 200 and said it did not start an
             # installer, so nothing exists to duplicate.
@@ -3542,7 +3608,8 @@ class Ps5Bridge:
                           % misses)
                     inflight.pop(url, None)
                     return False, {"error": "The console stopped answering while it was installing "
-                                            "this package. Check the PS5 before trying again.",
+                                            "this package. Check the %s before trying again."
+                                            % self.kind_label(),
                                    "host": "pms-spawn", "console_gone": True,
                                    "no_verdict": True, "do_not_reload": True}
                 continue
@@ -3584,7 +3651,8 @@ class Ps5Bridge:
         # protects the console from a duplicate, not this two-minute memo.
         inflight.pop(url, None)
         return False, {"error": "The console took this package but never reported back. It may "
-                                "still be installing it - check the PS5 before trying again.",
+                                "still be installing it - check the %s before trying again."
+                                % self.kind_label(),
                        "host": "pms-spawn", "no_verdict": True, "do_not_reload": True}
 
     def spawn_cleanup(self):
@@ -5474,7 +5542,18 @@ class Queue:
                 counter = self.transfers.get(key)
             return self._with_console_verdict(t, b, counter)
         if t.get("progress_url"):
-            return http_get_json(t["progress_url"])
+            # ASK THE PEER FOR THIS CONSOLE'S BYTES, not for the file's. The peer already keeps a
+            # counter per requesting address as well as the shared by-key one, but until this was
+            # sent it could only answer the shared one - so two consoles pulling the same package
+            # from the same peer both watched whichever transfer was further along. The query
+            # string is stripped before that route matches, so a peer on an older build simply
+            # answers the aggregate it always answered, and so does a new one that has not yet sent
+            # this console a byte.
+            _url = t["progress_url"]
+            _b = self.fleet.bridge(t.get("console"))
+            if _b is not None and _b.ip:
+                _url += ("&" if "?" in _url else "?") + "console=" + quote(_b.ip)
+            return http_get_json(_url)
         return None
 
     def _with_console_verdict(self, t, bridge, counter):
@@ -5743,8 +5822,9 @@ class Queue:
                 if not bridge.engine_available():
                     print("[install] fail (down) name=%r res=%r" % (t.get("name"), res))
                     self._set(t, state="error", fail_reason="dpi_down", detail=detail or None,
-                              msg="The console stopped answering. Load PKG MUTANT SHOP on the PS5 "
-                                  "from Payload Manager, then press Start queue.")
+                              msg="The console stopped answering. Load PKG MUTANT SHOP on the %s%s, "
+                                  "then press Start queue."
+                                  % (bridge.kind_label(), bridge.reload_suffix()))
                     return
                 # The console is there and said no. `detail` already carries its own sentence
                 # (the on-console lane decodes the SCE code into words before it ever leaves the
@@ -5766,7 +5846,8 @@ class Queue:
                     # per install that has already exited, so "wedged" is not a state it can be in
                     # - and the reload it used to perform is exactly what kept resurrecting etaHEN.
                     hold = ("\u23f8 The console took this package but never finished the hand-off. "
-                            "Check the PS5, then press Start queue to try it again.")
+                            "Check the %s, then press Start queue to try it again."
+                            % bridge.kind_label())
                     print("[install] no verdict — pausing queue. name=%r" % t.get("name"))
                     self._set(t, state="held", msg=hold, pct=0, fail_reason="dpi_wedged")
                     self._pause_pending(t.get("console"), hold)
@@ -5834,7 +5915,8 @@ class Queue:
                             # the console accepted the package and has not started pulling it.
                             self._set(t, state="submitted", pct=0,
                                       msg="The console accepted this but has not started pulling it yet — "
-                                          "check the PS5's Downloads before trying again")
+                                          "check the %s's Downloads before trying again"
+                                          % bridge.kind_label())
                         return
                     time.sleep(0.5)
                 # POST-DOWNLOAD: follow the on-console install to playable.
@@ -5966,9 +6048,10 @@ class Queue:
                         if stalled > 1800:
                             self._set(t, state="error", pct=99, fail_reason="install_stalled",
                                       msg="Every byte reached %s, but its installer has not "
-                                          "recorded progress for %d minutes. Check the PS5's "
+                                          "recorded progress for %d minutes. Check the %s's "
                                           "Downloads notification — nothing here was changed."
-                                          % (bridge.name, int(stalled // 60)))
+                                          % (bridge.name, int(stalled // 60),
+                                             bridge.kind_label()))
                             return
                     self._set(t, pct=cur, msg="Installing %d%%" % cur)
                     time.sleep(3)
@@ -6014,21 +6097,25 @@ class Queue:
                     if is_addon:
                         # Never tell someone to delete the GAME because its update did not take.
                         self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
-                                  msg="The PS5 has not confirmed this %s yet — it may still be "
-                                      "installing it. Check the PS5's Downloads before trying again; "
-                                      "the base game was left alone." % (t.get("kind") or "add-on"))
+                                  msg="The %s has not confirmed this %s yet — it may still be "
+                                      "installing it. Check the %s's Downloads before trying again; "
+                                      "the base game was left alone."
+                                      % (bridge.kind_label(), t.get("kind") or "add-on",
+                                         bridge.kind_label()))
                     elif was_registered:
                         # The likeliest cause is still the documented one - the title was already
                         # registered, so the console kept the old files - but that is a guess
                         # until the PS5 is looked at, so it is offered as the thing to check.
                         self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
-                                  msg="The PS5 has not confirmed this install yet — it may still be "
-                                      "installing. Check the PS5: if it only shows the old copy, "
-                                      "delete it there (Options → Delete) and install again.")
+                                  msg="The %s has not confirmed this install yet — it may still be "
+                                      "installing. Check the %s: if it only shows the old copy, "
+                                      "delete it there (Options → Delete) and install again."
+                                      % (bridge.kind_label(), bridge.kind_label()))
                     else:
                         self._set(t, state="error", pct=99, fail_reason="install_unconfirmed",
-                                  msg="The PS5 has not confirmed this install yet — it may still be "
-                                      "installing. Check the PS5's Downloads before trying again.")
+                                  msg="The %s has not confirmed this install yet — it may still be "
+                                      "installing. Check the %s's Downloads before trying again."
+                                      % (bridge.kind_label(), bridge.kind_label()))
             else:
                 self._set(t, state="submitted", pct=0, simulated=True,
                           msg="Sent to %s (progress not measurable for this source)" % bridge.name)
@@ -6163,8 +6250,8 @@ class Queue:
             return
         except Exception as e:
             self._set(t, state="error", detail=str(e)[:300],
-                      msg="PKG MUTANT SHOP on the PS5 did not answer — load it again from "
-                          "Payload Manager")
+                      msg="PKG MUTANT SHOP on the %s did not answer — load it again%s"
+                          % (bridge.kind_label(), bridge.reload_suffix()))
             return
         if not res.get("ok"):
             self._set(t, state="error",
@@ -6204,7 +6291,7 @@ class Queue:
                 self._set(t, pct=min(95, t["pct"] + 2), msg=st.get("message") or "Installing…")
         self._set(t, state="error",
                   msg="The console never reported this one finished. It may still be installing "
-                      "— check the PS5 before trying again")
+                      "— check the %s before trying again" % bridge.kind_label())
 
     def _confirm_console_local(self, t, bridge):
         """Wait for real proof that a package etaHEN merely ACCEPTED has actually installed.
@@ -6936,6 +7023,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_icon(unquote(path[len("/icon/"):]))
         if path.startswith("/api/served/"):
             raw = unquote(path[len("/api/served/"):])
+            # WHICH CONSOLE'S BYTES. _serve_library keeps two counters - one per requesting console
+            # address and one shared by-key aggregate - and this route could only ever answer the
+            # aggregate. So a peer PC serving the same package to two consoles at once told both of
+            # them whichever transfer was further along. Our own jobs read the per-address bucket
+            # out of the dict directly (Queue._progress); a job pulling from a PEER has to ask, and
+            # ?console=<ip> is how it asks. An ADDRESS rather than a console id, deliberately: ids
+            # live in each companion's own config.json and mean nothing on the machine being asked,
+            # while the address is what that machine saw connect. A caller that names no console,
+            # or names one that has not been sent a byte yet, still gets the aggregate - the exact
+            # answer this route has always given - so an older companion on either end, and a newer
+            # one asked before the first byte lands, all behave as they do today.
+            _who = (q.get("console") or [""])[0].strip()
+            if _who:
+                for _k in ("%s|%s" % (raw, _who), "%s|%s" % (quote(raw), _who)):
+                    _bucket = srv.transfers.get(_k)
+                    if _bucket is not None:
+                        return self._json(_bucket)
             return self._json(srv.transfers.get(raw) or srv.transfers.get(quote(raw)) or {"max": 0, "total": 0})
         if path == "/api/health":
             cons = srv.fleet.consoles
@@ -6962,15 +7066,39 @@ class Handler(BaseHTTPRequestHandler):
                          if str(c.get("platform") or "").lower() == "ps4"), None)
             _b4 = srv.fleet.bridge(_ps4["id"]) if _ps4 else None
             _ps4_on = False
+            _ps4_rdy = False
             if _b4 is not None:
                 # Same memo the PS5 probe uses, for the same reason: this endpoint is polled
                 # every HEALTH_POLL_S and the answer is a round trip to a console.
+                #
+                # TWO FACTS OUT OF THE ONE ROUND TRIP. `ps4_online` means the PS4's shop is
+                # answering - that is the question console_list and the presence dot are asking.
+                # `ps4_engine_ready` is the PS4's own engine_ready flag, which is false when its
+                # BGFT symbols did not resolve. Sending only the first is how the header pill read
+                # "PS4 10.0.0.87 - ready to install" while Settings > Engine, two lines below it on
+                # the same screen, correctly said the PS4 install service did not start, and every
+                # install then failed. engine_available() was already fetching exactly this
+                # /api/health body and throwing the flag away, so reading both costs nothing.
                 _m4 = getattr(srv, "_ps4_probe", None)
                 if _m4 and (time.monotonic() - _m4[0]) < HEALTH_MEMO_S:
                     _ps4_on = _m4[1]
+                    _ps4_rdy = _m4[2] if len(_m4) > 2 else _m4[1]
                 else:
-                    _ps4_on = bool(_b4.up() and _b4.engine_available())
-                    srv._ps4_probe = (time.monotonic(), _ps4_on)
+                    _ps4_on = bool(_b4.up())
+                    if _ps4_on:
+                        try:
+                            _h4 = _b4._shop("/api/health", timeout=4) or {}
+                        except Exception:
+                            _h4 = {}
+                        # Still learn the platform from the answer, which is the one side effect
+                        # engine_available() had beyond its return value.
+                        _b4._note_platform(_h4)
+                        _ps4_on = bool(_h4.get("on_console"))
+                        # A PS4 ELF older than the engine_ready flag sends no such key. Falling
+                        # back to on_console keeps that console reading exactly as it does today
+                        # rather than painting a working PS4 as broken.
+                        _ps4_rdy = bool(_h4.get("engine_ready", _h4.get("on_console")))
+                    srv._ps4_probe = (time.monotonic(), _ps4_on, _ps4_rdy)
             # THE ELF INSTALLS THE DASHBOARD APP ITSELF now, the way the PS5 ELF installs its tile:
             # it carries the package, compares the installed version, and only acts when the console
             # has none or an older one. The PC used to do it here and must not any more - two
@@ -7062,6 +7190,13 @@ class Handler(BaseHTTPRequestHandler):
                                "connected": (engine_ready or ftp_on),
                                "ps4_ip": (_ps4 or {}).get("ip") or srv.cfg.get("ps4_ip") or "",
                                "ps4_online": _ps4_on,
+                               # THE PS4'S OWN VERDICT ON ITS ENGINE, beside the presence flag.
+                               # ps4_online keeps meaning what it has always meant - the PS4's shop
+                               # answers - because console_list below and the presence dot are about
+                               # presence, and a console that is awake with a dead engine is still
+                               # there. "Ready to install" is a different question and now reads a
+                               # different key.
+                               "ps4_engine_ready": _ps4_rdy,
                                "lan_ip": lan_ip(),
                                # The settings panel reads BOTH of these off health every few
                                # seconds. Neither was ever sent, so the poll kept overwriting the
@@ -7296,6 +7431,17 @@ class Handler(BaseHTTPRequestHandler):
                 if ok and plat != "ps4" and not [x for x in consoles[:-1]
                                                  if x["online"] and x["platform"] != "ps4"]:
                     ps5 = devs
+            # NO PS5 IN THIS FLEET, NO PS5 DEVICE LIST. Nothing above can fill `ps5` on a PS4-only
+            # setup, so it was still PS5_DEVICES: eleven hardcoded destinations, none of them with a
+            # free-space figure, for a console that is not in the house. The readers that fall back
+            # to this key with no console id - driveLabelOf(), devicesStale(), moveGame() - then
+            # offered them. The test is `!= "ps4"`, deliberately, so a console that names no
+            # platform still counts as a PS5, which is the rule this file follows throughout; and it
+            # reads the platform off the list built above, which is what the console itself said.
+            # An EMPTY fleet keeps the static list, because a machine with no console configured yet
+            # is the case that list was written for.
+            if consoles and not any(c["platform"] != "ps4" for c in consoles):
+                ps5 = []
             return self._json({"pc": enumerate_pc_drives(), "ps5": ps5, "consoles": consoles,
                                "library_paths": srv.cfg.get("library", {}).get("local_paths", [])})
         if path == "/api/psn-block":
@@ -7319,8 +7465,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ps4/tile":
             # What the settings panel shows for the PS4's dashboard app: does this copy of the app
             # even carry it, and is it on the console yet. Never installs - that is the POST.
-            b = next((srv.fleet.bridge(c["id"]) for c in srv.fleet.consoles
-                      if str(c.get("platform") or "").lower() == "ps4"), None)
+            b = _ps4_bridge(srv)
             out = {"ok": True, "title_id": PS4_TILE_TID,
                    "available": os.path.isfile(PS4_TILE_PKG),
                    "console": bool(b), "installed": None}
@@ -7355,7 +7500,14 @@ class Handler(BaseHTTPRequestHandler):
                            "counts": p.get("counts"), "count": p.get("count", 0),
                            "online": bool(p.get("online")), "last_seen": p.get("last_seen")}
                           for p in (reg.known() if reg is not None else [])],
-                "console": {"ip": b.ip, "name": b.name, "online": b.pldmgr.alive()} if b else None,
+                # OUR SHOP ANSWERING is the liveness word every other route in this file uses.
+                # This asked Payload Manager on :8084 - a PS5-only tool that no PS4 has ever run -
+                # so whenever the bridge resolved to the PS4 (the page open on the PS4 itself) this
+                # key said offline for a console that was awake and installing, and the question
+                # cost a connect to a port that is not there. up() is the same cached TCP probe
+                # /api/health uses, on the console's own shop port, and a PS5 whose Payload Manager
+                # is not loaded yet is a live shop too - so this is the better answer for both.
+                "console": {"ip": b.ip, "name": b.name, "online": b.up()} if b else None,
                 # EVERY CONSOLE, BY NAME AND ADDRESS. Settings' "Open it on the TV" row reads
                 # d.consoles, and this route never sent one - so it fell back to a single address
                 # and the PS4's, the one thing you need to type into the PS4's own browser, was
@@ -7411,8 +7563,76 @@ class Handler(BaseHTTPRequestHandler):
             # behind the cached TCP gate, so it is free when the console is off; and a console that
             # is up always answers it with all eleven destinations. devs is None therefore means
             # exactly "the PS5 did not answer", and its drives drop off the bar until it does.
-            return self._json(build_storage(srv, b.console_apps() if b else None, devs,
-                                            console_online=devs is not None))
+            _out = build_storage(srv, b.console_apps() if b else None, devs,
+                                 console_online=devs is not None)
+            # EVERY CONSOLE'S DRIVES, NOT JUST THE RESOLVED ONE. This route described exactly one
+            # console - _bridge_for's answer - so on the PC, which manages both, the PS4's internal
+            # HDD and its sticks were invisible: the storage bar showed the PS5 and nothing else,
+            # and there was no way to see how full the PS4 was without walking to it. The resolved
+            # console's tiles are the ones built above, in the same order with the same ids, so
+            # every existing reader sees what it saw before; the other consoles' tiles are appended
+            # after them and before the PC tiles, which build_storage deliberately keeps last.
+            #
+            # Every console tile also names its console, because the labels collide: "USB 0" is
+            # byte-identical on a PS5 and a PS4, and two unlabelled tiles in one row cannot be told
+            # apart. The name is folded into the label only when the fleet HAS a second console -
+            # decided from the configuration, not from who happens to be awake, so the row does not
+            # rename itself every time the PS4 goes to sleep. A single-console bar is untouched.
+            _bid = (b.c.get("id") if b is not None else None)
+            _multi = len(srv.fleet.consoles) > 1
+            # HOW LONG THE OTHER CONSOLE'S DRIVE LIST STAYS GOOD. The bar is polled every 15 s from
+            # a PC and every 60 s from a console, and this memo is deliberately LONGER than the
+            # shorter of those for the reason HEALTH_MEMO_S is written out at the top of this file:
+            # a memo shorter than the poll it protects is thrown away one tick before the poll that
+            # would have used it, so it costs the round trip and saves nothing. Free space does not
+            # move in twenty seconds, and the console's accept loop is the same one serving the
+            # page the owner is scrolling.
+            _dmemo = getattr(srv, "_storage_devs", None)
+            if _dmemo is None:
+                _dmemo = srv._storage_devs = {}
+            _extra = []
+            for _c in srv.fleet.consoles:
+                if not _bid or _c.get("id") == _bid:
+                    continue
+                _ob = srv.fleet.bridge(_c["id"])
+                # The cached TCP gate first: a console that is off or resting settles in
+                # milliseconds here instead of waiting out an HTTP timeout, so an asleep second
+                # console costs this route nothing at all.
+                if _ob is None or not _ob.up():
+                    continue
+                _hit = _dmemo.get(_c["id"])
+                if _hit and (time.monotonic() - _hit[0]) < 20.0:
+                    _od = _hit[1]
+                else:
+                    try:
+                        _od = (_ob._shop("/api/devices", timeout=8) or {}).get("ps5")
+                    except Exception:
+                        _od = None              # went away between the gate and the question
+                    _dmemo[_c["id"]] = (time.monotonic(), _od)
+                if _od is None:
+                    continue
+                _oname = _c.get("name") or _c.get("ip") or _c.get("id")
+                for _t in build_storage(srv, _ob.console_apps(), _od,
+                                        console_online=True).get("drives", []):
+                    if _t.get("kind") != "console":
+                        continue                # this PC and the peers are built once, above
+                    _t["console_id"] = _c.get("id")
+                    _t["console_name"] = _oname
+                    _t["label"] = "%s %s" % (_oname, _t.get("label") or _t.get("id"))
+                    _extra.append(_t)
+            if _bid:
+                _bname = (b.name if b is not None else "")
+                for _t in _out.get("drives", []):
+                    if _t.get("kind") != "console":
+                        continue
+                    _t["console_id"] = _bid
+                    _t["console_name"] = _bname
+                    if _multi:
+                        _t["label"] = "%s %s" % (_bname, _t.get("label") or _t.get("id"))
+            if _extra:
+                _out["drives"] = ([_d for _d in _out["drives"] if _d.get("kind") != "pc"] + _extra +
+                                  [_d for _d in _out["drives"] if _d.get("kind") == "pc"])
+            return self._json(_out)
         if path == "/api/console/apps":
             b = _bridge_for(srv, self)
             apps = b.console_apps() if b else None
@@ -7852,7 +8072,16 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.match(r"^/api/mods/([^/]+)/(select|toggle|apply|disable-all)$", path)
         if mm:
             tid, act = unquote(mm.group(1)), mm.group(2)
-            b = _bridge_for(srv, self, body, want="ps5")
+            # NO `want` HERE, so a read and a write of the same panel can never land on different
+            # consoles: the GET twin above has never had one, and this asked for a PS5. On a fleet
+            # whose first entry is the PS4 the panel read one machine and wrote to the other; on a
+            # PS4-ONLY setup _bridge_for answered None and this returned 400 "no console
+            # configured", which the page paints as "can't reach the mod engine" - about a console
+            # that was configured, online and listed in Settings. A PS4 refuses mods itself, in its
+            # own words, and that is the honest reply. The ordering fix in reconcile_consoles keeps
+            # consoles[0] the PS5 on a fleet that has one, so a caller that names no console still
+            # resolves to exactly the console want="ps5" used to pick.
+            b = _bridge_for(srv, self, body)
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             body = body or {}
@@ -7879,9 +8108,9 @@ class Handler(BaseHTTPRequestHandler):
             cr = b.cheats
             if not cr.alive():
                 return self._json({"ok": False, "error": "engine_unreachable",
-                                   "message": "The PS5 app is not answering, so mods cannot be "
+                                   "message": "The %s app is not answering, so mods cannot be "
                                               "changed. Load PKG-MUTANT-SHOP.elf on the console "
-                                              "and try again."}, 503)
+                                              "and try again." % b.kind_label()}, 503)
             if act == "select":
                 # Refuse a version-mismatched file unless explicitly forced: cheats built for
                 # another build are the usual cause of in-game crashes.
@@ -7937,8 +8166,7 @@ class Handler(BaseHTTPRequestHandler):
             cid = body.get("console") or ""
             b = srv.fleet.bridge(cid) if cid else None
             if b is None:
-                b = next((srv.fleet.bridge(c["id"]) for c in srv.fleet.consoles
-                          if str(c.get("platform") or "").lower() == "ps4"), None)
+                b = _ps4_bridge(srv)
             if b is None:
                 return self._json({"ok": False, "error": "No PS4 is set up"}, 400)
             ok, info = b.install_ps4_tile(force=bool(body.get("force")))
@@ -8095,7 +8323,19 @@ class Handler(BaseHTTPRequestHandler):
             dest = os.path.join(root, plat if plat in LIBRARY_LAYOUT else "")
             job = srv.queue.add({"name": src_game.get("name") or item.get("file"),
                                  "title_id": src_game.get("title_id"), "kind": item.get("kind", "base"),
-                                 "lane": "pc-copy", "console": (srv.fleet.ids() or ["ps5"])[0],
+                                 # NO CONSOLE IS INVOLVED IN THIS. Stamping the copy with
+                                 # consoles[0] did two things, both wrong: the queue serialises one
+                                 # job per console id, so a 100 GB PC-to-PC copy blocked every
+                                 # install for that console for as long as it ran - rows sitting at
+                                 # "Queued" with the console idle - and the row itself was labelled
+                                 # with a console that had nothing to do with it (the PS4, on a
+                                 # fleet whose first entry is one). An empty id is its own lane:
+                                 # _claim/_release serialise copies against each other, never
+                                 # against a real console, and the row renderer drops the console
+                                 # chip when there is no id to print. Nothing downstream looks up a
+                                 # bridge for this lane - _run dispatches pc-copy before it resolves
+                                 # one, and _finished_installing is never called here.
+                                 "lane": "pc-copy", "console": "",
                                  "url": item["peer_url"], "dest": dest,
                                  "file": item.get("file") or os.path.basename(item["peer_url"]),
                                  "from_pc": src_game.get("source_pc"),
@@ -8326,9 +8566,20 @@ class Handler(BaseHTTPRequestHandler):
         url, key = body.get("url"), body.get("install_key")
         target = body.get("console", "")
         all_ids = srv.fleet.ids()
+        # NOTHING TO INSTALL ON. With no console address entered yet this fell through to the
+        # literal id "ps5-0", which belongs to no console: the press answered ok:true, the UI said
+        # "Sent to ... - watch the queue", and the row then failed with "No console configured". The
+        # refusal arrived AFTER the success toast instead of in place of it. Answer it here, before
+        # a job exists, the same way /api/move and /api/open-ps5 already do.
+        if not all_ids:
+            return self._json({"ok": False, "error": "no console configured",
+                               "message": "No console is set up yet — add its address in Settings, "
+                                          "then install."}, 400)
+        # The `or ["ps5-0"]` fallback went with it: once all_ids is not empty _console_for_request
+        # always answers with at least all_ids[:1], so that fallback could only ever invent an id.
         targets = (all_ids if target == "all"
                    else [target] if target in all_ids
-                   else (self._console_for_request(all_ids) or ["ps5-0"]))
+                   else self._console_for_request(all_ids))
 
         # (Legacy "Send to PS5" FTP + on-console engine install removed — every game now installs
         #  through the single install-host path below: serve over LAN -> hand off the URL.)
@@ -8345,9 +8596,28 @@ class Handler(BaseHTTPRequestHandler):
         # begins CNT - so every PS5 game picked with "All consoles" would be handed to the PS4
         # and come back refused, once per game, with the PS4 blamed for it. A PS4 package on a PS5
         # is the opposite case and stays allowed: that console runs them.
-        if tid and str(tid).upper().startswith("PPSA"):
-            keep = [c for c in targets
-                    if not (srv.fleet.bridge(c) is not None and srv.fleet.bridge(c).is_ps4())]
+        _is_ps5_pkg = bool(tid and str(tid).upper().startswith("PPSA"))
+        if not tid and key:
+            # NO TITLE ID IS NOT THE SAME AS "NOT A PS5 GAME". An oddly named dump, or a container
+            # whose param.sfo could not be read, arrives here with tid empty - and the PPSA test
+            # then says nothing at all, so a PS5 package was handed to the PS4 with "All consoles"
+            # and came back as a generic console refusal instead of "This is a PS5 game". The
+            # library worked out what the file is when it scanned it, so ask it rather than the
+            # name. (A backup's platform is "BACKUP", not "PS5"; the mount guard below owns that
+            # case, so this leaves it exactly where it was.)
+            for _lg in srv.library.games:
+                _lits = (_lg.get("base") or []) + (_lg.get("updates") or []) + (_lg.get("dlc") or [])
+                if any(str(_it.get("install_key") or "") == key for _it in _lits):
+                    _is_ps5_pkg = str(_lg.get("platform") or "").upper() == "PS5"
+                    break
+        if _is_ps5_pkg:
+            # One bridge lookup per candidate. The comprehension this replaces called
+            # srv.fleet.bridge(c) twice for every console it considered.
+            keep = []
+            for c in targets:
+                _cb = srv.fleet.bridge(c)
+                if _cb is None or not _cb.is_ps4():
+                    keep.append(c)
             if not keep:
                 return self._json({"ok": False, "error": "This is a PS5 game, and the console it "
                                                          "was sent to is a PS4"}, 400)
@@ -8464,29 +8734,48 @@ class Handler(BaseHTTPRequestHandler):
             # So each target is asked about itself, and the PC's memory is not evidence about a
             # console. A console that cannot be asked is refused rather than guessed at: an add-on
             # installed onto nothing is a wasted transfer at best.
+            # ONE CONSOLE LACKING THE BASE IS NOT AN ANSWER FOR THE WHOLE FLEET. This returned
+            # on the FIRST target that could not take the add-on, so a patch aimed at several
+            # consoles was refused outright and installed nowhere - the console that had the game,
+            # and would have taken the patch, was never reached. Drop the ones that cannot take it
+            # and keep the rest; the refusal is only the answer when nothing is left, which is
+            # exactly what one console produces, so a single-console setup reads as it always did.
+            keep, unknown, missing = [], [], []
             for cid in targets:
                 b = srv.fleet.bridge(cid)
                 if not b:
                     continue
                 try:
-                    have = set(b.installed_titles() or [])
-                    asked = True
+                    titles = b.installed_titles()
                 except Exception:
-                    have, asked = set(), False
-                if asked and tid in have:
-                    continue
-                who = b.name or cid
-                if not asked:
-                    return self._json({"ok": False, "error": "base_unknown", "title_id": tid,
-                                       "message": "%s did not answer, so there is no way to tell "
-                                                  "whether the game this %s belongs to is installed "
-                                                  "there. Turn the console on and try again."
-                                                  % (who, kind)}, 409)
+                    titles = None
+                # installed_titles() ANSWERS None WHEN IT COULD NOT ASK - console_apps() returns
+                # None on every failure path rather than raising - so `set(... or [])` read a
+                # console that is switched off as "has nothing installed" and this refused with
+                # base_not_installed, which the page turns into a permanently disabled Install
+                # button labelled "Needs base game". A console that is asleep has not said the game
+                # is missing; it has said nothing, and base_unknown is the branch for that.
+                if titles is None:
+                    unknown.append((cid, b.name or cid))
+                elif tid in set(titles):
+                    keep.append(cid)
+                else:
+                    missing.append((cid, b.name or cid))
+            if keep:
+                targets = keep
+            elif unknown:
+                return self._json({"ok": False, "error": "base_unknown", "title_id": tid,
+                                   "console": unknown[0][0],
+                                   "message": "%s did not answer, so there is no way to tell "
+                                              "whether the game this %s belongs to is installed "
+                                              "there. Turn the console on and try again."
+                                              % (unknown[0][1], kind)}, 409)
+            elif missing:
                 return self._json({"ok": False, "error": "base_not_installed", "title_id": tid,
-                                   "console": cid,
+                                   "console": missing[0][0],
                                    "message": "Install the game on %s first — a %s can only be "
-                                              "applied on top of the installed game." % (who, kind)},
-                                  409)
+                                              "applied on top of the installed game."
+                                              % (missing[0][1], kind)}, 409)
 
         # --- MOUNT lane: a ShadowMount backup (.ffpfsc etc.) -> FTP to the scan folder, not DPI ---
         # A registered path that is a DIRECTORY is a game stored unpacked — it mounts exactly like a
@@ -8519,6 +8808,43 @@ class Handler(BaseHTTPRequestHandler):
             # goes through the QUEUE like every other install, so "+ Queue" holds it instead of
             # starting it immediately and the job is visible with the rest.
             local_path = str(key)[len("local:"):]
+            # WHICH CONSOLE'S DRIVE IS THIS? A "local:" key is a PATH AND NOTHING ELSE, and both
+            # consoles expose /mnt/usbN, so a stick plugged into the PS5 could be queued against
+            # the PS4 - which relayed its own "That package is not on the console any more", a
+            # sentence that sends the owner to re-check a stick that is perfectly fine, in the
+            # other machine. With console:"all" it was worse: one press produced a real install on
+            # one console and that bogus error row on the other. So ask each console whether the
+            # package is one of its own and keep only the ones that said yes.
+            #
+            # Skipped entirely with a single console, where there is only one drive it can be in:
+            # a one-console setup does no extra work and behaves exactly as before. The lookup
+            # itself never contacts a console - see console_usb_packages_cached().
+            if len(all_ids) > 1:
+                owners = []
+                for _oc in all_ids:
+                    _ob = srv.fleet.bridge(_oc)
+                    _ogs = _ob.console_usb_packages_cached() if _ob is not None else None
+                    for _og in (_ogs or []):
+                        _ois = ((_og.get("base") or []) + (_og.get("updates") or [])
+                                + (_og.get("dlc") or []))
+                        if any(str(_it.get("install_key") or "") == key for _it in _ois):
+                            owners.append(_oc)
+                            break
+                # ONLY ACT ON EVIDENCE. No owner found means no console has listed its drives in
+                # this process - not that the package is nowhere - and refusing on that would block
+                # an install that works today.
+                if owners:
+                    _keep = [c for c in targets if c in owners]
+                    if not _keep:
+                        _ob = srv.fleet.bridge(owners[0])
+                        _on = (_ob.name if _ob is not None else None) or owners[0]
+                        return self._json({"ok": False, "error": "wrong_console",
+                                           "console": owners[0],
+                                           "title_id": body.get("title_id"),
+                                           "message": "That package is on a drive plugged into %s, "
+                                                      "so only %s can install it." % (_on, _on)},
+                                          409)
+                    targets = _keep
             if not (srv.fleet.bridge(targets[0]) if targets else _bridge_for(srv, self, body, want="ps5")):
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             jobs = [srv.queue.add({"name": body.get("name") or os.path.basename(local_path),
@@ -9041,6 +9367,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             peer_ip = ""
         agg = srv.transfers.setdefault(rk, {"max": 0, "total": size})
+        # A FINISHED SERVE IS NOT THIS SERVE'S PROGRESS. This is the by-key aggregate, and it is the
+        # only bucket a PEER can poll, so installing the same package from the same peer PC a second
+        # time read that peer's OLD high-water mark on the very first poll: the row flashed
+        # "Downloading 90%", the `mx >= tot` test broke straight out of the transfer loop, and the
+        # 90-second stall detector under it therefore never ran even once - so a peer transfer that
+        # died reported nothing at all until the 2100 s promote deadline expired, and then blamed
+        # something that was not the cause. A request that starts at offset 0 against a bucket that
+        # has already reached its total is a NEW transfer, so the counter starts again. Both halves
+        # of that test matter: a resume carries a Range header (start > 0) and a transfer still in
+        # flight has max < total, so neither can be rewound under a console that is pulling.
+        if start == 0 and agg.get("max", 0) and agg["max"] >= (agg.get("total") or 0):
+            agg["max"] = 0
         agg["total"] = size
         tr = srv.transfers.setdefault("%s|%s" % (rk, peer_ip), {"max": 0, "total": size}) \
             if peer_ip else agg
