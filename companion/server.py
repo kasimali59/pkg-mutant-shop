@@ -39,7 +39,7 @@ from urllib.parse import urlparse, unquote, quote, parse_qs
 import pkg_meta
 import sources as source_engine
 
-VERSION = "3.63.0"
+VERSION = "3.64.0"
 
 # HOW LONG A PROBE ANSWER ON THE /api/health PATH STAYS GOOD.
 #

@@ -9,6 +9,117 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.64.0] - 2026-09-23 - "Asking before answering" `[VERIFIED]`
+
+The rest of the 143-agent audit: the medium and low findings, re-triaged against the code as it
+stands rather than as it stood when they were raised. Everything below was measured, and where a
+finding turned out not to matter that is recorded too, with the number.
+
+### Both payloads answer 304, which their own ETag had been promising for months
+
+`send_file()` has sent `ETag: "<size>-<mtime>"` on every static file since caching was added, and
+the comment above it says an unchanged shell then "costs only a 304". It could not: nothing read
+`If-None-Match` back. A browser politely asking "still the same?" was answered with the whole file,
+every time - 811 KB of app shell per reload, down a console's single accept loop, queued behind the
+install engine and the cheat engine. The validator was written, sent, and echoed back by every
+browser for nothing.
+
+Matching is a substring search over the header line, not an equality test: the value may be a list,
+and a cache may hand back a weakened tag (`W/"..."`) for one it revalidates. An equality test misses
+both and silently never hits, which looks exactly like the bug being fixed. Threaded down as a
+parameter rather than a global, because the PS5 runs one accept loop but the PS4 runs a thread per
+connection.
+
+`tools/test_etag.py` extracts the function from both payloads, refuses if the two copies have
+drifted, compiles it and runs eleven cases; two of them caught real bugs while it was being written.
+It is a gate in both ELF builds.
+
+**The companion had the other half of the same problem.** `_static()` read the whole file off disk
+*before* working out that it only had to send a 304 - nothing in that decision ever needed the
+bytes. Measured against the running server: an exact echo, a weakened tag and a tag in a list all
+now cost 0 bytes instead of a 295 KB gzipped re-send.
+
+### Four memos that expired one second before the poll that reads them
+
+Each was written as 5 s "because health is polled every 6 s". For a single viewer the hit rate was
+exactly zero: every memo did nothing but hold data long enough to be stale, while every poll still
+paid four probes into a console's single-threaded accept loop.
+
+Measured with the PS4's own connection counter, ten polls 6 s apart against both real consoles,
+with the owner's companion polling them throughout in every run:
+
+| memo TTL | connections the PS4 served |
+|---------:|---------------------------:|
+|      5 s | 36 |
+|      5 s | 36 (repeat) |
+|     11 s | 29 |
+
+`HEALTH_POLL_S` and `HEALTH_MEMO_S` now sit on adjacent lines, because the relationship between
+them - not either value - was the bug.
+
+### The stale `:8791` the owner saw in their browser
+
+Registered PCs were keyed on `(ip, port)` and nothing ever aged one out, so a companion started on
+a spare port took a *second* slot instead of updating its own, and the abandoned entry outlived it
+for as long as the payload stayed loaded. `best_pc_base` walked down to it whenever the real PC was
+briefly away. One machine is one entry now, keyed on the address, and an entry silent for ten
+minutes is skipped - in `best_pc_base` and in all four routes that *list* PCs, because each of
+those prints `"online":true` or `"ok":true`, which is a claim rather than a reading.
+
+### The PS5 can answer its own engine panel
+
+`/api/engine/state` was companion-only. A PS5 serving its own page fell to the unknown-`/api/` stub
+`{}`, and the Settings panel printed its honest "Can't tell from here" with three dark LEDs - on the
+very console that was serving the sentence. The busy latch is copied field for field from
+`/api/engine/spawn-status` so the two routes cannot drift into disagreeing about it. No `platform`
+key, deliberately: a console that does not name a platform is a PS5.
+
+### The closed queue drawer left the focus order
+
+A drawer that has been opened once keeps its rows in the DOM, and an element that is only
+transparent is still focusable - so with the drawer shut, Tab and the console's D-pad walked off the
+header into the cancel and retry buttons of every queued row. Focus vanished from the screen, and a
+press there cancelled a live install with no visible row to explain it.
+
+Expressing it as `transition: visibility 0s linear .16s` did not hold - measured, the drawer closed
+and `getComputedStyle` still said `visible` a second later. `visibility:hidden` *and* `inert` now,
+set from JS after the fade: visibility is what takes a subtree out of sequential focus navigation
+and is all the two older console WebKits understand; `inert` additionally blocks a programmatic
+`.focus()`. Measured open/closed/reopened: focusable true, false, true.
+
+*The first measurement of this said "still focusable when closed" and was wrong - the probe reset
+focus with `document.body.focus()`, body is not focusable, so focus never left the button and the
+check compared it against itself. The instrument, not the fix.*
+
+### All fifteen languages carry the whole dictionary
+
+154 keys x 8 languages - hi it ko nl pl ru tr zh - every one now at 663 of 663.
+
+These are the keys nothing is wired to yet, which is exactly why they mattered: coverage is measured
+against the keys the app *uses*, so all eight read 100% while being 154 short, and those are the keys
+the next UI change reaches for. Wiring one would have turned a green gate red for eight languages at
+once. The gate now also prints the backlog as information it never fails on, so this cannot build up
+again unseen.
+
+Checked for the failure that has bitten this project before: a translator handed a prompt rendered as
+HTML can return `Settings &gt; Storage`, and these land in a JavaScript string literal where an entity
+is shown to the reader literally. Zero found.
+
+### The icon reads `SHOP_PORT`
+
+`#define SHOP_PORT` was used correctly everywhere the home-screen app *connects*, and ignored in the
+two places it *tells the owner where to go*: both notifications had `127.0.0.1:8710` written out by
+hand. Moving the port would have left the icon directing the owner to the old address - on the one
+screen they are looking at precisely because something is not where they expected it.
+
+### Measured, and deliberately left alone
+
+* **`library_signature` walking the whole library tree every 10 s.** Measured on the real library:
+  63 directories, 452 files, 1.25 TB, in 13-25 ms. That is 0.2% of one core. The obvious fix -
+  skipping directories whose mtime has not changed - would break the settle check, because writing
+  into an *existing* file does not bump the parent directory's mtime on NTFS, so a half-copied
+  package could be scanned. Left as it is.
+
 ## [3.63.0] - 2026-09-23 - "Both consoles, told apart" `[VERIFIED]`
 
 Measured with a PS5 (12.70) and a PS4 (13.52) both awake on the same network, and the desktop app
