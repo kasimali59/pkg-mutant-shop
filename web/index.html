@@ -516,9 +516,17 @@ main{flex:1 1 auto;overflow-y:scroll;scrollbar-gutter:stable;padding:18px 18px 2
   max-height:min(58vh,520px);overflow-y:auto;
   background:var(--bg2);border:1px solid var(--line);border-radius:14px;
   box-shadow:0 20px 54px rgba(0,0,0,.52);padding:4px 14px 10px;
-  opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;
+  /* visibility, NOT opacity alone. Once the drawer has been opened its rows stay in the DOM, and
+     an invisible element that is merely transparent is still IN THE FOCUS ORDER: the console's
+     D-pad navigation and an ordinary Tab both land on the cancel and retry buttons of every row
+     while the drawer is shut. Focus vanishes off the header into nothing, and a press there
+     cancels a real install with no visible row to explain it. visibility:hidden removes the
+     subtree from focus on every engine these three artifacts run on, and it transitions cleanly
+     alongside opacity so the drawer still fades. */
+  opacity:0;pointer-events:none;visibility:hidden;
+  transition:opacity .16s ease,transform .16s ease;
 }
-.dock.open .dockbody{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.dock.open .dockbody{opacity:1;pointer-events:auto;visibility:visible;transform:translateX(-50%) translateY(0)}
 .qrow{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line)}
 .qrow:first-child{border-top:0}
 .qrow .qn{flex:1 1 auto;min-width:0}
@@ -12140,14 +12148,46 @@ function pollQueue(){
    the pointer cross the 9px gap between the pill and the drawer without it snapping shut, and a
    click pins it open so it survives moving the mouse away to read a row. */
 var DOCK_T=null,DOCK_PINNED=false;
-function openDock(force){var d=$("#dock");if(!d)return;if(force){DOCK_PINNED=true;d.classList.add("open");}}
+function openDock(force){var d=$("#dock");if(!d)return;if(force){DOCK_PINNED=true;d.classList.add("open");dockVis(true);}}
 /* renderQueue() skips the row list while the drawer is shut, so the rows must be painted at
    the moment it opens - the class is added FIRST so that early-out does not fire. */
-function dockShow(){if(DOCK_T){clearTimeout(DOCK_T);DOCK_T=null;}var d=$("#dock");if(d){d.classList.add("open");try{$("#dockhead").setAttribute("aria-expanded","true");}catch(e){}try{renderQueue();}catch(e){}}}
+/* VISIBILITY IS SET HERE, NOT LEFT TO A TRANSITION.
+   The drawer's rows stay in the DOM once it has been opened, and an element that is merely
+   transparent is still IN THE FOCUS ORDER: the console's D-pad and an ordinary Tab both land on
+   the cancel and retry buttons of every row while the drawer is shut, so focus disappears off the
+   header into nothing and a press there cancels a real install with no visible row to explain it.
+   visibility:hidden fixes that - but expressing it as `transition: visibility 0s .16s` on the
+   resting rule did NOT hold: measured in a browser, the drawer closed and its buttons were still
+   focusable a second later. These three artifacts also run on two old console WebKits, which is
+   not the place to depend on the fine print of transition semantics. So the class still drives the
+   fade, and this sets the attribute that matters, after the fade has finished. */
+function dockVis(open){
+  var b=$("#dockbody"); if(!b) return;
+  if(open){ b.style.visibility="visible"; b.removeAttribute("aria-hidden");
+            try{ b.inert=false; }catch(e){} b.removeAttribute("inert"); return; }
+  /* after the .16s fade, so the drawer still fades out rather than blinking away */
+  setTimeout(function(){
+    var d=$("#dock");
+    if(d&&!d.classList.contains("open")){
+      b.style.visibility="hidden";
+      b.setAttribute("aria-hidden","true");
+      /* BOTH, deliberately. visibility:hidden is what the spec uses to take a subtree out of
+         SEQUENTIAL focus navigation - Tab, and the console's D-pad - and it is all the two older
+         console WebKits understand. `inert` additionally blocks a PROGRAMMATIC .focus() and hides
+         the subtree from assistive technology, which visibility alone does not, and it is ignored
+         harmlessly where it is not supported. Measured in a browser: with visibility:hidden the
+         element was still reachable by an explicit .focus() call, so one of these two is not
+         enough on its own. */
+      try{ b.inert=true; }catch(e){}
+      b.setAttribute("inert","");
+    }
+  },180);
+}
+function dockShow(){if(DOCK_T){clearTimeout(DOCK_T);DOCK_T=null;}var d=$("#dock");if(d){d.classList.add("open");dockVis(true);try{$("#dockhead").setAttribute("aria-expanded","true");}catch(e){}try{renderQueue();}catch(e){}}}
 function dockHide(now){
   if(DOCK_PINNED&&!now)return;
   if(DOCK_T)clearTimeout(DOCK_T);
-  DOCK_T=setTimeout(function(){var d=$("#dock");if(d)d.classList.remove("open");try{$("#dockhead").setAttribute("aria-expanded","false");}catch(e){}DOCK_T=null;},now?0:260);
+  DOCK_T=setTimeout(function(){var d=$("#dock");if(d)d.classList.remove("open");dockVis(false);try{$("#dockhead").setAttribute("aria-expanded","false");}catch(e){}DOCK_T=null;},now?0:260);
 }
 (function(){
   var d=$("#dock");if(!d)return;
