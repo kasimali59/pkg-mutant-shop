@@ -41,6 +41,22 @@ import sources as source_engine
 
 VERSION = "3.63.0"
 
+# HOW LONG A PROBE ANSWER ON THE /api/health PATH STAYS GOOD.
+#
+# Four memos on that path were each written as 5.0 s "because health is polled every 6 s". Read
+# that again: the answer is thrown away ONE SECOND BEFORE the poll that would have used it. For a
+# single viewer - the ordinary case, one browser open - the hit rate was exactly zero. Every memo
+# did nothing but hold data long enough to be stale, while every poll still paid four probes into
+# a console's single-threaded accept loop.
+#
+# The number has to be LONGER than the interval it is protecting, not shorter. At 11 s a viewer
+# polling every 6 s probes on one poll and reads the memo on the next, so the console sees half as
+# many probes and nothing on screen is ever more than about two polls old. The two numbers are
+# defined next to each other here so the relationship between them is visible, because it was the
+# relationship - not either value - that was wrong.
+HEALTH_POLL_S = 6.0      # web/index.html: setInterval(refreshHealth, 6000)
+HEALTH_MEMO_S = 11.0     # deliberately > HEALTH_POLL_S; see above
+
 if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
     HERE = os.path.dirname(sys.executable)
     WEB_DIR = os.path.join(sys._MEIPASS, "web")
@@ -3203,12 +3219,14 @@ class Ps5Bridge:
         ShadowMount binds loopback-only, so from the PC we can only report it as 'unknown'
         rather than pretending it is down — the on-console shop answers this accurately.
 
-        MEMOISED for 5 s per bridge. /api/health said "cached helper state, so adding these two
-        keys costs health nothing" and it was not: every 6 s poll from every device spawned an
-        FTP probe thread and a /api/helpers round trip to the console's single accept loop."""
+        MEMOISED per bridge. /api/health said "cached helper state, so adding these two keys
+        costs health nothing" and it was not: every 6 s poll from every device spawned an FTP probe
+        thread and a /api/helpers round trip to the console's single accept loop - and the memo was
+        set to 5 s against a 6 s poll, so it expired before each poll and caught none of them. It
+        is HEALTH_MEMO_S now, which is longer than the poll rather than shorter."""
         now = time.monotonic()
         memo = getattr(self, "_helpers_memo", None)
-        if memo and now - memo[0] < 5.0:
+        if memo and now - memo[0] < HEALTH_MEMO_S:
             return dict(memo[1])
         smp = self.cfg.get("shadowmount", {}).get("port", 10101)
         # ShadowMount binds LOOPBACK-ONLY on the console, so probing it from the PC can never
@@ -6945,10 +6963,10 @@ class Handler(BaseHTTPRequestHandler):
             _b4 = srv.fleet.bridge(_ps4["id"]) if _ps4 else None
             _ps4_on = False
             if _b4 is not None:
-                # Same 5 s memo the PS5 probe uses, for the same reason: this endpoint is polled
-                # every 6 s and the answer is a round trip to a console.
+                # Same memo the PS5 probe uses, for the same reason: this endpoint is polled
+                # every HEALTH_POLL_S and the answer is a round trip to a console.
                 _m4 = getattr(srv, "_ps4_probe", None)
-                if _m4 and (time.monotonic() - _m4[0]) < 5.0:
+                if _m4 and (time.monotonic() - _m4[0]) < HEALTH_MEMO_S:
                     _ps4_on = _m4[1]
                 else:
                     _ps4_on = bool(_b4.up() and _b4.engine_available())
@@ -6980,7 +6998,7 @@ class Handler(BaseHTTPRequestHandler):
             _pm = getattr(srv, "_health_probe", None)
             if not reachable:
                 ftp_on = False
-            elif _pm and (time.monotonic() - _pm[0]) < 5.0:
+            elif _pm and (time.monotonic() - _pm[0]) < HEALTH_MEMO_S:
                 ftp_on = _pm[1]
             else:
                 ftp_on = b.ftp_ok() if b else False
@@ -6995,11 +7013,12 @@ class Handler(BaseHTTPRequestHandler):
             # the test in would have reported "third-party" and never probed at all.
             engine_ready = False
             if b is not None and reachable:
-                # Cached: /api/health is polled continuously by the UI and this is a round trip to
-                # the console. Measured 3.3s per call before caching, which the user feels as a
-                # sluggish app. 5s is far shorter than the time it takes anyone to act on it.
+                # Cached: /api/health is polled continuously by the UI and this is a round trip
+                # to the console. Measured 3.3 s per call before caching, which the user feels as a
+                # sluggish app. HEALTH_MEMO_S is far shorter than the time it takes anyone to act
+                # on what this says.
                 _em = getattr(srv, "_engine_probe", None)
-                if _em and (time.monotonic() - _em[0]) < 5.0:
+                if _em and (time.monotonic() - _em[0]) < HEALTH_MEMO_S:
                     engine_ready = _em[1]
                 else:
                     try:
