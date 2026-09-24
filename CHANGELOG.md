@@ -112,6 +112,121 @@ two places it *tells the owner where to go*: both notifications had `127.0.0.1:8
 hand. Moving the port would have left the icon directing the owner to the old address - on the one
 screen they are looking at precisely because something is not where they expected it.
 
+### The PS4 stops asserting things it never checked
+
+`"ftp_online":true, "ftp_port":2121` was a claim on the strength of nothing, in three routes at
+once, so the Files row in Settings sat green and printed an address to type on a PS4 where no FTP
+had ever been loaded. FTP is not ours - it is GoldHEN's, up only if the owner loaded it. All three
+probe now and all three move together, because fixing one and leaving the others asserting is the
+exact miss that cost this project a follow-up release once already.
+
+`POST /api/config` fell through to the generic `200 {}`. The GET half had been fixed, but the page
+SAVES with a POST, so Settings painted a green tick over a save that could not have happened and
+the next poll refilled every field from a config that had never changed.
+
+**A guard of mine that had become a lock-out.** Both busy checks read `g_job.state`, which does not
+advance on its own in that process - it moves when a route reads it. An install that finished while
+nobody had the page open left the slot saying "downloading", so the console answered *"An install is
+already running on this PS4"* while doing nothing at all, and only reloading the ELF cleared it.
+That is the shape of a bug this project has had before. Every other busy check in the file refreshes
+first; these two were the pair that did not.
+
+Three routes the PS5 has and the PS4 did not - `/api/helpers`, `/api/fs/delete`, and the
+"not supported here" answers for `POST /api/game/delete` and `/api/move` - each of which made
+something upstream say the wrong thing. `/api/fs/delete` is the only one here that destroys
+anything, so it is the only one with a boundary: strictly inside the shop's own folder, no `..`, and
+the folder itself refused however it is spelt.
+
+`running_title` stays empty, and that is checked rather than forgotten. This payload's only view of
+the console is `app.db`, which lists what is INSTALLED and knows nothing about a running process.
+The PS5 answers it with two calls whose signatures are read off the PS5 side of this repo, not out
+of any PS4 header we hold - and inferring a signature is how this project once crashed a console,
+inside a shared system daemon where that takes the whole process down.
+
+### The companion stops meaning "the PS5" by "the console"
+
+`reconcile_consoles` ranked `ps5=0`, `ps4=1` and *everything else*`=2`, against a file that says
+everywhere else that a console which does not state a platform is a PS5. An entry added to
+`config.json` by hand - the exact shape `SETUP-REMOTE.md` tells people to write - sorted behind the
+PS4 and made `consoles[0]` the PS4, and dozens of routes still mean "the console" by `consoles[0]`.
+Two independent passes found and fixed that same line, which is the clearest possible sign it should
+have been pinned by a test the first time. It is now, and the test was checked against the old sort
+key first: it fails on it.
+
+A PS5 package with no title id could be sent to a PS4 - the guard tested the name for "PPSA", and a
+container whose `param.sfo` would not read arrives with no title id at all. It asks the library,
+which already worked out what the file was when it scanned it.
+
+Verified against both real consoles with `dry_run`, so nothing was installed:
+
+| request | result |
+| --- | --- |
+| PS5 game → PS4 only | 400, *"This is a PS5 game, and the console it was sent to is a PS4"* |
+| PS5 game → PS5 | 200, `consoles ["ps5"]` |
+| PS5 game → all consoles | 200, `consoles ["ps5"]` — narrowed, not failed |
+| PS4 game → all consoles | 200, `consoles ["ps5","ps4"]` |
+
+which is the rule as asked for: **PS4 games install on either console, PS5 games only on the PS5.**
+
+### Costs that were being paid for nothing
+
+Peer discovery fanned out **254 simultaneous threads** from a request path. `/api/devices` probed
+every console serially with an 8 s budget each. `app.db` was pulled *whole* on every cold library
+refresh, over Wi-Fi, off the console's single accept loop - and between installs it is byte for byte
+the same file.
+
+The rule that survives all of it: `installed_titles(force=True)` still pulls unconditionally and
+caches nothing. That call is the install-confirm loop asking whether a title has really landed, and
+a cached answer there is exactly the lie that rule exists to prevent. All seven confirm sites pass
+it; `bgft.db` and `addcont.db`, read *while* an install runs, never touch the cache.
+
+| route | after |
+| --- | ---: |
+| `/api/health` | 16 ms |
+| `/api/devices` | 16 ms |
+| `/api/storage` | 29 ms |
+| `/api/network` | 83 ms |
+| `/api/library` | 16 ms |
+| `/api/sources` | 2063 ms cold, 16-48 ms after |
+
+### The page stops describing whichever console answered first
+
+Twenty-seven findings of one kind: the page had a single idea of "the console" and used it
+everywhere, so with two machines connected it routinely described the wrong one. The mods lane, the
+move dialog, the queue rows, the delete and clean-reinstall confirmations, the destination tooltip,
+the header pill and the Settings connection row all name the console they mean now. The header
+picker was inert - it re-targeted only the next install POST - and repaints the drives strip, the
+Installing card, the devices list and the open panel.
+
+Verified in a browser against both consoles, on a PS4 game: the panel offers **Install on PS5** and
+**Install on PS4**; switching to the PS4 changes the destination to *"Installs to: console default"*
+and back to the PS5 changes it to *"Installs to: Internal SSD"*. No JavaScript errors at any point.
+
+*Not verified: anything visual. The browser pane reported a 0x0 viewport throughout, hidden or
+fronted, so every layout measurement it offers is a fabrication. The DOM and behaviour checks do not
+depend on it.*
+
+### Two gates that caught a blank app before it shipped
+
+`check_web.py` stopped the build on `consoleIsPs4()` being called and defined nowhere - its
+definition had ridden along with an anchor that a previous commit had already rewritten, so the edit
+was skipped and the callers went in alone. It parses perfectly and throws at runtime, which on this
+page means a blank app on every device.
+
+And the translation inserter refused two Chinese strings for unescaped double quotes: the translator
+had wrapped `Settings > Your games` in straight quotes for emphasis, inside a double-quoted
+JavaScript literal, which they would have terminated. Same blank app, in one language.
+
+### Language
+
+All fifteen languages now carry the whole dictionary - 154 keys x 8 languages of backlog cleared,
+plus everything new in this release. Raw English dialog calls are down from 28 to 19.
+
+The style gate went from checking 405 strings to **10,647**: it only ever saw text that reached a
+`toast()`, `confirm()` or `prompt()`, so a sentence that was defined and translated but not yet
+WIRED sat outside it completely - which is how a message naming software this project does not ship
+lived in seven languages under a green check.
+
 ### Measured, and deliberately left alone
 
 * **`library_signature` walking the whole library tree every 10 s.** Measured on the real library:
