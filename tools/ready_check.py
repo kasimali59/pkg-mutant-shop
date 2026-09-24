@@ -167,8 +167,20 @@ def offline():
         "%d notify_icon call(s)" % len(icon_calls))
     # A blanket long max-age once cached index.html, so a new ELF left the console on the old UI
     # for a week. The app shell must revalidate every time.
-    rec("guard", "send_file() serves the app shell no-cache",
-        '"no-cache, must-revalidate"' in _c_function(c, "send_file"))
+    #
+    # send_file_req, NOT send_file: the body moved when conditional GET was added and send_file is
+    # now a one-line wrapper passing NULL for the request. This guard went on reading the wrapper
+    # and failed on a payload whose cache policy was perfectly correct - which is the cheapest kind
+    # of false alarm to leave lying around, and the kind that gets a whole suite ignored.
+    _sf = _c_function(c, "send_file_req")
+    rec("guard", "send_file_req() serves the app shell no-cache",
+        '"no-cache, must-revalidate"' in _sf)
+    # And the 304 has to carry the SAME policy. A revalidation that answered without Cache-Control
+    # would let a browser fall back to its own heuristics and keep a shell it had just been told to
+    # re-check - the identical bug, arriving by the new route.
+    rec("guard", "the 304 repeats the cache policy",
+        "304 Not Modified" in _sf and _sf.count("Cache-Control") >= 2,
+        "%d Cache-Control header(s) in send_file_req" % _sf.count("Cache-Control"))
     # An add-on is a PKG, never a container - inheriting the game's ffpfsc format once routed a
     # 1 MB DLC down the mount lane and reported a finished install as a bad dump.
     try:
