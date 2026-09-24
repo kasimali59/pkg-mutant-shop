@@ -509,10 +509,41 @@ def build_library(srv):
     # (No `bridge` singular here any more. It held consoles[0] from when the fleet was one PS5;
     # once this loop was widened to every console nothing read it, and a name that looks like "the
     # console" while meaning "the first one" is the shape of bug this whole pass is about.)
+    # ASKED AT THE SAME TIME, NOT ONE AFTER THE OTHER. console_apps() is a whole app.db pull on a
+    # cold PS5 and an /api/library round trip on the PS4, and this loop paid them back to back, so
+    # the first library load with both consoles cold - and every load right after an install drops
+    # the memo - cost the SUM of the two. They are two independent questions about two different
+    # machines, and the whole point of having two consoles is that they can be asked together.
+    #
+    # The warm path does not move at all: a fresh cache returns instantly, and a stale one returns
+    # the old list while refreshing in its own background thread, exactly as before.
+    #
+    # THE RESULT IS REBUILT IN FLEET ORDER, NOT COMPLETION ORDER, because everything below relies
+    # on "the first console that has a title fills in the scalar fields". That is also what keeps
+    # a single-console fleet identical: one console is one thread and the same answer.
     apps = None
     per_console = []
+    _got = {}
+
+    def _ask_console(cid, b):
+        try:
+            _got[cid] = b.console_apps()
+        except Exception:
+            _got[cid] = None
+
+    _threads = [threading.Thread(target=_ask_console, args=(cid, b), daemon=True)
+                for cid, b in fleet_bridges]
+    for _t in _threads:
+        _t.start()
+    # ONE DEADLINE FOR THE WHOLE FAN-OUT, not 75 s per thread: the threads run at the same time, so
+    # a per-thread timeout would add up and make two wedged consoles cost twice what one does - the
+    # very thing this change is removing. 75 s is past fs_read's own 60 s budget, so a slow app.db
+    # pull still lands rather than being abandoned and reported as an empty console.
+    _deadline = time.time() + 75.0
+    for _t in _threads:
+        _t.join(timeout=max(0.05, _deadline - time.time()))
     for cid, b in fleet_bridges:
-        got = b.console_apps()
+        got = _got.get(cid)
         if got is None:
             continue
         per_console.append((cid, b, got))
@@ -710,12 +741,39 @@ def discover_peers(cfg, timeout=0.35, port=None):
         with lock:
             found.append(info)
 
-    threads = [threading.Thread(target=probe, args=(i,), daemon=True) for i in range(1, 255)]
+    # A BOUNDED POOL, NOT 254 RAW THREADS. Every sweep created 254 OS threads and fired 254
+    # simultaneous connects at the same /24 the consoles sit on - and it runs from a request path,
+    # so a library load can trigger it once a minute while those same consoles are being polled
+    # across the same link. 32 workers finish a /24 in about the same wall time, because the cost
+    # is dominated by the 0.35 s connect timeout rather than by parallelism, at a fraction of the
+    # socket and scheduler pressure.
+    #
+    # daemon=True still, and for the reason the PS5 scan below spells out: a probe stuck in a
+    # connect must never be the thread that keeps the process alive after the tray's Quit. That is
+    # also why this is a hand-rolled pool rather than concurrent.futures.ThreadPoolExecutor, whose
+    # workers are non-daemon and are joined at interpreter exit.
+    #
+    # One deadline for the whole sweep, not four seconds per thread. Waiting per-thread meant a
+    # slow-to-identify peer could still be mid-answer when its turn came and be lost anyway. Do
+    # not stretch it: /api/library waits behind this sweep.
+    deadline = time.time() + 12.0
+    _next, _nlock = [1], threading.Lock()
+
+    def _worker():
+        while True:
+            with _nlock:
+                i = _next[0]
+                _next[0] += 1
+            if i > 254 or time.time() >= deadline:
+                return
+            try:
+                probe(i)
+            except Exception:
+                pass
+
+    threads = [threading.Thread(target=_worker, daemon=True) for _ in range(32)]
     for t in threads:
         t.start()
-    # One deadline for the whole sweep, not four seconds per thread. Waiting per-thread meant a
-    # slow-to-identify peer could still be mid-answer when its turn came and be lost anyway.
-    deadline = time.time() + 12.0
     for t in threads:
         t.join(timeout=max(0.05, deadline - time.time()))
     return sorted(found, key=lambda x: x.get("name") or x.get("url"))
@@ -1000,17 +1058,38 @@ def build_federated_library(srv):
     if reg is not None:
         reg.scan_async()                       # keeps itself fresh without blocking this request
         peers.extend(reg.known())
-    seen_urls = {p.get("url") for p in peers if p.get("url")}
+    # A CONFIGURED PEER THAT IS SWITCHED OFF COST UP TO 2.5 s ON EVERY CALL, uncached. That is
+    # not only the grid: this function is also on the copy-from-another-PC lane and the peer
+    # install lane, so a dead peer written into config.json slowed a press of Install too. Remember
+    # the failure for 60 s and skip it, the way Ps5Bridge's _apps_fail_ts short-circuits a console
+    # that has just failed. (2.5 s is the ceiling for a host that black-holes the connect; a host
+    # that is up with the port closed answers RST in microseconds and was never what this cost.)
+    _fail = getattr(srv, "_fed_fail_ts", None)
+    if _fail is None:
+        _fail = srv._fed_fail_ts = {}
+    # Compared WITHOUT a trailing slash. The registry stores urls as exactly http://ip:port, so a
+    # config entry written with a trailing slash matched nothing here and the same machine was
+    # probed a second time and merged into the list twice.
+    seen_urls = {(p.get("url") or "").rstrip("/") for p in peers if p.get("url")}
     for peer in fed.get("peers", []):          # hand-configured peers still work
         purl = peer if isinstance(peer, str) else (peer.get("url") if isinstance(peer, dict) else None)
-        if not purl or purl in seen_urls:
+        if not purl:
             continue
-        info = http_get_json(purl.rstrip("/") + "/api/federation", timeout=2.5)
+        key = purl.rstrip("/")
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        if time.time() - _fail.get(key, 0) < 60:
+            peers.append({"url": purl, "name": purl, "online": False, "games": [], "count": 0})
+            continue
+        info = http_get_json(key + "/api/federation", timeout=2.5)
         if info:
+            _fail.pop(key, None)               # it answered: stop holding the failure against it
             info["url"] = purl
             info["online"] = True
             peers.append(info)
         else:
+            _fail[key] = time.time()
             peers.append({"url": purl, "name": purl, "online": False, "games": [], "count": 0})
 
     peers_status = []
@@ -4225,6 +4304,81 @@ class Ps5Bridge:
             return None
         return tmp
 
+    def _db_stamp(self, remote):
+        """(size, mtime) of a file on the console, or None when it cannot be asked.
+
+        READ-ONLY. /api/fs/stat is a stat() on the console - fs_send_stat in both ELFs - so it
+        creates, starts, resumes and cancels nothing, and answers with one small JSON object.
+        None means "do not know", and a caller that gets None must transfer the file rather than
+        conclude anything from the silence.
+
+        Deliberately does NOT touch self._fs_ok. A stat that fails is usually a path that is not
+        there, not an ELF that has stopped answering, and the install preflight reads that flag to
+        decide which transport to use.
+        """
+        if not self.ip or self._fs_http_ok() is False:
+            return None
+        try:
+            with urllib.request.urlopen(self._fs_url("stat", remote), timeout=6) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return None
+        if not isinstance(j, dict) or not j.get("ok"):
+            return None
+        try:
+            sz, mt = int(j.get("size") or 0), int(j.get("mtime") or 0)
+        except (TypeError, ValueError):
+            return None
+        # Zero is what the FTP-backed listing reports when it does not really know, and "I do not
+        # know" is not an answer anything may skip a multi-megabyte transfer on.
+        if sz <= 0 or mt <= 0:
+            return None
+        return (sz, mt)
+
+    def _pull_db_cached(self, remote, force=False):
+        """_pull_db(), except the bytes are reused when the console says the file has not moved.
+
+        app.db was pulled WHOLE on every cold library refresh - the entire database, over Wi-Fi,
+        off the console's single accept loop, for as long as the app is open - and between
+        installs it is byte for byte the same file. One stat answers whether it changed, so ask
+        first and transfer only when the answer moved.
+
+        `force` PULLS UNCONDITIONALLY and caches nothing, and that is not optional:
+        installed_titles(force=True) is the install-confirm loop asking whether a title has really
+        landed, and a cached answer there is exactly the lie that rule exists to prevent.
+
+        Only app.db comes through here. bgft.db and addcont.db - the two databases read WHILE an
+        install is running - keep calling _pull_db() every single time.
+        """
+        cache = getattr(self, "_db_bytes_cache", None)
+        if cache is None:
+            cache = self._db_bytes_cache = {}
+        if force:
+            cache.pop(remote, None)
+        stamp = None if force else self._db_stamp(remote)
+        held = cache.get(remote)
+        if stamp is not None and held is not None and held[0] == stamp:
+            data = held[1]
+        else:
+            data = self.fs_read(remote, timeout=60)
+            if not data:
+                return None
+            # Held in this PC's memory, one copy per console. Capped, because an unbounded "keep
+            # the last file we read" is a memory leak wearing a cache's clothes; past the cap the
+            # transfer simply happens every time, which is what it did before.
+            if stamp is not None and len(data) <= (32 << 20):
+                cache[remote] = (stamp, data)
+            else:
+                cache.pop(remote, None)
+        _fd, tmp = tempfile.mkstemp(prefix="pms_db_", suffix=".db")
+        try:
+            with os.fdopen(_fd, "wb") as f:
+                f.write(data)
+        except OSError:
+            self._drop_tmp(tmp)
+            return None
+        return tmp
+
     @staticmethod
     def _drop_tmp(path):
         # None-tolerant on purpose: callers reach here on failure paths where the temp file was
@@ -4554,6 +4708,13 @@ class Ps5Bridge:
         # The USB-stick listing is cached too now (console_usb_packages); a stick's package that
         # just installed should stop being offered as installable on the next library read.
         self._usbpkg_memo = None
+        # AND THE app.db BYTES. console_apps() now reuses the file it already has when the console
+        # says the size and mtime have not moved, and mtime has one-second granularity - so an
+        # install that finished inside the same second as the last pull, without changing the
+        # file's length, could otherwise be read back from the copy taken just before it. This
+        # method is called the moment something lands on the console, which is exactly where that
+        # doubt is cheapest to remove.
+        self._db_bytes_cache = {}
 
     # ------------------------------------------------ the PS4's dashboard app
     #
@@ -4764,7 +4925,7 @@ class Ps5Bridge:
         # fallback. Unique temp name per pull - the confirm loop, the library scan and the UI can
         # all be here at once, and one thread truncating a file another is mid-read on produces
         # "database disk image is malformed", which the caller reads as "not installed yet".
-        tmp = self._pull_db(db_path)
+        tmp = self._pull_db_cached(db_path, force)
         if not tmp:
             self._apps_fail_ts = time.time()
             return None
@@ -5135,9 +5296,20 @@ class Fleet:
         threads = [threading.Thread(target=probe, args=(c,)) for c in self.consoles]
         for t in threads:
             t.start()
+        # THE JOIN HAS TO OUTLAST THE PROBE IT IS WAITING FOR. This waited 2 s while
+        # engine_available() is up() (0.6 s budget) followed by _shop("/api/health", timeout=4), so
+        # a console that was merely BUSY - mid-install, or rebuilding its library - overran and was
+        # recorded as offline. join() returns the moment a thread finishes, so a healthy fleet
+        # costs exactly what it did; this ceiling is only ever paid by a console that is genuinely
+        # slow, and such a console was being given a wrong answer at 2 s instead of a right one at
+        # 4.6.
         for t in threads:
-            t.join(timeout=2)
-        return [results.get(c["id"], dict(c, online=False)) for c in self.consoles]
+            t.join(timeout=4.6)
+        # AND "DID NOT FINISH" IS NOT "SAID NO". A probe still running now reports online: None -
+        # unknown - which is the three-state rule /api/health's console_list already uses. None is
+        # falsy, so every `if c.get("online")` test and the settings LED read exactly as they did;
+        # what changes is that nothing declares a console DOWN on no evidence.
+        return [results.get(c["id"], dict(c, online=None)) for c in self.consoles]
 
 
 
@@ -5707,9 +5879,14 @@ class Queue:
                     if bgft_row_is_dead(_row):
                         # QUEUED AND NEVER STARTED - see bgft_row_is_dead(). Not something to wait
                         # for, and the old wording said the opposite in every clause.
-                        _msg = ("The PS5 has a stalled download for this game that never started, "
-                                "and it is blocking new ones. Cancel it on the PS5 (Downloads, "
-                                "select it, Cancel), then install this again.")
+                        # NAMED FROM THE BRIDGE, because this lane runs for a PS4 too and this
+                        # sentence told its owner to go and look at a PS5. is_ps4() is the one
+                        # platform test this file keeps - a console that does not say what it is,
+                        # is a PS5 - so for a PS5 this formats to the sentence it always was.
+                        _w = "PS4" if bridge.is_ps4() else "PS5"
+                        _msg = ("The %s has a stalled download for this game that never started, "
+                                "and it is blocking new ones. Cancel it on the %s (Downloads, "
+                                "select it, Cancel), then install this again." % (_w, _w))
                         print("[install] %s has a DEAD bgft row (status %s, 0 bytes) - not a live job"
                               % (t.get("title_id"), _row[0]))
                         self._set(t, state="error", pct=0, fail_reason="console_stalled_download",
@@ -7160,7 +7337,20 @@ class Handler(BaseHTTPRequestHandler):
             # 6-second timeouts against a dead address, which turned every health check into a
             # ~14s stall whenever the PS5 was off or resting — the app looked hung when in fact
             # the console simply was not home.
-            _run = ((_b.running_title() if (engine_ready or ftp_on) else {}) if _b else {}) or {}
+            # GATE ON THE BRIDGE ABOUT TO BE ASKED, not on the PS5. engine_ready and ftp_on
+            # above describe `b` - the first non-PS4 console - while the question is put to `_b`,
+            # the console this request is actually about. On a fleet with two PS5s, reading the
+            # page on the second one while the first was switched off suppressed its running title
+            # entirely, although that console was right there answering.
+            #
+            # When `_b` IS `b` - every single-console machine, and every PS5-plus-PS4 machine
+            # where the viewer is the PS5 - the test is the original one and nothing moves. The
+            # other branch is up(), a cached TCP connect, so it costs nothing when the console is
+            # there and settles in milliseconds when it is not; and running_title() already
+            # returns {} for a PS4 without touching the wire, so a PS4 is still asked nothing.
+            _run_ok = ((engine_ready or ftp_on) if (_b is not None and _b is b)
+                       else (_b.up() if _b is not None else False))
+            _run = ((_b.running_title() if _run_ok else {}) if _b else {}) or {}
             # Cached helper state, so adding these two keys costs health nothing - but only ask at
             # all when the console is actually there. helper_status() probes ShadowMount and FTP,
             # and against a switched-off console each of those waits out its own timeout.
@@ -7287,9 +7477,13 @@ class Handler(BaseHTTPRequestHandler):
                 raw = b._shop_text("/api/engine/log", timeout=10)
                 return self._json({"ok": True, "log": raw, "bytes": len(raw)})
             except Exception as e:
+                # `b` is proven non-None four lines above. This field is read by curl,
+                # tools/snapshot_api.py and tools/verify_console.py rather than by the page, and
+                # all three were being told a PS4 fault was a PS5 one.
                 return self._json({"ok": False,
-                                   "error": "PKG MUTANT SHOP on the PS5 did not answer (%s)"
-                                            % str(e)[:80]}, 502)
+                                   "error": "PKG MUTANT SHOP on the %s did not answer (%s)"
+                                            % ("PS4" if b.is_ps4() else "PS5",
+                                               str(e)[:80])}, 502)
         if path == "/api/engine/state":
             # WHY THIS EXISTS: the settings panel used to describe the install engine by reading
             # dpi_port out of /api/health and printing "ip:12800" next to an LED that meant "is a
@@ -7345,7 +7539,11 @@ class Handler(BaseHTTPRequestHandler):
                     out["shadowmount"] = bool(h.get("shadowmount"))
                     out["ftp_port"] = int(h.get("ftp_port") or 0)
                 except Exception as e:
-                    out["error"] = "PKG MUTANT SHOP on the PS5 did not answer (%s)" % str(e)[:80]
+                    # This route worked the platform out 30 lines above and then ignored it
+                    # here. `detail` further down is already branched on _is4; this field was the
+                    # one thing left in the answer still naming the wrong console.
+                    out["error"] = ("PKG MUTANT SHOP on the %s did not answer (%s)"
+                                    % ("PS4" if _is4 else "PS5", str(e)[:80]))
                 if out["shop_ok"]:
                     # BOTH consoles answer this. The PS4 has no spawned installer, but it
                     # implements /api/engine/spawn-status against its own BGFT job and reports the
@@ -7406,18 +7604,61 @@ class Handler(BaseHTTPRequestHandler):
             # read that key and neither is being broken to add a second console.
             ps5 = PS5_DEVICES
             consoles = []
-            for c in srv.fleet.consoles:
-                b = srv.fleet.bridge(c["id"])
-                if b is None:
-                    continue
+            # PROBED IN PARALLEL. This asked each console in turn with an 8 s budget of its own,
+            # and platform_id() sat inside the same loop adding its own 3 s /api/health probe
+            # whenever the platform is not written in config - which is every configuration from
+            # before PS4 support existed, exactly the machine that has just had a PS4 attached. So
+            # the drive picker and the storage bar took twice as long with two consoles as with
+            # one, and a console that was busy rather than off made the whole request wait it out
+            # before the other was even started. Nothing here depends on the previous answer.
+            _dres, _dlock = {}, threading.Lock()
+
+            def _probe_console(c, bridge):
                 devs, ok = [], False
                 try:
-                    d = b._shop("/api/devices", timeout=8) or {}
+                    d = bridge._shop("/api/devices", timeout=8) or {}
                     if isinstance(d.get("ps5"), list) and d["ps5"]:
                         devs, ok = d["ps5"], True
                 except Exception:
                     pass                                    # console asleep - say so, do not invent
-                plat = b.platform_id()
+                try:
+                    plat = bridge.platform_id()
+                except Exception:
+                    # platform_id() swallows its own probe failures, so this catches only the
+                    # impossible - and it answers the way that function does: a console that does
+                    # not say what it is, is a PS5.
+                    plat = str(c.get("platform") or "").lower() or "ps5"
+                with _dlock:
+                    _dres[c["id"]] = (devs, ok, plat)
+
+            _dths = []
+            for c in srv.fleet.consoles:
+                b = srv.fleet.bridge(c["id"])
+                if b is None:
+                    continue
+                _t = threading.Thread(target=_probe_console, args=(c, b), daemon=True)
+                _t.start()
+                _dths.append(_t)
+            # One deadline for the whole fan-out, wide enough that a console which would have been
+            # waited out serially (8 s of devices plus platform_id()'s 3 s health probe) is still
+            # waited out here. Tightening it would make a slow-but-alive PS5 show as offline with
+            # no drives, and the move and install pickers would lose their destinations.
+            _ddl = time.time() + 14.0
+            for _t in _dths:
+                _t.join(timeout=max(0.05, _ddl - time.time()))
+
+            # THE ASSEMBLY PASS STAYS SERIAL AND IN CONFIG ORDER. The legacy `ps5` key means "the
+            # first console in config order that answered", not "whichever replied first on the
+            # wire", so the flag below is resolved here and never set from inside a worker.
+            _ps5_taken = False
+            for c in srv.fleet.consoles:
+                if srv.fleet.bridge(c["id"]) is None:
+                    continue
+                # A console whose probe overran the deadline is listed offline, exactly as a
+                # timed-out serial probe listed it.
+                devs, ok, plat = _dres.get(c["id"],
+                                           ([], False,
+                                            str(c.get("platform") or "").lower() or "ps5"))
                 consoles.append({"id": c["id"], "name": c.get("name") or c["ip"], "ip": c["ip"],
                                  "platform": plat, "online": ok,
                                  "shop_port": srv.cfg.get("console", {}).get("shop_port", 8710),
@@ -7428,9 +7669,9 @@ class Handler(BaseHTTPRequestHandler):
                 # ps5Destinations() with no console - then offered a drive that is physically
                 # plugged into the other machine, with that machine's free space beside it.
                 # A PS4-only setup leaves it as the static fallback rather than the PS4's list.
-                if ok and plat != "ps4" and not [x for x in consoles[:-1]
-                                                 if x["online"] and x["platform"] != "ps4"]:
+                if ok and plat != "ps4" and not _ps5_taken:
                     ps5 = devs
+                    _ps5_taken = True
             # NO PS5 IN THIS FLEET, NO PS5 DEVICE LIST. Nothing above can fill `ps5` on a PS4-only
             # setup, so it was still PS5_DEVICES: eleven hardcoded destinations, none of them with a
             # free-space figure, for a console that is not in the house. The readers that fall back
@@ -7699,12 +7940,25 @@ class Handler(BaseHTTPRequestHandler):
                                # installed there" from "it did not say".
                                "answered": sorted(per), "silent": missed})
         if path == "/api/sources":
+            # RANK ONCE. best() re-enters rank() -> probe_all(), which rebuilds one thread per
+            # source and re-sorts microseconds after the first sweep has stored every probe. The
+            # test below is best()'s own rule - ok, and has_file in (True, None) - applied to the
+            # list already in hand, and `ranked` is already sorted by the same key, so the name
+            # chosen is the same one. It also closes the single case where the duplication cost
+            # real work: probe_all joins at 4 s while probe_source is given 2.5, so a source that
+            # overran the join was missing from the first sweep AND still uncached, and the
+            # re-entry then fired a SECOND concurrent probe at the source that was already too
+            # slow. .get("ok") rather than ["ok"], because a KeyError here would take out the
+            # source bar and the Settings sources list together.
             ranked = srv.engine.rank()
+            _best = next((p for p in ranked
+                          if p.get("ok") and p.get("has_file") in (True, None)), None)
+            _hb = _bridge_for(srv, self)          # one lookup, not two
             doc = {"local_paths": srv.cfg["library"]["local_paths"],
                    "lan_url": "http://%s:%d/library/" % (lan_ip(), srv.cfg["companion"]["port"]),
                    "sources_file": srv.cfg["library"].get("sources_file"),
-                   "sources": ranked, "best": (srv.engine.best() or {}).get("name"),
-                   "helpers": (_bridge_for(srv, self).helper_status() if _bridge_for(srv, self) else {})}
+                   "sources": ranked, "best": (_best or {}).get("name"),
+                   "helpers": (_hb.helper_status() if _hb else {})}
             return self._json(_with_peer_sources(srv, doc))
         if path.startswith("/api/hash/"):
             raw = unquote(path[len("/api/hash/"):])
@@ -7747,6 +8001,17 @@ class Handler(BaseHTTPRequestHandler):
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             info = b.cheat_paths() or {}
+            # A PS4 HAS NO CHEAT ENGINE, and its ELF says so in words rather than going quiet: it
+            # answers every /api/cheat path with unsupported plus platform ps4 and a sentence.
+            # Bolting an upload URL and an FTP probe onto that refusal describes five drop folders
+            # the console will never watch, and the settings card then reads "not set up yet" -
+            # which sends the owner hunting for a missing cheat file for a feature that does not
+            # exist there. A PS5 never sets `unsupported`, so this branch cannot fire on one.
+            if info.get("unsupported") or b.is_ps4():
+                return self._json(info or {"ok": False, "unsupported": True, "platform": "ps4",
+                                           "error": "mods_not_on_ps4",
+                                           "message": "Mods and cheats are not available on the "
+                                                      "PS4 yet"})
             # How to actually get files onto the console. FTP is the fallback now, not the
             # route - so name our own file API first and only mention FTP when one is running.
             port = int(info.get("shop_port") or b.cfg.get("console", {}).get("shop_port", 8710))
@@ -8539,8 +8804,9 @@ class Handler(BaseHTTPRequestHandler):
              an install pressed there arrives from that console's own address. Nothing to guess.
           2. There is only one console.
           3. Exactly one console is actually able to install right now. One awake and one asleep is
-             not an ambiguous question. This costs one parallel probe of every console, already
-             bounded to two seconds by Fleet.status().
+             not an ambiguous question. This costs one parallel probe of every console, bounded
+             by Fleet.status() - and a console whose probe did not finish inside that bound counts
+             as neither awake nor asleep, because it did not say.
 
         Only if none of those settles it does the first entry win, which is the old behaviour and
         the only case where a guess is unavoidable. The queue's "not reachable" message names the
@@ -8559,12 +8825,22 @@ class Handler(BaseHTTPRequestHandler):
                     return [cid]
         if len(all_ids) == 1:
             return list(all_ids[:1])
+        # "EXACTLY ONE IS AWAKE" ONLY COUNTS WHEN THE OTHERS ANSWERED. Fleet.status() reports a
+        # probe that did not finish as online: None rather than False, and the difference is an
+        # install landing on the wrong machine: one live console plus one whose probe merely
+        # overran the join used to read as "exactly one awake" and aimed the job at the survivor
+        # without a word - the two-console misroute the docstring above was written to prevent. An
+        # unknown makes the question ambiguous again, so it falls through to the last-resort guess
+        # below, whose choice the queue's message names out loud.
         try:
-            awake = [c["id"] for c in srv.fleet.status()
+            _st = srv.fleet.status()
+            awake = [c["id"] for c in _st
                      if c.get("online") and c.get("id") in all_ids]
+            unsure = [c["id"] for c in _st
+                      if c.get("online") is None and c.get("id") in all_ids]
         except Exception:
-            awake = []
-        if len(awake) == 1:
+            awake, unsure = [], []
+        if len(awake) == 1 and not unsure:
             return awake
         return list(all_ids[:1])
 
