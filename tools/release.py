@@ -208,6 +208,28 @@ def check_artifacts(want):
     return out
 
 
+def drop_release(tag):
+    """Delete an existing release and tag so this version can be cut again.
+
+    WHY THIS EXISTS RATHER THAN "just re-upload the assets". A release's assets and its tag have to
+    be the same build: the tag says which source produced them, and that is the only thing anybody
+    can check a download against. When the artifacts are rebuilt AFTER tagging - which happened the
+    first time this tool was used, because the payload catalogue records a version that changes when
+    the artifacts do - replacing the assets alone leaves a release whose files were never built from
+    the commit it points at. Re-cutting is honest; clobbering is not.
+
+    This is for a release nobody has taken yet. Once one is out, the next version is the answer.
+    """
+    say("  removing the existing %s so it can be cut again" % tag)
+    r = run(["gh", "release", "delete", tag, "--yes", "--cleanup-tag"])
+    if r.returncode != 0 and "release not found" not in (r.stderr or "").lower():
+        say("     gh: %s" % (r.stderr.strip() or r.stdout.strip()))
+    run(["git", "tag", "-d", tag])
+    run(["git", "push", "origin", ":refs/tags/" + tag])
+    if run(["git", "tag", "-l", tag]).stdout.strip():
+        die("%s is still there after trying to remove it" % tag)
+
+
 def check_tree(tag, dry):
     st = run(["git", "status", "--porcelain"])
     if st.returncode != 0:
@@ -283,6 +305,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="every check, then print what would be uploaded. Touches nothing.")
     ap.add_argument("--draft", action="store_true", help="create the release as a draft")
+    ap.add_argument("--replace", action="store_true",
+                    help="delete an existing release and tag of this version first, then cut it "
+                         "again. For a release nobody has taken yet - see drop_release().")
     ap.add_argument("--notes-only", action="store_true",
                     help="print the release notes this version would use, and stop")
     a = ap.parse_args()
@@ -297,6 +322,8 @@ def main():
         return 0
 
     say("\nRELEASE %s%s\n" % (tag, "   (dry run - nothing will be changed)" if a.dry_run else ""))
+    if a.replace and not a.dry_run:
+        drop_release(tag)
     check_tree(tag, a.dry_run)
     check_version(want)
     arts = check_artifacts(want)
