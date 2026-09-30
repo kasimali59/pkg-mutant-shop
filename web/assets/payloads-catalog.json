@@ -393,11 +393,11 @@
    "platform": "PS4",
    "port": 8710,
    "repo": "LuxGoldAI/pkg-mutant-shop",
-   "sha256": "002622778dde5336fa8a1864b58815ce1fd7fadbf8895b5bec7c5cd495c40974",
+   "sha256": "07ebb07b3fea2d0572c6dae149b0f8a7a1f5d7c0b848593440b004d5b0069b42",
    "shape": "elf",
-   "size": 9157592,
+   "size": 9506128,
    "title": "PKG MUTANT SHOP",
-   "version": "3.83.3",
+   "version": "3.86.0",
    "version_from": "file"
   },
   {
@@ -511,11 +511,11 @@
    "platform": "PS5",
    "port": 8710,
    "repo": "LuxGoldAI/pkg-mutant-shop",
-   "sha256": "2d74bd867cbf8876f77e4001ef3066c7854ef7ecb21b4d2e3fd8d365d569d508",
+   "sha256": "d4133d6acba11f8500156f6a1a444de3d67703e11ca98f01cdb80a285442297e",
    "shape": "elf",
-   "size": 34139632,
+   "size": 45350920,
    "title": "PKG MUTANT SHOP",
-   "version": "3.83.3",
+   "version": "3.86.0",
    "version_from": "file"
   },
   {

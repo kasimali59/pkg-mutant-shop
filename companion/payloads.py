@@ -1152,7 +1152,14 @@ def download_asset(cfg, item, asset, log=None, timeout=180):  # noqa: C901
         return False, "Could not replace the old file (%s)." % e.__class__.__name__, ""
 
     say("[payloads] updated %s -> %s (%d bytes)" % (os.path.basename(src), newname, got))
-    return True, "Updated to %s." % newname, version_from_name(newname)
+    # THE VERSION WE JUST INSTALLED, out of the file where the name does not carry it. Our own
+    # releases publish PKG-MUTANT-SHOP.elf with no version in the filename - deliberately, because
+    # the name is a contract the update lane matches on - so version_from_name() answered "" and the
+    # panel reported an update with no version at all. Our artifacts say it inside themselves.
+    ver = version_from_name(newname)
+    if not ver and (item or {}).get("ours"):
+        ver = ours_version(dest)
+    return True, "Updated to %s." % newname, ver
 
 
 _kv_lock = threading.Lock()
