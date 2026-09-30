@@ -34,8 +34,15 @@ claim a build it has not made.
 **The PS5's ELF is 34 MB and deliberately not bundled** - so a second PC can only ever get it from
 the PC that built it, which needs us to *offer* it. `fleet_summary()` skipped our own artifacts on
 the reasoning that every machine builds its own; that is not the situation anyone is actually in.
-It advertises them now. `peer_with()` still matches on size, so a peer can only stand in for a
-byte-identical build, and the peer runs its own deploy lane rather than having bytes shipped to it.
+It advertises them now. The peer runs its own deploy lane rather than having bytes shipped to it.
+
+**And size is not part of that match for our own artifact**, which is the whole question being
+asked. For a third-party payload it is *"is this the same build the tile is describing?"* - a peer
+holding a different ftpsrv is not a substitute for the one the owner chose. For our app it is *"can
+anyone here give me the shop at all?"*, and any build is an answer. Measured, not supposed: the
+second PC's baked catalogue recorded our PS5 ELF at 34,139,632 bytes - the copy that was in the
+folder when its exe was built - while the PC beside it advertised the 45,350,920-byte build, and the
+sizes disagreeing made the tile say "nobody has this" about a file on the same LAN.
 
 ### The tile that said "Running" and did not look it
 

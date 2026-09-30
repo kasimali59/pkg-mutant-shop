@@ -1336,13 +1336,25 @@ def peer_with(peers, item):
     want_id = (item or {}).get("id")
     want_plat = str((item or {}).get("platform") or "").upper()
     want_size = int((item or {}).get("size") or 0)
+    # SIZE IS NOT PART OF THE MATCH FOR OUR OWN ARTIFACT, and the difference is the whole question
+    # being asked. For a third-party payload it is "is this the same build the tile is describing?",
+    # and a peer holding a different ftpsrv is not a substitute - it would quietly downgrade or
+    # upgrade something the owner chose. For OUR app the question is "can anyone here give me the
+    # shop at all?", and any build of it is an answer: a PC with no folder has no copy to be
+    # inconsistent with, and the peer runs its own deploy lane and sends whatever it actually has.
+    #
+    # Measured, which is why this is not a hypothetical: a second PC's baked catalogue recorded our
+    # PS5 ELF at 34,139,632 bytes (the 3.83.3 copy that was in the folder when its exe was built),
+    # the PC beside it was advertising the 45,350,920-byte 3.86.0 build, and the sizes disagreeing
+    # made the tile read "nobody has this" about a file on the same LAN.
+    ours = bool((item or {}).get("ours"))
     for p in (peers or []):
         if not p.get("online"):
             continue
         for e in (p.get("payloads") or []):
             if (e.get("id") == want_id
                     and str(e.get("platform") or "").upper() == want_plat
-                    and (not want_size or int(e.get("size") or 0) == want_size)):
+                    and (ours or not want_size or int(e.get("size") or 0) == want_size)):
                 return p
     return None
 

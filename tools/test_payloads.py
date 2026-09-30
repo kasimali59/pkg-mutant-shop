@@ -311,6 +311,24 @@ def main():
        "our own artifacts are advertised to peers, not skipped")
     ok("not local_path(cfg, it)" in _fs, "...and what we cannot reach is still not advertised")
 
+    # (2b) A PEER STANDS IN FOR OUR OWN APP WHATEVER BUILD IT HOLDS. A second PC's baked catalogue
+    # records the size our ELF was when ITS exe was built, so requiring a byte-exact match made the
+    # tile say "nobody has this" about a file on the same LAN. For a third-party payload the strict
+    # match must stay: a peer holding a different ftpsrv is not a substitute for the one described.
+    sys.path.insert(0, os.path.join(ROOT, "companion"))
+    import payloads as _P
+    _peer = [{"online": True, "name": "OTHER",
+              "payloads": [{"id": "pkg-mutant-shop", "platform": "PS5", "size": 45350920},
+                           {"id": "ftpsrv", "platform": "PS5", "size": 999}]}]
+    ok(_P.peer_with(_peer, {"id": "pkg-mutant-shop", "platform": "PS5",
+                            "size": 34139632, "ours": True}) is not None,
+       "a peer offering a DIFFERENT build of our own app still counts")
+    ok(_P.peer_with(_peer, {"id": "ftpsrv", "platform": "PS5", "size": 123}) is None,
+       "...but a third-party payload still needs the byte-exact build")
+    ok(_P.peer_with(_peer, {"id": "pkg-mutant-shop", "platform": "PS4",
+                            "size": 0, "ours": True}) is None,
+       "...and the platform is still part of the match")
+
     # (3) THE FEDERATION FLAG MUST NOT REPORT A CONFIG FIELD THAT GATES NOTHING. It said False on a
     # fully-paired machine, which is what sent the owner looking for a pairing fault that was not
     # there. Auto-discovery is unconditional; `enabled` now answers "are we federated?".
