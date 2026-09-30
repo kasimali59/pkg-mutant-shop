@@ -61,6 +61,12 @@ ARTIFACTS = [
 # artifact is stale. Without this every artifact looks older than the tree that contains it.
 IGNORE_DIRS = {".git", "__pycache__", "build", "dist", "release", "node_modules", ".cache"}
 IGNORE_EXT = {".elf", ".exe", ".pkg", ".h", ".pyc", ".bak", ".part", ".prev"}
+# RUNTIME STATE IS NOT SOURCE. The running app rewrites companion/config.json (the saved console
+# addresses, the device id) and installed.json whenever anything changes, so with these counted a
+# freshly built exe is "older than its sources" within seconds of being started - a staleness check
+# that fires while you are looking at the thing it says is stale is a check that gets switched off.
+# They are not in the exe, so they cannot make it stale.
+IGNORE_FILES = {"config.json", "installed.json", "pms.log", "sources.json", "known-versions.json"}
 
 
 # THE NOTES ARE UTF-8 AND A WINDOWS CONSOLE IS NOT. `--notes-only` died on the arrow in "3.85.0 ->
@@ -94,6 +100,38 @@ def sha256(path):
     return h.hexdigest()
 
 
+def artifact_version(path):
+    """The version a built artifact reports, or "" if it does not report one.
+
+    TWO ARTIFACTS ARE NOT THE SAME KIND OF FILE. Both ELFs embed web/index.html with `.incbin`, so
+    the line is sitting in the binary as plain bytes and a search finds it - which is exactly how
+    companion/payloads.py reads the version off a downloaded asset. The EXE is a PyInstaller
+    archive and its copy of the page is COMPRESSED, so the same search finds nothing and this
+    refused to release a perfectly good build. Its bundled files have to be extracted, the way
+    tools/check_stale_exe.py already does.
+    """
+    blob = io.open(path, "rb").read(64 << 20)
+    m = re.search(b'var APP_VERSION="([0-9][0-9.]*)"', blob)
+    if m:
+        return m.group(1).decode("ascii", "replace")
+    if not path.lower().endswith(".exe"):
+        return ""
+    try:
+        from PyInstaller.archive.readers import CArchiveReader
+        arch = CArchiveReader(path)
+    except Exception:
+        # No PyInstaller here to read it with. Say so rather than passing an unchecked artifact.
+        die("cannot read %s as a PyInstaller archive - install PyInstaller, or the version inside "
+            "the exe goes unchecked" % os.path.relpath(path, ROOT))
+    for cand in ("web/index.html", os.path.join("web", "index.html"), "web\index.html"):
+        if cand in set(arch.toc):
+            got = arch.extract(cand)
+            page = got[1] if isinstance(got, tuple) else got
+            m = re.search(b'var APP_VERSION="([0-9][0-9.]*)"', page)
+            return m.group(1).decode("ascii", "replace") if m else ""
+    return ""
+
+
 def newest_source(rels):
     """Newest mtime under these directories, ignoring build output.
 
@@ -112,7 +150,7 @@ def newest_source(rels):
         for dp, dn, fn in os.walk(base):
             dn[:] = [d for d in dn if d not in IGNORE_DIRS]
             for f in fn:
-                if os.path.splitext(f)[1].lower() in IGNORE_EXT:
+                if os.path.splitext(f)[1].lower() in IGNORE_EXT or f in IGNORE_FILES:
                     continue
                 p = os.path.join(dp, f)
                 try:
@@ -152,12 +190,10 @@ def check_artifacts(want):
         # THE VERSION THE ARTIFACT ITSELF REPORTS, read the same way the app reads it off a
         # downloaded asset. If this disagrees, the build is older than the source it was built from
         # and every other check here would still have passed.
-        blob = io.open(p, "rb").read()
-        m = re.search(b'var APP_VERSION="([0-9][0-9.]*)"', blob)
-        if not m:
-            die("%s does not contain an APP_VERSION line - it is not a build of this app, or the "
-                "web bundle did not go in" % rel)
-        got = m.group(1).decode("ascii", "replace")
+        got = artifact_version(p)
+        if not got:
+            die("%s does not report a version - it is not a build of this app, or the web bundle "
+                "did not go in" % rel)
         if got != want:
             die("%s was built at %s, not %s - rebuild it" % (rel, got, want))
         src_t, src_f = newest_source(srcs)
