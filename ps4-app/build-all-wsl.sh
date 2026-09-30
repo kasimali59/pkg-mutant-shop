@@ -3,6 +3,7 @@
 #
 # There are three artefacts and they depend on each other in a line, not a circle:
 #
+#   0. pms-agent.prx                  the in-game agent, embedded by BOTH payloads
 #   1. PKG-MUTANT-SHOP-PS4-LITE.elf   the shop, with no package inside it
 #   2. IV0000-PKGM00001_00-...pkg     the home-screen app, carrying (1)
 #   3. PKG-MUTANT-SHOP-PS4.elf        the shop, carrying (2)
@@ -25,15 +26,21 @@
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "======== 1/3  the lite payload (no package inside)"
+echo "======== 0/4  the in-game agent plugin (both payloads embed it)"
+# FIRST, because both payloads .incbin the .prx and an incbin of a stale file is a silent
+# regression: the shop would lay down last build's agent and report success.
+bash "$HERE/plugin/build-wsl.sh"
+
+echo
+echo "======== 1/4  the lite payload (no package inside)"
 bash "$HERE/onconsole/build-wsl.sh" --lite
 
 echo
-echo "======== 2/3  the home-screen app package (carries the lite payload)"
+echo "======== 2/4  the home-screen app package (carries the lite payload)"
 bash "$HERE/tile-pkg/build-wsl.sh"
 
 echo
-echo "======== 3/3  the full payload (carries the package)"
+echo "======== 3/4  the full payload (carries the package)"
 bash "$HERE/onconsole/build-wsl.sh"
 
 echo

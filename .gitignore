@@ -33,3 +33,12 @@ ps5-app/onconsole/cheats.pack
 # PyInstaller outputs when run from the repo root
 /dist/
 /build/
+
+# release/ is build output: tools/release.py rewrites manifest.json, SHA256SUMS and NOTES.md on
+# every run and the artifacts it uploads are already tracked where they are built.
+/release/
+
+# The owner's GitHub token, if it is ever put in a file beside the repo rather than in config.json
+# next to the exe. It is needed only while our own repository is private (see RELEASING.md) and it
+# must never be committed.
+.github_token

@@ -57,6 +57,21 @@ python3 "$TOOLS/check_web.py" || { echo "ABORT: the UI script is broken - not bu
 python3 "$TOOLS/i18n_report.py" --check || { echo "ABORT: a language is missing keys the app uses - not building." >&2; exit 1; }
 python3 "$TOOLS/message_report.py" --check || { echo "ABORT: a user-facing message is off house style - not building." >&2; exit 1; }
 
+# A PS5 game must not offer a PS4 tab in its mods section. The rule lives in one line of
+# modsTabConsoles(), which defers to eligibleConsoles() - so an edit to EITHER can undo it,
+# and the symptom only appears on a two-console fleet, for one class of title.
+python3 "$TOOLS/test_mods_tabs.py" || { echo "ABORT: the mods console tabs offer the wrong consoles." >&2; exit 1; }
+
+# The PS4 shares THIS file's cheat engine through a generated header. If an edit here moves or
+# renames a function the extractor looks for, the PS4 silently stops getting it - so this build
+# fails too, not only the PS4 one. The failure belongs where the change was made.
+python3 "$TOOLS/ps4_sync_cheat_core.py" --check \
+  || { echo "ABORT: the PS4's cheat_core.h no longer matches this file - re-run tools/ps4_sync_cheat_core.py" >&2; exit 1; }
+
+# Following a console that changed address is the only code allowed to REWRITE one, so its
+# refusals matter as much as its successes - see the test for the nine cases.
+python3 "$TOOLS/test_console_tracker.py" || { echo "ABORT: the console tracker would mis-address a console." >&2; exit 1; }
+
 # The 304 lane, and the two copies of etag_matches() that must stay identical.
 python3 "$TOOLS/test_etag.py" || { echo "ABORT: the conditional-GET lane is broken, or the two copies have drifted." >&2; exit 1; }
 

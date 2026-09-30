@@ -32,8 +32,30 @@ import threading
 import urllib.error
 import urllib.request
 
-IP = sys.argv[1] if len(sys.argv) > 1 else "10.0.0.87"
+def _ps4_ip():
+    """The PS4's address, ASKED OF THE COMPANION - never a constant in a test.
+
+    This file had 10.0.0.87 baked in as its default. The PS4 has been at 10.0.0.86 since it moved
+    house, so every run since printed "no PS4 answering ... skipping" and passed. A test that
+    skips itself by default is not a test, and a hardcoded console address is the exact thing this
+    project has a standing rule against.
+    """
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8710/api/devices", timeout=8) as f:
+            d = json.loads(f.read().decode())
+    except Exception:
+        return ""
+    for c in (d.get("consoles") or []):
+        if str(c.get("platform") or "").lower() == "ps4" and c.get("ip"):
+            return str(c["ip"])
+    return ""
+
+
+IP = sys.argv[1] if len(sys.argv) > 1 else _ps4_ip()
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+if not IP:
+    print("test_job_claim: no PS4 in the companion's device list, and none given - skipping")
+    sys.exit(0)
 BASE = "http://%s:8710" % IP
 HDRS = {"Content-Type": "application/json", "Origin": BASE,
         "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}
@@ -72,7 +94,12 @@ def main():
         return 0
 
     clear()
-    if job().get("active"):
+    # BUSY IS THE PAYLOAD'S OWN RULE, not `active`. job_claim() treats a row whose state is
+    # "installed" or "error" as free, and after any install the slot keeps that finished row -
+    # including the icon repair the payload does at boot. Reading `active` alone made this refuse to
+    # run on any console that had ever installed anything, which is every console.
+    _j = job()
+    if _j.get("active") and _j.get("state") not in ("installed", "error"):
         print("FAIL: something is already installing on this console - not racing it")
         return 1
 

@@ -12,6 +12,7 @@ companion/config.json is saved and restored. The shipped exe keeps its own confi
 """
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
@@ -24,9 +25,48 @@ CFG = os.path.join(REPO, "companion", "config.json")
 BAK = CFG + ".regress-backup"
 PORT = 8791
 BASE = "http://127.0.0.1:%d" % PORT
-PS5_IP = "10.0.0.99"
-PS4_IP = "10.0.0.87"
 DEAD_IP = "10.0.0.250"        # nothing answers here - used to force the auto-discovery path
+
+
+def find_consoles():
+    """Ask the network where the consoles are, instead of believing a constant.
+
+    These two addresses used to be hardcoded, and the day the PS4 took a new DHCP lease this whole
+    suite began failing on a console that was working perfectly - which is the exact fault 3.67.0
+    exists to fix everywhere else in the app. A test that asserts an address it invented is testing
+    the network's lease table.
+    """
+    import concurrent.futures as _f
+    here = socket.gethostbyname(socket.gethostname())
+    base = here.rsplit(".", 1)[0]
+
+    def probe(i):
+        ip = "%s.%d" % (base, i)
+        try:
+            with urllib.request.urlopen("http://%s:8710/api/health" % ip, timeout=1.0) as r:
+                d = json.loads(r.read().decode("utf-8", "replace"))
+            if d.get("on_console"):
+                return ip, ("ps4" if str(d.get("platform") or "").lower() == "ps4" else "ps5")
+        except Exception:
+            pass
+        return None
+
+    out = {}
+    with _f.ThreadPoolExecutor(max_workers=64) as ex:
+        for got in ex.map(probe, range(1, 255)):
+            if got and got[1] not in out:
+                out[got[1]] = got[0]
+    return out
+
+
+_found = find_consoles()
+PS5_IP = _found.get("ps5")
+PS4_IP = _found.get("ps4")
+if not PS5_IP or not PS4_IP:
+    print("test_fleet_two_consoles: needs both consoles awake and running the shop "
+          "(found %s) - skipping" % (_found or "none"))
+    sys.exit(0)
+print("  consoles found: PS5 %s, PS4 %s" % (PS5_IP, PS4_IP))
 REAL_KEY = "Riptide-GP2-CUSA02365.pkg"
 
 results = []
@@ -119,7 +159,16 @@ try:
     # when the configured console cannot be reached, and that is the only state in which the
     # bug this suite exists for - discovery OVERWRITING the configured console rather than
     # adding the one it found - can happen at all.
+    # AN IDENTITY THAT MATCHES NO REAL CONSOLE, deliberately - and this is the whole reason this
+    # entry survives. track_consoles is ALLOWED to follow a console that moved, and it now does so
+    # even for an entry that has no id of its own (see test_console_tracker.py). So a nameless PS5
+    # entry at a dead address would be followed straight to the owner's real PS5, which is sitting on
+    # this very network - and this suite would be asserting the opposite of the feature.
+    # Giving it an id nothing answers to makes the refusal happen for the RIGHT reason: identity says
+    # the console on the network is not this one. The result no longer depends on which consoles
+    # happen to be powered, which is this file's own rule two functions up.
     write_cfg([{"id": "ps5", "name": "PS5", "ip": DEAD_IP, "platform": "ps5",
+                "console_id": "dead0000deadbeef",
                 "ftp_port": 2121, "dpi_port": 12800}], DEAD_IP)
     proc = start()
     if proc:

@@ -9,6 +9,2086 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.86.0] - 2026-09-30 - "Our own GitHub, and three bugs that were wearing federation's coat" `[VERIFIED]`
+
+The owner asked why the two PCs were not pairing. They were - in both directions, the whole time.
+Three other things were wrong, and each of them produced a symptom that looked exactly like a
+federation fault. Then the app got its own repository, and its own tile became the place its
+updates arrive.
+
+### "Federation isn't pairing" - it was, and here is what was actually broken
+
+**`/api/federation/peers` reported a config field that gates nothing.** `federation.enabled`
+defaults to `false`, auto-discovery has never consulted it, and `federation.peers` is only a list of
+hand-written extras - so a fully paired machine cheerfully reported `enabled: false`. That is what
+sent us looking for a pairing fault. It now answers the question it appears to answer: *are we
+federated* - plus `discovery` and how many peers were configured by hand.
+
+**A PC said "Not on this PC" about a file it was carrying inside itself.** The exe has bundled
+`ps4-elf/PKG-MUTANT-SHOP-PS4.elf` since long before this panel existed, but `local_path()` only
+ever looked in the owner's payload folder. On a machine without that folder the PS4 shop tile was
+greyed out and unpressable while the bytes sat in the running process. `bundled_ours()` finds them.
+Frozen builds only: from source the repo copy is found the ordinary way, and a checkout must not
+claim a build it has not made.
+
+**The PS5's ELF is 34 MB and deliberately not bundled** - so a second PC can only ever get it from
+the PC that built it, which needs us to *offer* it. `fleet_summary()` skipped our own artifacts on
+the reasoning that every machine builds its own; that is not the situation anyone is actually in.
+It advertises them now. `peer_with()` still matches on size, so a peer can only stand in for a
+byte-identical build, and the peer runs its own deploy lane rather than having bytes shipped to it.
+
+### The tile that said "Running" and did not look it
+
+The tile's colour was chosen by testing "is the file here?" **before** "is it running?", so a
+payload the console was plainly running was painted as unreachable. On a second PC that is exactly
+our own shop entry: nothing on that PC, nothing in the bundle to send, and unmistakably alive on the
+console in front of you. **The colour follows the sentence now** - running wins, and where the file
+is only decides the colour when nothing is running.
+
+### Our own GitHub, and the app's own tile as the update lane
+
+There is a repository now, and the app reads its releases the same way it reads ftpsrv's:
+
+* our catalogue entry carries a `repo`, an `asset`, a `marker` and a version pattern like any other
+  upstream, so the existing per-item update row offers a new shop build, verifies the marker
+  **inside** the download, writes `.part` and only then moves, and keeps the old file as `.bak`;
+* `pick_asset` already resolved PS4 vs PS5 out of one release, which is why this cost almost no new
+  code. Three guards had to go, each correct when it was written: the update check skipped `ours`,
+  the update action answered *"This app updates itself, not from here"*, and the fleet did not
+  advertise `ours`;
+* **our version can never be read by `identify_elf`, and the reason is structural.** The PS5 ELF
+  embeds ftpsrv, nanodns, kstuff, OnionHEN, Payload Manager and the WebKit autoloader, so every one
+  of those projects' markers is inside it; the identifier requires exactly one hit and would answer
+  "unknown" for ever. That is why our own entry showed no version at all. It is read from the one
+  line only our own build writes, `var APP_VERSION="…"`, and it immediately proved its worth: the
+  copies in the owner's folder are **3.83.3** while the console runs 3.85.0;
+* **the tile now shows the version of the file, not of the page you are reading.** It used to show
+  the running build, which sounds right and is wrong - the button sends the *file*, and those are
+  routinely different. Showing the running number would have had the update row offer
+  "3.85.0 → 3.86.0" about a file that was two builds older, and a press would have sent the old one.
+
+**A private repository's 404 is not "no releases".** GitHub deliberately answers 404 for a private
+repo exactly as for one that does not exist, so an unauthenticated check cannot tell the two apart.
+The app reports *no releases* only when it is authenticated and *not visible* otherwise, and the
+panel has its own sentence for that in all fifteen languages. Assets now record their API URL
+alongside the browser one, because a private release asset is not fetchable from the browser link;
+the token comes from `updates.github_token` or `PMS_GITHUB_TOKEN`, is never logged, and goes to no
+host but `api.github.com`. The release cache key carries whether we were authenticated, or one
+tokenless 404 would be served back to a caller that now has a token.
+
+### The repository itself
+
+* a README with the real UI in it, a full feature list in `docs/FEATURES.md`, and
+  `RELEASING.md` - what is worth publishing at all, and what a release contains;
+* **`tools/release.py`**, which refuses rather than guesses: the version must already be in all four
+  sources, each artifact must *report* that version and be newer than the sources it was built from,
+  every gate must pass, and the notes come out of this changelog. `--dry-run` does all of it and
+  changes nothing. The asset names are a contract - the app picks a console's file out of a release
+  by name;
+* **`companion/config.json` is no longer tracked.** It is the owner's live config: this machine's
+  device id was in the history, and the moment `updates.github_token` was used a token would have
+  followed it. `config.example.json` is the template, `start.cmd` copies it, and the app falls back
+  to its defaults when neither exists.
+
+### Gates
+
+`tools/test_payloads.py` is at **237 checks**. The three fixes above are pinned separately - fixing
+any two still leaves a wrong tile - and each new check was perturbed to red before being kept.
+
+## [3.85.0] - 2026-09-30 - "Any device, whether or not it holds the files" `[VERIFIED]`
+
+The owner copied the exe to a second PC. Every tile there read **"Not on this PC"**, greyed and
+unpressable, with no status at all - while the console sitting next to it was carrying all eight
+payloads and running five of them. The app is meant to behave as one thing however many devices are
+looking at it, and the panel was the one part that did not.
+
+### Two different answers that were being given as one
+
+*"This PC does not have it"* and *"nobody has it"* are not the same, and only the second is a
+reason to disable anything. The list route now says **where** each item can be had from - `pc`,
+`console`, or a named peer - and a tile is pressable whenever any of them can hand the bytes over.
+
+* **Every payload is on the console already**, because both ELFs carry them and write them out at
+  boot. So on a machine with no folder at all, all eight are usable.
+* **Status is decided before the file question.** Whether something is running is a fact about the
+  console; where its file lives only matters when something has to be sent. A payload running on
+  the PS5 now reads *Running* from every device, not *"not on this PC"*.
+* **A companion advertises what it holds** in `/api/federation`, and an action that needs bytes this
+  PC does not have is forwarded to a peer that does - the same request, one hop further, with the
+  peer's own reply passed back. `via_peer` stops two companions bouncing it between them.
+
+### The trap that made "start the console's own copy" fail
+
+Asking a console to start a payload it carries answered **"Payload Manager did not take it"**, every
+time. That is the basename trap this repo already documents: `/loadpayload` resolves by **basename**
+against pldmgr's own registered directory, not by the path it is handed - so a file in
+`/data/pkg-mutant-shop/payloads` is never the one that runs. The console now stages the payload into
+`/data/pldmgr/payloads/<name>/<name>.elf` first, which is exactly what `companion/deploy.py` has
+always done for our own ELF, and loads that. Copied only when it differs, so a second press costs
+one stat.
+
+Verified from a companion configured with a folder that does not exist: **"Started FTP server from
+the console's own copy"** on the PS5 and **"Started nanodns from the console's own copy"** on the
+PS4, with the machine holding no payload files whatsoever. The PC that does have them is unchanged -
+it still starts things without copying when the bytes already match.
+
+Also fixed on the way: the PS5's `write_all` returns `void`, so the staging copy writes in its own
+loop rather than silently ignoring a short write and handing Payload Manager a truncated ELF.
+
+`test_payloads.py` is **229 checks**. One of the new ones was a check that could not fail - it
+looked for a ternary that survived the regression it was meant to catch - and was rewritten to
+compare the FIRST mention of each branch. Perturbed, watched to pass, fixed, perturbed again,
+watched to fail.
+
+---
+
+---
+
+## [3.84.4] - 2026-09-30 - "An update that goes everywhere it needs to" `[VERIFIED]`
+
+The owner took the WebKit autoloader 0.5.2 update, the tile showed 0.5.2, and pressing it answered
+**"that file is not on this PC"**. Four separate faults were behind it, each found by reproducing
+rather than reasoning.
+
+* **The panel and the button were reading different catalogues.** The list route rescans the folder
+  live; the action route still read the one baked at build time - so the instant the update renamed
+  `…_v0.5.1.elf` to `…_v0.5.2.elf`, the lookup was describing a filename that no longer existed.
+  One view of the folder now, for the serve registry too.
+* **The console kept the old bytes.** Both ELFs write the payloads they carry to PB_DIR at boot, so
+  "start the console's own copy" is normally right - but after an update it would have silently run
+  the previous build while the tile showed the new number. Run now makes sure the console has the
+  bytes this PC holds before starting anything, and skips the copy when they already match. The
+  console's own copy is refreshed too, so the next press costs nothing.
+* **The console was asked what it HAD, not what it would RUN.** The first version listed PB_DIR,
+  which still contained leftovers from older builds under the same stem - and one of them won the
+  size comparison. It reports one entry per bundled payload now: the file `/api/payloads/load`
+  would actually start.
+* **`qparam()` takes the request PATH and I passed it the whole request.** It still finds a `?` -
+  in the request line - so it parsed a value with `" HTTP/1.1"` on the end, matched nothing, and
+  both consoles answered *"this build does not carry that one"* about a payload they were holding.
+  Every other caller in both files passes `rawpath`; a check now makes sure they keep doing that.
+
+**And the reply says which of the two things happened.** "Sent X to the PS5" when nothing was sent
+is a small lie that makes a 2 MB transfer look like it happens on every press. It now reads
+*"Started X on the PS5 - it was already there"* when the bytes were already correct, on both
+consoles - the PS4 included, where our own ELF reads PB_DIR and posts it to GoldHEN so nothing
+crosses the LAN either.
+
+Verified live: `nanodns` on the PS4 and `ftpsrv` on the PS5 both start from the console's own copy
+with no transfer, and the WebKit installer - the one that started this - starts cleanly at 0.5.2.
+`test_payloads.py` is **217 checks**, both new ones perturbed and watched to fail.
+
+---
+
+---
+
+## [3.84.3] - 2026-09-30 - "A service that answers nobody can still be seen" `[VERIFIED]`
+
+The owner started **nanodns on the PS4 from this panel, it worked, and the tile stayed grey** -
+*"Nothing listens for it, so there is no way to tell"*. It was telling the truth about what it had
+tried, and what it had tried was wrong.
+
+**What was measured before changing anything.** nanodns listens on **UDP 53**, so a TCP connect can
+never see it. The obvious replacement - ask it a DNS question - does not work either: neither
+console answered a query on :53, not for ordinary names and not for the Sony domains nanodns exists
+to intercept, **even on the PS5 where Payload Manager confirms it is running**. So there is no way
+to observe it from off the console at all.
+
+**What can be observed, from the console, is that the port is taken.** `udp_port_taken()` tries to
+bind it; a refusal because the address is in use is proof something holds it, and the socket is
+closed either way so a genuinely free port is left as it was found. Deliberately **no
+`SO_REUSEADDR`** - with it the bind would succeed alongside the running server and the answer would
+be "free" for ever, which is the same permanently-wrong shape as the `9021`-vs-`10101` mix-up.
+127.0.0.1 and 0.0.0.0 are both tried, because a server bound to one does not always conflict with
+the other and either conflict is proof.
+
+**And the PC now asks the console instead of probing it.** The console is the only one that can run
+that bind test, and on a PS5 it also has Payload Manager's process list - which is how kstuff and
+ShadowMountPlus are seen. One request gets all of it; probing from the PC got none of it. The old
+path is still there for a console too old to answer.
+
+Result, verified live: the PS4 reports `['ftpsrv.elf', 'nanodns.elf']` and the tile reads
+**nanodns · Running · 0.4** in green.
+
+`test_payloads.py` is **215 checks** now, including that nanodns is probed by binding and that the
+bind test carries no `SO_REUSEADDR`. Both were perturbed and watched to fail.
+
+---
+
+---
+
+## [3.84.2] - 2026-09-30 - "Every payload names its version" `[VERIFIED]`
+
+* **The right upstreams.** The owner runs drakmor's forks, not the originals: `drakmor/ftpsrv`,
+  `drakmor/nanoDNS`, and `aydencharles/onionHEN` for OnionHEN - the fork that was configured before
+  it had no releases at all, which the panel had been reporting honestly.
+* **Every payload shows a version now, and none of them is a guess.** Three carry one in the binary
+  (kstuff 1.11, Payload Manager 0.5.2, WebKit autoloader 0.5.1). The other four carry none anywhere -
+  and if the file on disk is **byte-for-byte the size of an asset in a release, it IS that release**.
+  The owner's `ftpsrv-ps4.elf` is 166,072 bytes and so is 1.16-ng-stable's. So the panel reads FTP
+  server 1.16-ng-stable, nanodns 0.4, ShadowMountPlus 1.7beta2, OnionHEN v0.0.13 - each recorded as
+  coming from the release rather than from the file. A byte-exact match also means there is nothing
+  to update, whatever the version strings look like.
+* **The check runs itself when the panel opens**, using the six-hour cache, so the versions are
+  simply there. It only speaks up if it found something; the button is for asking again now.
+* **The Cancel option is gone.** Pressing the tile again closes the choice, which is where the press
+  already was. Run and Send again are the two real answers.
+* **The Payloads & Homebrews button sits under the queue** - centred on it to the pixel, at every
+  width, with no JavaScript. It was 326px to the left because `.hrow2` is `space-between` and the
+  button was its middle child, so its position was whatever the byline and the source bar left over.
+  Two attempts to measure and nudge it were worse than useless: the row redistributes the space the
+  margin consumes, and an absolutely positioned child is measured from a containing block that is
+  not the one it appears to sit in (that cost 138px and a debugging session). The button shares a
+  column with the queue now, so "under it" is true by construction.
+
+---
+
+---
+
+## [3.84.1] - 2026-09-30 - "The panel, made to work like a panel" `[VERIFIED]`
+
+Everything in this release is the Payloads & Homebrews panel answering the owner's review of it.
+
+### Updates are a list you act on, not a number
+
+"Check for updates" used to say *"1 have a newer release upstream"* and stop there. It now returns
+**one row per item** - title, `0.5.0 → v0.5.1`, and its own **Update** button - because replacing a
+working payload is a decision per payload. Pressing it downloads the release asset, verifies it and
+puts it where the old file was.
+
+Proven on the real thing: the WebKit autoloader installer published **v0.5.1** the same day, the
+panel found it, and the button fetched `webkit-autoloader-installer_v0.5.1.elf` (2,311,424 bytes,
+the exact size the release declares), retired 0.5.0, and the catalogue re-read **0.5.1 out of the
+new binary** with no rebuild. Both consoles now carry it.
+
+The download refuses three things, each worse than not updating: overwriting before the transfer is
+complete (it writes `.part` and only then moves), accepting a file that is **not the thing it
+replaces** (the marker that identifies the project is checked *inside* the downloaded bytes), and
+leaving two copies behind. The old file is kept as `.bak` until the new one is in place.
+
+GitHub's rate limit is reported as itself - *"GitHub is rate-limiting these checks"* - rather than as
+a generic failure, because at 60 requests an hour it is the ordinary answer, not an exotic one, and
+it must not read like "this project has no releases".
+
+### The panel
+
+* **One header row**: Back, the title centred, the PS4/PS5 tabs, Check for updates, close. The title
+  takes the slack from both sides so it stays centred whatever a translation does to the buttons.
+* **Tiles carry state and version, nothing else.** What a thing is *for*, which project it comes
+  from and the file it is, moved into the hover tooltip where they cost no height. A payload that
+  changes the jailbreak layer keeps a `⚠` on its name, because that is a warning, not a description.
+* **Alphabetical**, by what the tile actually says.
+* **A press on something already running or already installed asks.** It opens a row naming what
+  each next press would do - **Run** / **Send again** / **Cancel** - instead of the press-twice-and-
+  hope it replaced. And **Run means run**: both ELFs already wrote the payloads they carry to disk,
+  so starting one copies nothing. Verified: pressing Run logged zero uploads.
+
+### It keeps itself current
+
+The PC now rescans the folder whenever its fingerprint changes and serves that, so a file dropped in
+while the panel is open appears **in about three seconds with nobody refreshing anything** - measured
+by dropping a renamed copy of nanodns into a new folder and watching the grid go from 8 tiles to 9,
+identified by content, then vanish again when it was removed.
+
+That is affordable because of what it costs: the folder fingerprint is **0.000 s** when nothing
+moved, a rescan is 0.48 s and only happens when it did, `dir_stats` memoises the 3,000-file RetroArch
+walk, and the console probes are cached for four seconds however many pages are open. The answer
+carries a `sig` covering the folder, what is running and what is installed - an unchanged `sig` means
+the poll costs one request and **no DOM work at all**.
+
+### Bugs found by doing it
+
+* **A versioned filename in an `.incbin` breaks the build the first time an update lands.** The
+  update produced `…_v0.5.1.elf` and `sync_payload_bins --check` went red pointing at a file that no
+  longer existed. The repo's copies are named by catalogue id now - the identity that does not move,
+  because it comes from a marker inside the binary - and all three matchers reduce a filename to the
+  same stem so the page can still ask using the name the owner sees.
+* **Three running payloads read as stopped** the moment those names diverged, because the page was
+  still comparing raw filenames. The same class of mistake as matching a process by filename, which
+  this panel had already been bitten by once.
+* **Two copies of one payload drew one tile.** The grid keyed on the catalogue id, which two files of
+  the same project share; it keys on the file now. Found by the live-rescan test.
+* **The PS5 ftpsrv would have downloaded the PS4 asset** - one release carries both, and "shortest
+  name ending .elf" picked the wrong console. The platform is part of the match now.
+* A literal inside `toast(t(cond?"a":"b"))` reads to `i18n_report` as untranslated English, and it is
+  right to count it; the key is chosen before the call.
+* A test that pinned `0.5.0` turned red when the update feature did its job. It pins the invariant -
+  that the version is read *from the file* - not the number.
+
+`test_payloads.py` is **164 checks** now, including that no embedded path carries a version and that
+all three stem implementations agree. Both were perturbed and watched to fail.
+
+---
+
+---
+
+## [3.84.0] - 2026-09-30 - "Payloads & Homebrews" `[VERIFIED]`
+
+A new panel in the top bar, next to the byline: **Payloads and Homebrews**, two columns, three to a
+row, aimed at whichever console's tab is selected - the same rule the cheats panel follows. The left
+column sends a payload; the right installs a homebrew through the engine the games already use.
+
+### What it does
+
+* **Platform-aware, from the folder rather than a filename.** The catalogue is built from
+  `C:\Mutant Payloads & HomeBrews` by its shape - `Payloads/PS5/...`, `Homebrews/PS4/...` - so a PS4
+  tab shows PS4 things because that is where they were put, not because a name was parsed for the
+  letters "ps4". A PS5 package can never be handed to a PS4.
+* **State that was observed, never assumed.** A tile is green because a port answered *or* because
+  Payload Manager listed the process; a homebrew is green because the console lists the title. A
+  payload with nothing to observe says *"Nothing listens for it, so there is no way to tell"* rather
+  than showing a light nobody can back.
+* **A second press is a different decision from the first.** Sending a payload that is already
+  running gives you a second copy of it; installing a homebrew that is already there replaces it; a
+  jailbreak-layer payload is yours to start. All three arm the tile and say what the next press will
+  do, instead of doing it.
+* **It works with every PC switched off.** Both ELFs carry the payloads and the catalogue, and both
+  answer `/api/payloads` themselves.
+
+### The measurements that shaped it
+
+The owner asked for the homebrew packages to be embedded too, and suggested compression. Both were
+measured rather than argued about. Compression is not the lever: a PKG is a PFS image whose contents
+are already compressed, and real samples gzip to 98.9% (Itemzflow), 98.2% (Itemzflow PS5), 92.0%
+(FPKGi) and 93.8% (PS4-Xplorer) - about a tenth across the set. And the PS5 ELF was already 34 MB of
+which **33.1 MB was blobs**, leaving about 1 MB of code; the packages would have taken it past
+300 MB, in an ELF that Payload Manager loads into RAM.
+
+So the split is by arithmetic, not preference. **Payloads are embedded** - PS5 32.6 -> 42.9 MB, PS4
+8.7 -> 9.0 MB. **Homebrews are seeded to the console's own disk once** and installed from there for
+ever after, because `pkgfile_path_allowed()` already accepts `/data/…*.pkg` and serves it to the
+installer over loopback. "No PC needed" does not require the bytes to be inside the ELF; it requires
+them to be on the console, and there is no moment when a console has this app but has never met a
+PC - the ELF itself has to arrive somehow, and the seed rides that trip.
+
+### Two fields where there was one
+
+`payload_bundle.h`'s `port` meant both *"this is how you tell it is running"* and *"launch it when
+that port is free"*. Measured on this console: **Payload Manager lists `shadowmountplus.elf` at a
+live pid while `:10101` is closed**, so under one field it looked stopped *and* was a candidate to
+be started again on every boot - the same shape of wrong answer the `9021`-vs-`10101` mix-up gave
+for months. `port` and `autostart` are now separate, and only ftpsrv and ShadowMountPlus ever start
+unasked. kstuff, OnionHEN and the WebKit installer ship at `autostart 0`, which is the rule that
+file already stated in its own words: *a payload that changes the jailbreak layer is the user's call
+to make, never a side effect of installing our app.*
+
+### Bugs found by building it
+
+* **Payload Manager reports the name a payload was BUILT as, not its filename.** `ftpsrv-ps5.elf`
+  runs as `ftpsrv.elf` and `pldmgr_v0.5.2.elf` as `pldmgr.elf`, so matching raw filenames reported
+  two live payloads as stopped. Both ends compare stems now.
+* **`Ps5Bridge.pldmgr` is a property, not a method** - calling it threw *after* the upload had
+  already succeeded, so the file landed and the press still said it failed.
+* **`classList.toggle(name, force)`** does not work in the console's browser; `check_web.py` caught
+  it before it shipped, which is what that gate is for.
+* Walking back from `"contentId"` to the nearest `{` lands on the **sibling** `ageLevel` object,
+  which is valid JSON and parses happily - it just is not the right object. That is how the Internet
+  Browser package gets its real name out of the `FIH` container it hides inside.
+
+### Identity comes from the file, not its name
+
+The owner renames things, and said so plainly. So a payload is recognised by a **marker inside the
+binary** - the ftpsrv protocol banner, `Kstuff Lite`, `WebKit Autoloader`, `Payload Manager v` - and
+keeps its port, its upstream and its jailbreak warning whatever the file is called. Proven by
+renaming `kstuff.elf` to `totally-different-name.elf`: still identified as kstuff, still version
+1.11, still marked jailbreak-layer.
+
+Three of them carry a **readable version inside**, which now beats the filename: kstuff 1.11,
+Payload Manager 0.5.2, WebKit autoloader installer 0.5.0. The rest have it only in the name, and the
+catalogue records `version_from` so the panel never presents a guess as a fact.
+
+Homebrew packages are matched to the catalogue **by exact byte count**, for the same reason.
+
+### Everything works with no PC at all
+
+* Both ELFs carry the payloads and the catalogue and answer `/api/payloads` themselves.
+* `/data/payloads` is created on the PS4 and the bundled payloads are mirrored into it - that is the
+  folder people drop an ELF into over FTP or from a USB stick, and it now exists with the right name
+  and something in it. We never load from there; `PB_DIR` stays ours.
+* The console searches **its own drives** for homebrew packages - our data folder, `/mnt/usb*`,
+  `/mnt/ext*` - so a stick with packages on it works with nothing else running. On the first live
+  run it immediately found three the owner already had.
+* A console reports the title ids it has installed, so a homebrew already on it says **Installed**
+  on the console's own page.
+* A payload the PC does not have is started from **the console's own copy** instead of being
+  refused, which is what makes the panel work from a PC that never had the owner's folder.
+
+### Proven end to end on the real consoles
+
+* Itemzflow seeded from the PC to `/data/pkg-mutant-shop/homebrews`, installed **from the console's
+  own copy with no PC in the install path**, and confirmed by the only thing that counts:
+  `bgft.db` row 86, `ITEM00001`, **status 1036**. The panel then showed it green on the PS5's own
+  page.
+* The Internet Browser package went down **both** lanes - loopback and PC-served, the identical call
+  a game makes - and the console refused it both times (`0x80B21103`, `0x80B22400`). That is the
+  owner's chosen behaviour working: list it, hand it to the engine, let the console decide.
+* ShadowMountPlus sent from the panel and confirmed running at pid 104.
+
+### More bugs found by building it
+
+* **A payload's mirror sat after an early `continue`**, so it was only written on a boot where the
+  primary copy had changed - which is never, after the first. `/data/payloads` stayed empty while
+  our own folder had both files. Measured on the console, then fixed and re-measured.
+* **A 900-byte buffer truncated the installed-title list at 72 entries**, dropping the very homebrew
+  that had just been installed - so the panel said "Install" about something already there. This
+  console reports 117.
+* **`/api/payloads` already existed on the PS5** (it reported the boot log), so the one added for
+  the panel was unreachable dead code behind it. Both answers come from the one route now.
+* Three C ordering mistakes the compiler caught - a function defined inside another function, and
+  two used above their definition.
+
+### Also
+
+* The owner's **ShadowMountPlus replaces the one we shipped** (2,437,704 bytes vs 2,465,896).
+* `THIRD-PARTY-NOTICES.md` records all six newly embedded binaries, and says plainly which licences
+  were **not** verified rather than guessing them.
+* New gates: `gen_payload_catalog --check`, `sync_payload_bins --check` and `test_payloads.py`
+  (118 checks), all three wired into `ready_check`. Each was perturbed and watched to fail.
+
+---
+
+---
+
+## [3.83.3] - 2026-09-28 - "The icon was a build behind" `[VERIFIED]`
+
+**The four notes were removed in 3.83.1 and 3.83.2, but only for whoever starts the shop from the PC.**
+The PS4's home-screen app carries its own copy of the payload, and that copy was still the 03:11
+build - so pressing the icon served a panel with all four sentences back.
+
+The PS4 side is three artefacts in a line, and `onconsole/build-wsl.sh` only builds the last one:
+
+    0  pms-agent.prx                   the in-game agent, embedded by both payloads
+    1  PKG-MUTANT-SHOP-PS4-LITE.elf    the shop, with no package inside it
+    2  IV0000-PKGM00001_00-....pkg     the home-screen app, carrying (1)
+    3  PKG-MUTANT-SHOP-PS4.elf         the shop, carrying (2)
+
+Rebuilding (3) alone re-embeds whatever (2) already was, so the shipped payload was current and the
+icon inside it was three versions old - and there is no gate that compares the page inside the tile
+package with `web/index.html`, so nothing said a word. `bash ps4-app/build-all-wsl.sh` builds all
+four in the one order that works; that is what this release is.
+
+**Why it mattered more than "the icon shows an old panel".** `extract_web()` writes every embedded
+web file to `/data/pkg-mutant-shop/web` with `O_TRUNC` on load (only `config.js` is spared, because
+deploy writes the companion URL into it), and `serve_static()` serves that directory. So a boot from
+the stale icon did not just render an old page for itself - it **overwrote the page on disk**, for the
+console's browser and for any PC pointed at that console, until a current payload was loaded again.
+
+---
+
+---
+
+## [3.83.2] - 2026-09-28 - "The line that duplicated the picker" `[VERIFIED]`
+
+The fourth note out of the same section, asked for once 3.83.1 made it visible. **"Cheats in your
+library exist for: 01.00, 01.26, 01.33_2."** was written as the *tail* of the version-mismatch
+paragraph, so removing the paragraph left it standing on its own directly above the version picker -
+which lists the same versions as buttons that can actually be pressed. Two lines for one fact, the
+weaker one first.
+
+A mismatched file now draws nothing of its own: the header says `Version mismatch <file>` in the warn
+colour, the line beneath it gives `file v01.26 / installed v01.33`, and the picker names every version
+the library holds. Nothing was lost - every fact those notes carried is still on the screen.
+
+**The arm is empty, not collapsed.** `unsure` is `okv && no installed version`, so it cannot be true
+while `okv` is false and a plain `if(unsure)` would behave identically *today* - but that is a fact
+about how `unsure` is computed three lines above, and this exact chain has already been broken once by
+reasoning that way about a neighbouring branch. `if(!okv){ }` consumes its own case and cannot become
+wrong when something near it changes. `test_panel_console_state.py` pins four removed call sites and
+three branch shapes now, each perturbed and watched to fail.
+
+---
+
+---
+
+## [3.83.1] - 2026-09-28 - "Three fewer things to read" `[VERIFIED]`
+
+Asked for by the owner, and nothing else in the section was touched. Three notes are gone from the
+game panel's cheats area, on both platforms:
+
+* **"This cheat file was built for game version 01.26, but your game is 01.33."** The header
+  directly above it already says `Version mismatch <file>` in the warn colour with
+  `file v01.26 / installed v01.33` on the line beneath, so the paragraph restated a fact the panel
+  had just stated twice. What the header does *not* carry stayed: the line naming which other
+  versions the library holds, because that is what sends them to the version picker. **That line was
+  removed too, hours later, in 3.83.2 above** - standing on its own it duplicated the very picker it
+  was pointing at.
+* **"The in-game helper is already on for this game. Start it and the cheats will work."** An armed
+  PS4 title now draws nothing at all here - no note and no button. The helper has armed itself since
+  3.76.0; a panel that narrates a thing it did for you is noise.
+* **"Mods are listed only - launch the game to turn them on."** The controls say this by being
+  disabled. The patches wording is kept, because nothing else on the panel says a game patch needs
+  the game running.
+
+**The branches stayed.** Each of those notes sat in an if/else-if chain that decides what the
+section says next, and removing a note by collapsing its condition hands the case to the arm below -
+which is exactly how the master-code note once stopped a title being told to install the game first.
+So the not-running arm still consumes the not-running case and the armed arm still suppresses the
+button; only the sentences came out. `test_panel_console_state.py` now pins both halves - the three
+call sites must stay gone *and* the two branch shapes must stay - and each was perturbed and watched
+to fail. The dictionary entries are left in all fifteen languages as dead weight rather than
+deleted, so the wording is one line away if it is ever wanted back.
+
+---
+
+---
+
+## [3.83.0] - 2026-09-28 - "The master code is gated like everything else" `[VERIFIED]`
+
+**This fixes a crash 3.82.0 caused, and explains the one that came before it.** The owner reported
+both plainly: Dark Souls II's 01.02 cheats used to activate and then crash when they hit an enemy;
+after 3.82.0 they crashed *instantly, on pressing the cheat*.
+
+### One cause, two symptoms
+
+The master's cave begins `48 89 1D F9C7B8FD` - `mov [rip-0x2473807], rbx` - issued from +0x2077807,
+which resolves to **image offset -0x3FC000, absolute 0x4000**. "1 hit kill" reads the same slot with
+`cmp r15, [rip-0x2473876]`. Measured through the in-game agent on the owner's console: **0x4000 is
+ST_UNMAPPED** while 0x400000 reads fine. The trainer needs eight bytes of scratch below the
+executable and there are none.
+
+    before 3.82.0   "1 hit kill" installed its own cave, which READS that slot, so the game faulted
+                    when the damage path first ran = "crashes when I hit an enemy". The other five
+                    cheats were silently refused - their cave was still empty, so the gate saw zeros
+                    where the file documented the master's instruction.
+    3.82.0          also installed the master, whose hook sits in a path that runs constantly. The
+                    cave ran at once, wrote to 0x4000, and the game died the instant a cheat was
+                    pressed.
+
+So the blind write did not introduce the fault. It made the same fault fire immediately and reliably
+instead of on a hit. **The crash was in the cheat file all along and nothing was checking.**
+
+### What I shipped that was wrong on its own terms
+
+```c
+if (mem_read(pid, addr, cur, (size_t)wl) != 0) { bad++; continue; }
+if (memcmp(cur, w, (size_t)wl) == 0) { skipped++; continue; }   /* already in place */
+plan[i] = 1;
+```
+
+Nothing between "the read worked" and "write it". A master entry documents no original bytes, so
+there was no expect-gate to fall back on - and every other write in this engine has one. On a build
+the file did NOT fit, that would put a jump into arbitrary code. It is not what happened here (the
+console reports APP_VER 01.02 for a 01.02 file, and both hook sites hold exactly the bytes their cave
+re-executes), but it is what the code permitted, and it is gated now.
+
+**A correction, because I stated this the wrong way round first:** I initially read 0x5BCBA5 as an
+absolute address rather than base + offset, found `5D C3 48 8B 03` (`pop rbp; ret`) there, and wrote
+it up as "a jump landed on pop rbp; ret in a build the file was not for". Those bytes came from the
+wrong place. `/api/mem/read` takes an absolute address; cheat offsets are image-relative.
+
+Measured across the whole shipped library: 8,126 cave mods and 20 master blocks contain 265
+identifiable RIP-relative operands. 260 resolve to a non-negative image offset. The other five all
+resolve to exactly -0x3FC000, in three files (`CUSA01589_01.02`, `CUSA07439_01.00`,
+`CUSA07439_01.03`). Five identical values is the authoring tool's convention, not decoder noise -
+which is what makes this checkable rather than guesswork.
+
+### The four gates
+
+Nothing is written unless all four pass, for the master **and** the mod, decided before anything is
+touched:
+
+| | |
+|---|---|
+| **CAVE** | an entry writing a routine into space the file treats as empty must find it EMPTY - all zeros - or already holding what it is about to write. A mismatched build would have real bytes there. |
+| **HOOK** | an entry patching real code with a jump into one of this master's own caves must find bytes that appear VERBATIM inside that cave's body. A trampoline re-executes the instruction it stole, so this is the invariant that says "right site, right build". All 21 hooks in all 20 master blocks jump into a cave the same master writes, and 19 of 21 return to hook+len - so it is the structure the format has, not one invented here. |
+| **REACH** | every RIP-relative target in a run about to be written must be a non-negative image offset AND readable. This is the one that catches the 0x4000 scratch. |
+| **TOGETHER** | master and mod are decided first and written second. A mod that is going to be refused can no longer leave an irreversible master behind - and a master that cannot be installed refuses only the mods that sit INSIDE its caves, so a plain byte patch elsewhere in the same file is untouched. |
+
+A cave-resident cheat's documented "off" bytes *are* the master's bytes, so the mod's gate reads
+memory and then overlays the master's **plan** before comparing (`master_overlay`). Without that,
+deciding first would refuse every such cheat; writing first is the bug being fixed. Both, and
+neither, were wrong.
+
+### Asked, not told
+
+The engine could apply a cheat and it could refuse one, and there was no way to ask what it was going
+to do without letting it. That is why a crash was the first evidence. `cheat_apply_blk` now takes
+`check_only`, exposed as `GET /api/cheat/apply?...&check=1`: every read, every gate and every reason
+identical, returning before `mem_write` is ever called, with the same `detail` string - so a
+diagnostic and the real thing cannot disagree about why something was refused.
+
+**It is how this fix was proved on the owner's own console while their game was running and they were
+asleep.** All seven Dark Souls II cheats, asked:
+
+    mod 0 God mode              rc=-6  master_refused=5   needs a scratch space this game does not have
+    mod 1 infinit Stamina       rc=-6  master_refused=5
+    mod 2 infinit Souls Memory  rc=-6  master_refused=5
+    mod 3 Level max             rc=-6  master_refused=5
+    mod 4 Infinit Souls         rc=-6  master_refused=5
+    mod 5 1 hit kill            rc=-4  noreach=1          its own code reaches nowhere
+    mod 6 infinit Consomable    rc=1   would_write=1      this one is right for this build
+
+and then every byte re-read: `5BCBA5`, `5C3F70`, `2077800`, `19054E`, `107D1B1` all exactly as before.
+Then mod 6 applied for real (`4429F0` -> `83E800`), read back, reverted, read back. The game was still
+running and byte-identical to how it was found.
+
+And finally the path the owner actually presses - `POST /api/mods/CUSA01589/toggle` for God mode, the
+thing that crashed the game in 3.82.0:
+
+    ok=false  rc=-6
+    "This cheat needs a scratch space in memory that this game does not have, so nothing was changed.
+     It was written for a setup this console cannot give it, and forcing it would crash the game."
+
+with `5BCBA5` still holding `8B8370010000`, the cave still zeros, and Dark Souls II still running.
+
+### So what does the owner get on Dark Souls II
+
+One working cheat, six honest refusals, and no crash. Before 3.82.0 they had one working cheat, one
+that crashed on hitting an enemy, and five that silently did nothing.
+
+**And the six cannot be made to work as written** - not by us, not by anything, until something
+provides that scratch page. It is NOT a version problem: the console reports 01.02, the app picks the
+01.02 file, and it reports `compatible: true, "exact version"`. The panel now says which of the two
+reasons applies, in words, rather than "the cheat file was made for a different version of the game".
+
+The route that would make them work is written up in `research/cheat-formats.md`: the slot is a single
+qword, every reference to it sits inside a run we write, and there is zero-filled padding at the end of
+the image - so the displacement could be pointed at a slot inside the game. It is not implemented
+because a scratch slot has to be **writable by the game**, and nothing available today says which of
+the image's segments are (the agent's map carries ranges, not protections, and it makes a page writable
+for its own write and then restores it). Choosing a slot without that would be the same class of guess
+that caused this. The missing piece is segment protection in the agent's OP_STATUS, plus a live test on
+a console somebody is sitting at.
+
+### Also in this build
+
+* **`Disable-all` now removes a removable master code.** The panel has been promising that in 15
+  languages since 3.82.0 and nothing called the removal path - `cheat_master_apply(want_on=0)` had no
+  caller. A sentence on a television that the code does not implement is worse than no sentence.
+* **Removing a master expects to find it there.** The first version compared against the wrong state
+  and answered "the space it writes into is not empty" - which is true by definition when the thing
+  you are removing is in it. Caught by the test, not by reading.
+* **`tools/cheat_doctor.py` explains the scratch.** It decodes the same operands the engine does, with
+  the same prefix table, and prints `UNREACHABLE: 48891d reaches image offset -0x3fc000, below the
+  executable` against the master and against "1 hit kill". It also reports the master block itself, and
+  says plainly that a master entry is not judged the way a mod is, so its NEITHER column is not by
+  itself a fault.
+### The missing primitive is no longer missing: a signature search
+
+`research/cheat-formats.md` has named the same gap three times - "a multi-pattern sweep of a module,
+done on the console, in one pass" - because three separate features need it and none can exist without
+it. Both payloads now answer:
+
+    GET /api/mem/find?pattern=48??8B05[&pid=][&base=][&from=][&to=]   -> starts it
+    GET /api/mem/find/status                                          -> progress + image offsets
+    GET /api/mem/find/cancel
+
+Read-only, one search at a time, in its own thread, through the same `mem_read` both consoles already
+have - so no new capability and nothing written. `??`, `**` and `xx` are all wildcards, so the game-patch
+XML's own mask syntax pastes in unchanged. Offsets in and out are image-relative, like a cheat file's.
+A signature must be at least 4 bytes with 3 real ones; all-wildcards is refused, because it matches
+everywhere.
+
+**Measured on the owner's running Dark Souls II, read-only, while they slept:**
+
+    64 KB around a known site    0.5 s, found 5BCBA5 - the hook site, exactly
+    the whole 34 MB module       229 s, 6 matches, 31 gaps, no errors
+    the shop during that sweep   /api/health worst 0.02 s; /api/mods worst 3.40 s, 0 failures
+
+The 3.4 s is the point of the millisecond nap between chunks: `/api/mods` shares the agent's channel,
+and a sweep that starved it would make the shop look broken while it ran. It slows; it does not break.
+
+**And it found something worth knowing on its own.** The six bytes `8B8370010000` from that hook site
+appear **six times** in the module (2FCA26, 5BCBA5, 84AF1F, 84B304, 962429, 154CA9A). A porting tool
+that took the first hit would write a cheat into the middle of an unrelated function - which is exactly
+why `cheat_port.py --by-signature` demands **exactly one** match and refuses otherwise, saying how many
+it found. Tried live against the running 01.02 game with the 01.00 file's "Max Souls": two matches,
+refused, offsets printed.
+
+**`tools/cheat_find.py`** is the friendly face of it, because "where is this code?" is the first
+question of making a cheat from scratch:
+
+    python tools/cheat_find.py CUSA01589 "8B 83 70 01 00 00 C5 FA 10 83"
+      searching 2,097,152 bytes for 8B8370010000C5FA1083  (this takes about 13s on a PS4)
+      1 match(es) in 15s, 1 unreadable gap(s)
+         5BCBA5
+      ONE MATCH: 5BCBA5 is an address you can use.
+
+The same site with only six bytes gives six matches and the tool says "NOT AN ADDRESS - lengthen it".
+That is the whole workflow: extend the pattern until exactly one survives.
+
+These are console routes, deliberately not proxied by the PC and not wired into any button. A
+three-minute sweep is not something to put behind a tap, and the tools talk to the console directly
+the way `cheat_doctor.py` already does.
+
+* **The exe gate now checks that what the exe CARRIES is what was built.** It only checked the four
+  bundled files were present. Found by looking: after the PS4 payload changed, the shipped exe still
+  carried the previous one - 9,135,272 bytes embedded against 9,135,448 on disk - and the dashboard-app
+  package was a build behind as well. `ship.py` hashes the three files it copies, so the loose payload
+  beside the exe was current while the copy inside it was not; on another PC the exe is all there is,
+  and it would push that older payload to the console without a word. The gate extracts each bundled
+  file out of the PyInstaller archive and compares sha256 (a raw byte search cannot: the archive is
+  compressed, measured). It caught both immediately, and this build's exe was rebuilt because of it.
+* **The console's content-change signal is debounced.** Measured in the console's own log: one tile
+  install moved `apps_sig` three times in four seconds, and each one re-read app.db and re-decided the
+  owner's plugin list. Re-deciding writes nothing when the answer is unchanged, so it was waste rather
+  than damage - but waste inside a system daemon whose heap we do not own. Ten seconds now, with a
+  pending flag so a change during the cooldown is not lost. Verified live: one reconcile for the whole
+  install instead of three.
+* **`tools/test_cheat_core.py` is now 125 checks**, including the real shipped Dark Souls II file with
+  the memory state measured off the console, the crash reproduced as a fixture (`5DC3488B03488B4030`
+  at the hook site) and asserted to write nothing, and check-only asserted to agree with the real
+  apply on both a success and a refusal. Each of the six new gates was perturbed and watched to fail:
+  removing them costs 10, 1, 1, 5, 5 and 4 checks.
+
+---
+
+### The audit, and the 30 defects it found
+
+A 222-agent adversarial audit read every change 3.82.0 made - eight reviewers, then three independent
+lenses per finding with a majority needed to confirm, then a critic asked what nobody had looked at.
+**61 findings survived verification and 10 were rejected.** Its line numbers were routinely wrong (it
+cited the signature scanner for the master engine), so every one below was re-read before it was
+believed. The ones that mattered are fixed; the rest are listed here so they are not lost.
+
+**In the master engine I had shipped hours earlier:**
+
+* **Only one cave-resident cheat per file could be on at a time**, and the second was blamed on the
+  game's version. The idempotence test was an exact memcmp of the whole cave - but a cave is BY DESIGN
+  mutated by the cheats living in it; that is what makes them diffs against it. Measured: 43 mod
+  entries across the 20 master-bearing files start inside a master span, 9 of those files have two or
+  more sharing one, and CUSA05574_01.50 has eight in a single cave. A byte may now differ where some
+  mod in the same document declares a run - the positions the file itself licenses. A wrong build
+  still fails, because its bytes differ everywhere.
+* **cheat_master_commit carried on after a failed write** and reported "Nothing was changed" - while a
+  hook could already be sitting over a cave that never got filled. It stops at the first failure, says
+  how many landed, and the sentence tells the owner to close the game.
+* **A master entry the parser could not read was silently dropped** and the rest written anyway - half
+  a routine, which the mod path refuses in those exact words.
+* **cheat_master_span took the first `{` after the token "master"**, and 21 cheats in the library have
+  "Master" in their NAME. It requires the key form now.
+* **Two ~1 MB leaks**: the mod-refusal early returns never released the master plan, on the accept
+  loop, in a payload whose heap this project has already exhausted once.
+* **run_unreachable worked in image-offset space** while the same offset may be an ABSOLUTE address
+  (abs_mode, or a per-entry `<Absolute>`), so for .shn and .mc4 files it resolved the operand from the
+  wrong place. It works in absolute space now, decides by READING the target, and reads twice before
+  believing it - one lost request over the agent's channel must not become a permanent verdict about a
+  cheat file.
+* **rip_targets was prefix-major under a shared 24-slot cap**, so one prefix filling every slot meant
+  later kinds were never scanned - by a check whose whole job is not to miss one. Position-major now.
+* **`force` could write a cave-resident cheat into an empty cave** - the original crash, on purpose.
+  force overrides the byte gate; it is not a way back to a jump into nothing.
+* **`section` was counted and never refused.** 306 entries in 103 files carry another module's index
+  and 305 of those addresses pass ADDR_OK, so the engine computed base + offset and wrote there when
+  the bytes happened to match. The message has claimed since 3.82.0 that they are declined.
+* The expect gate read only `wl` bytes, so a longer documented opposite could never be compared - which
+  made a Trainer master with a longer `on` permanently unremovable. Removing one also compared against
+  the wrong state entirely, and answered "the space it writes into is not empty" about the thing it was
+  removing.
+
+**Older defects the same reviewers found while they were in there:**
+
+* **A brace in a cheat's NAME moved the block boundary.** Ten mods in the library have one; nine are
+  balanced and survived by luck. CUSA29102_01.01's `Max Items {after using have 2)` is not, and the
+  engine walked **4 of that file's 5 mods** - with "Max experience" swallowed into the block before it.
+  A block that has eaten its neighbour applies BOTH memory arrays, so pressing one cheat wrote another
+  the owner never touched. next_mod_block and find_mod_block skip strings now, like cheat_master_span
+  always did.
+* **console_titles_cached took g_scan_lock while its callers already held it.** All three library
+  builders call it from inside a wrapper that holds that lock, and the TTL is five seconds - so this
+  was the ordinary path. A statically initialised mutex here does not block on a second lock by the
+  same thread; the inner unlock handed the caller's critical section away, mid-scan, over shared
+  buffers. The lock only ever protected one static, so that static is on the heap and the lock is gone.
+* **Five callers passed a function-local `static` as the output buffer**, shared by every thread in the
+  function - two of them with no lock at all.
+* **Nothing serialised plugins.ini.** Five functions mutate the owner's plugin list, each a
+  read-modify-write through one fixed `.part` path, with three independent triggers on a threaded
+  server. Two at once shared that scratch file and whichever renamed last published a mixture. It is
+  not our file: every other plugin they run is in it, and it survives a re-jailbreak. One mutex now,
+  with `_locked` variants for the calls between writers.
+* **rest_scan read a process's "name" unbounded**, so an entry without one took the NEXT process's name
+  while keeping its own pid - and that name is what decides whether to STOP that pid.
+* **A queued update could never finish**: `/api/queue/start` released a held row without deriving the
+  category or the expected size, so the finished check looked for a game's app.pkg, which an update
+  never writes. **Retry re-registered with no content id and size 0**, because it read fields only the
+  queued lane filled, and it **published the previous failure's error code and percentage**.
+* **The stall detector could never fire for an update, an add-on or a reinstall** - the guard I added
+  hours earlier asked whether the console LISTS the title, which for anything but a first install is
+  true before the transfer starts. It asks whether the package file has moved now.
+* **36 of the 73 Trainer files carry more than one `<StartUP>`** and only the first was converted -
+  half a routine again. The cheatline loop also bounded where a line STARTS but not where it ends, so
+  it could read a following `<Cheat>`'s bytes into the master.
+* **Four .shn files are UTF-16** and converted to a well-formed document with no cheats in it, which
+  reads as "this game has nothing" rather than "this file cannot be read".
+
+**On the page, all mine:**
+
+* **The panel re-point rebuilt the whole drawer on every library refresh**, destroying live cheat
+  controls under the reader's finger and their scroll position - the exact shape this repo already has
+  a memory about. It re-points the object always (free) and redraws only when a fact the panel shows
+  has changed, and only while the drawer is open. It also matched on `title_id||name`, which collides
+  for the packages the library files with a null title id.
+* **gridSignature omitted state.consoles**, the other input gridStateOf reads, and **gridStateOf
+  dropped state.installed** - so selecting a platform tab made a title the console had just reported
+  as installed read "not installed". It only trusts the per-console answer when there IS per-console
+  data.
+* **The master note broke an else-chain**, so a title with a master code was never told to install the
+  game first.
+
+**And in the companion and the tools:**
+
+* **One install raised two "Library updated" toasts** - `_finished_installing` bumps the gen, and
+  forty-five seconds later apps_sig catches up and bumps it again. The owner has said twice that one
+  message is enough. Only the echo of our own install is suppressed; two console-side changes a minute
+  apart are two things that happened.
+* **The first real change after a console's id was learned was thrown away**, because the memory key
+  moves from the address to the id on that pass and the new key had no previous value.
+* **pack_cheats --check compared file NAMES only**, so a cheat file edited in place - which is exactly
+  what porting one does - left the archive "current" while the exe went on shipping the old bytes.
+  Sizes and CRCs now, straight out of the zip directory.
+* **The signature search's hit cap did not set `truncated`**, so a partial match list was reported as
+  complete; **a sweep that read nothing was reported as "not in this build"** by both tools, although
+  the status carries a gap count; and **the PS5 swept a blind 64 MB from a hardcoded 0x400000** while
+  the PS4 asks the agent for the real base and size.
+* **Two checks that could not fail**: `ok("not running" in out or "no cheat file" not in out)`, whose
+  second half is true of almost any output, and a survivability check that returned on a first sighting
+  before ever reaching the code it claimed to test. Both now assert by name - and the second one
+  immediately found that the signal reported "changed" while doing nothing when there was no fleet.
+
+Every fix above is covered by the tests, which are now **200 checks** in the engine harness alone, and
+each new gate was perturbed and watched to fail before being believed.
+
+---
+
+## [3.82.0] - 2026-09-27 - "The master code, and three checks that could not fail" `[VERIFIED]`
+
+3.80.0 and 3.81.0 were interim builds inside one long live debugging session on the owner's own
+console and never got their own entry; everything from them is folded in here, which is also the
+build both consoles are running.
+
+Every number below was measured, on the shipped library or on the console. Nothing here is inferred.
+
+### Dark Souls II's "1 hit kill" crashed because a master code was never applied
+
+Reported: enable it, hit an enemy, the game dies. Not when the cheat goes on - when the game next
+runs that path, which is the tell.
+
+`assets/cheats/json/CUSA01589_01.02.json` has a top-level `"master"` block that the engine had never
+looked at. Mods were found only inside the `"mods"` array. Decoding the two RIP-relative operands
+settles it:
+
+    master  48 89 1D F9C7B8FD   mov [rip-0x2473807], rbx    at +0x2077800 -> base - 0x3FC000
+    cheat   4C 3B 3D 8AC7B8FD   cmp r15, [rip-0x2473876]    at +0x207786F -> base - 0x3FC000
+
+The cheat's cave compares against a scratch qword, and the only code anywhere that writes it is the
+master's first instruction. Without the master that comparison reads whatever was in memory, so the
+branch and the write to `[r15+0x170]` after it are undefined.
+
+**And it was worse than a crash.** Five of that file's seven cheats are byte patches INSIDE the
+routine the master installs - God mode is `8B 83 70 01 00 00` -> `8B 83 78 01 00 00` at +0x2077807,
+seven bytes into the master's 40-byte block - and their documented "off" bytes are the master's own
+bytes, byte for byte. With no master the cave is zeros, the gate sees zeros where it expects the
+master's instruction, and the mod is **refused, silently, for ever**. Five of seven cheats in each of
+these files were unusable and nothing said why.
+
+The engine now installs the master before the first mod in such a file, whole or not at all, and
+skips it when it is already there (so a second cheat costs four reads and no writes). Both formats
+carry the idea and neither was read:
+
+    json  "master": { "challenged": "yes", "memory": [...] }                 20 files
+    shn   <StartUP Text="Master Code 1 (Must Be On)">                        73 files, 126 blocks
+
+`shn_xml_to_json` now emits `<StartUP>` as `master` and `<Section>` as `section`. The shn form carries
+`ValueOff`, so a master that came from a Trainer file can be removed again; the json form documents no
+original bytes for the two places it patches, so closing the game is the only way to clear it. The
+Mods panel says which of the two, in one note, in all 15 languages - a note and not a toast, because
+this happens on the first toggle for 93 games.
+
+### A mod is applied all of it or none of it
+
+Separate from the master, and still a real fault: `cheat_apply_blk` wrote entries one at a time and
+carried on past a failure, reporting "written=1 failed=1" as a partial success. For a two-piece hook
+(36 bytes of routine into a cave, then a jump into it) that is a jump into memory nobody wrote. The
+file already refused a mod it could not fully PARSE for exactly this reason; the same now applies to
+an entry that fails at write time. Every entry is decided first, then written. Costs nothing: the
+gate already read every entry before writing it. `force` still overrides and says so.
+
+### A key could be read from the object next door
+
+`parse_mod_entries_ex` asked for `offset`, `on` and `off` with an unbounded `strstr` from the start of
+the entry. Every one of the 25,888 entries in the library carries all three, so the first match was
+always the local one - for mods. A master block documents only `on`, and its "off" resolved to the
+first MOD's off bytes further down the document. That is how a master the file says cannot be removed
+was "removed", into the wrong address. `json_str_after_lim` bounds the lookup to the object that owns
+it. Found by a test, not by reading.
+
+### "It did not work" was three different problems saying the same sentence
+
+Three failure paths all counted as one `failed`, and the app then said "the cheat file was made for a
+different version" for all three. Only one of them means that.
+
+    bad_addr     the cheat points outside the process  (a section/absolute entry)
+    unreadable   the engine could not read there       (on PS4: the in-game helper has stopped)
+    mismatch     the bytes are neither documented state -> the version answer, and only here
+
+`section` is now parsed too - and it is **quoted** in every one of the 306 entries that carry it, so
+the first attempt (`strtol` after the colon) read 0 and would have been a check that could never
+fire. 306 entries in 103 files name another loaded module, which this engine cannot place; the
+refusal says that instead of blaming the game.
+
+### The PS4's stall detector had two inputs and both were dead
+
+    3325:   if (have) { g_job.done = done; g_job.total = total; }
+    3354:   if (have && done > g_job.done) g_job.last_move_ms = now_ms();
+
+`g_job.done` was assigned `done` twenty-nine lines earlier, under the same lock, with nothing in
+between. `done > done` cannot be true. The second input compared the file on disk against the
+START-OF-JOB snapshot rather than the previous poll, so it fired on every poll once the file had
+changed once (a dead transfer could never be detected) and never at all while BGFT was still staging
+into `/user/bgft/task/<id>/` (a healthy download was on a 15-minute wall clock from handoff). What
+hid it was the `console_lists_title` guard beside it: the console registers a title early, so the
+deadline expired and produced no error.
+
+Now: the previous byte count is captured before it is overwritten, and a last-seen pair sits beside
+the start-of-job snapshot, which `replaced` still needs.
+
+### An install that finished was reported as stopped at 99%
+
+BO3 downloaded, installed and ran while the queue said it had stopped. The verdict came from one
+fact - the size of `app.pkg` against the package we handed over - and a console writing a 43.6 GB
+base game does not owe us a file within 2%. There is now a second route, deliberately three facts
+together because no one of them is safe: the console says it moved every byte, the package file
+really changed, and the console's own database lists the title. Each alone is a known false positive;
+all three is what "installed" means. The database read happens only when the cheap size test has
+already failed, so the polling path is untouched.
+
+### The Updates section now reacts to an install, an update or a delete
+
+`library_gen` - the only thing that makes the page re-read - was bumped by `Library.scan()`, which
+the watcher calls when the PC FOLDER's signature changes, and by `_finished_installing`. Nothing else.
+Installing, updating or deleting on the console changes nothing in the PC folder, so anything done
+from the console's own menu, or a Store download, or an add-on, was invisible until something else
+happened to trigger a reload.
+
+Both payloads' `/api/health` now carry `apps_sig` - a stat of `app.db` and `addcont.db`, two syscalls
+- and the companion bumps `library_gen` when that string moves, on the health poll it already makes
+every 45 s. No extra console traffic and no app.db pull. The PS4's own watcher uses the same signal to
+re-decide which titles carry the in-game helper, which also covers a DELETE: the install-completion
+branch fires on install only, so uninstalling a game used to leave the helper listed for a title that
+no longer existed until the next reboot.
+
+And two page-side reasons it would not repaint even with fresh data:
+
+* `gridSignature()` carried only the title, `on_console` and the PC file's size. The badge that says
+  "Installed" versus "Update" is decided by `installed_version`, which is not any of those - so a
+  genuinely new library document produced an identical signature and `renderGrid()` returned early.
+  The next reload painted the cache, which was by then the fresh one, and it looked right. That is
+  "refresh a couple of times" exactly. `installed_version`, `console_size` and the per-console record
+  are now in the signature.
+* an open panel held the object it opened with. `loadLibrary()` replaces every object in
+  `state.games`, and nothing re-pointed `state.current` - so a panel open while an install finished
+  kept the pre-install version, size and pending-update list for its whole life.
+
+### The grid's badge now answers the question the filter asks
+
+The owner asked for "whatever is best for the grid". With the platform filter on "All" the card is
+about the household and the fleet answer is right, unchanged. With PS4 or PS5 chosen it is about that
+machine, and it now uses the same `stateOfOn()` the panel uses - so a card and the panel one tap away
+cannot disagree. Grounded, installed on both consoles with only the PS5 on 01.14, reads "Update" with
+the PS4 filter on instead of "Installed". Two consoles of one platform means the filter does not name
+one, so the fleet answer stands rather than guessing.
+
+### The helper stopped offering a button for something it had already done
+
+The in-game helper arms itself for every installed title the library has cheats for, so "not in the
+game yet" usually means "armed, and it will load when you start the game". The panel showed the same
+manual control for that as for a title autoarm will not touch. It is a note now, and the button stays
+only where it is the only way.
+
+### Checks that could not fail, found and fixed
+
+* **`tools/test_job_claim.py` had 10.0.0.87 baked in as its default.** The PS4 has been at 10.0.0.86
+  since it moved house, so every run printed "no PS4 answering - skipping" and passed. With the
+  address asked of the companion, it also turned out to refuse on `active` alone - which after any
+  install (including the icon repair the payload does at boot) is every console. It now uses the
+  payload's own rule, runs against the real console, and passes: 1 of 12 concurrent presses reaches
+  registration, 11 are turned away, the row is restored, the slot is not wedged.
+* **the section parse** would have been unfireable, as above.
+* **both new test files are perturbation-tested**: removing the master apply fails 10 checks,
+  removing the quoted-section skip fails 3, and disabling the atomic refusal fails 10.
+
+### New
+
+* **`tools/test_cheat_core.py` + `test_cheat_core.c`** - the real engine, compiled on the PC against a
+  fake game whose memory lives in this process. 87 checks, including Dark Souls II's own shipped file
+  (all four master entries, master before the hook jump, God mode applying at all) and a sweep of all
+  1,761 Trainer files through the converter: 15,378 mods, 73 with a master code, all 73 removable.
+* **`tools/cheat_doctor.py`** - does a cheat fit the game that is running, and is it portable. Reads
+  every byte run out of the RUNNING game and says whether it holds the documented off bytes, the on
+  bytes, or neither. Proven live on BO3: Inf Health and Inf Ammo read as applied, Inf Money as ready.
+* **`tools/cheat_port.py`** + **`tools/test_cheat_port.py`** (29 checks) - moves a cheat from one
+  build to another using cheats present in both files as anchors. Measured: 87 titles have two or
+  more comparable versions and for 70 of them one constant delta explains every anchor. It refuses a
+  code cave, a relative jump, a cave-resident cheat, a disagreeing anchor set, and writing on a
+  single anchor without `--verify` or `--force`.
+* **`research/cheat-formats.md`** - every format we handle, measured: json, shn, mc4 (AES-256-CBC, key
+  and IV recorded), and the PS-Game-Patch XML with all ten `Line Type` counts. Including what the
+  engine refuses and why, and the one primitive still missing - a multi-pattern sweep of a module on
+  the console, which would unlock porting by signature, the 1,100 refused `mask` patch lines, and
+  finding an address for a cheat written from scratch.
+
+### Also
+
+* the titles cache cannot lose an invalidation: `console_titles_cached` releases its lock to read
+  app.db (correctly - the read is megabytes) and used to store the result unconditionally on the way
+  out, silently undoing any `titles_cache_drop()` that landed in that window. A generation counter
+  now makes a drop win. And the autoarm reconcile drops the cache itself immediately before deciding,
+  because the comment claiming the two-second wait rebuilt it could not be true against a five-second
+  TTL.
+* `cheat_doctor` asked the PC for `/api/mem/read`, which only the consoles have, and reported every
+  entry "unreadable" - a broken tool that read as a broken engine.
+* the mods reply carries `master` / `master_removable` from **all four** places that answer it
+  (`/api/cheat/list` and `/api/mods/<tid>`, on both payloads), because a field on one is a silent
+  dead button on the other device.
+
+---
+
+## [3.79.0] - 2026-09-27 - "Two traps the audit found" `[VERIFIED]`
+
+Both of these were turned up by a 20-agent read of the panel and the console tracker, after the 3.78.0
+fixes were already in. Neither was the reported symptom; both could have produced it.
+
+### An incomplete exe was sitting in the repo under the real name
+
+    pkg-mutant-shop/dist/PKG-MUTANT-SHOP.exe   21.9 MB   built 2026-09-23
+        ps4-elf     ABSENT  -> a PS4 is never started, so it reads Offline for ever
+        cheats-pack ABSENT  -> a PS4 has no cheat library at all
+
+A build from an older layout, before PyInstaller was pointed at `companion/dist`. It looks exactly as
+legitimate as the real one in a folder listing, and copying it to another PC produces **precisely the
+symptom the owner reported** - "the exe seems to not have everything in it" - with nothing on screen to
+explain it. They had not in fact copied it, but it was there waiting.
+
+Renamed rather than deleted (the bytes are kept and that version cannot be rebuilt), with a
+README-DO-NOT-COPY.txt beside it. New gate `tools/check_stale_exe.py`, in `ready_check`: any file named
+`PKG-MUTANT-SHOP.exe` in the repo must carry all four things the spec bundles. Dated backups are
+skipped - a backup is supposed to hold whatever it held.
+
+### A PC that had never met a platform would never go looking for one
+
+`start_console_tracker` gated its /24 sweep on `bool(quiet)` - a CONFIGURED console that stopped
+answering. So on a PC whose only entry is a PS5, and whose PS5 answers, `quiet` is empty for ever, the
+sweep never runs, and a PS4 on the same network can never be adopted however long the app is left open.
+
+That is the right rule for "a console I know about is missing" - one that is merely switched off must
+not have this PC sweeping all day. It is the wrong rule for "a platform I have never met", which is a
+question that has never been asked and whose answer changes the moment a PS4 is switched on. There is
+now a second, much slower trigger for exactly that case, backing off 15 min -> 30 -> 60 while it keeps
+finding nothing, and stopping entirely once a console of that platform is adopted.
+
+---
+
+## [3.78.0] - 2026-09-27 - "The panel describes the console it is aimed at" `[VERIFIED]`
+
+Two faults reported from the owner's own fleet, and neither was what it first looked like.
+
+### A PS4 shown as Offline on a second PC - and the exe was innocent
+
+The owner copied the exe to their other PC, saw the PS4 offline there, and concluded the exe was
+missing something. It was not. Both PCs ran byte-identical 3.78.0; the difference was one line of
+saved state:
+
+```
+PC "<user>"    ps4_ip 10.0.0.86   online true     entry HAS a console_id
+PC "Casita"   ps4_ip 10.0.0.87   online FALSE    entry has NO console_id
+```
+
+The PS4 is at .86 and answers there. Casita was polling an address nothing lives at - and **could
+never have recovered**, which is the real defect:
+
+* **follow-by-id** needs the ENTRY to carry an id to match, and an id is only ever learned from a
+  console you can already REACH. An entry whose address went stale before it ever answered can never
+  learn one. Chicken and egg, and permanent.
+* **the no-id fallback** then required the CANDIDATE to report no id either. Every console reports one
+  now, so that branch could never fire again - the arrival of ids silently disabled the fallback that
+  existed for exactly this case.
+* **adoption** skipped it because a `ps4` entry already existed.
+
+The guard that blocked it reasoned that a console we CAN name must be different from an entry we
+cannot. **That does not follow**: the entry has no id to compare against, so the candidate's id says
+nothing about the entry - only that it runs a build new enough to have one, which is now all of them.
+What the guard really protects is a house with a second console of the same platform, and that is
+still refused: this fires only when exactly ONE console of that platform is unaccounted for, never
+when its id already belongs to another entry, never across platforms, and the move is announced.
+
+`tools/test_console_tracker.py` is 14 cases now, including the owner's exact shape. The old guard case
+was replaced rather than deleted, with the argument written down.
+
+`tools/test_fleet_two_consoles.py` had to change too, and for an instructive reason: its SUITE 1 runs
+against the LIVE network, and with following now enabled a "dead" PS5 entry correctly followed to the
+owner's real PS5 sitting on that network. It was green only because the old guard refused. Its
+configured console now carries an id nothing answers to, so the refusal happens for a deterministic
+reason - which is that file's own rule: *"A test whose result depends on which console is powered is
+not a test."*
+
+### An update installed on the PS5 could not be installed on the PS4
+
+Grounded is on both consoles; only the PS5 had update 01.14, the PS4 being on 01.00. With the PS4
+selected, "Updates & Patches" showed that update as **Installed**, so there was no way to install it
+onto the PS4. Confirmed from the live library:
+
+```
+installed_version (flat)   01.14        <- what the row was reading
+console_state.ps5.version  01.14
+console_state.ps4.version  01.00        <- the truth for the console that was selected
+```
+
+The header was right at the same moment ("PS4 (update waiting)"), which is the tell: the per-console
+answer already existed and a handful of places were still reading the fleet one. `st` was already
+`stateOfOn(g,_cid)`, so the status badge, the Install button's words and the add-on gate were correct -
+this is a targeted change to the remaining fleet-wide reads, not a rewrite.
+
+The update row is now driven by `pendingUpdates(g,_cid)` - **the same function the header badge uses** -
+so the two can never disagree again. The fact sheet's VERSION, SIZE, INSTALLED TO and FORMAT pills, and
+the console-only base row, all ask per console.
+
+### The fix had the same bug inside it, found by the adversarial pass
+
+`installedVersionOn()` ends in a fallback to the flat `g.installed_version`, which the companion sets
+from the **first** console found holding the title - the PS5 on this fleet. So whenever
+`console_state[ps4].version` is empty (that console's app.db has no APP_VER row, and some CUSA titles
+are appended with no `app_ver` key at all) the accessor handed back the PS5's version and the badge said
+"Installed" with the PS4 selected. **The original symptom, reproduced from inside the per-console path** -
+so moving the panel onto that accessor alone would not have closed it.
+
+The flat fields are now only consulted when they cannot be about another console - when the title is on
+at most one. Otherwise the answer is "unknown", and unknown is the safe direction: `pendingUpdates()`
+treats an unknown version as "every update is still outstanding", so the owner is offered the install
+rather than having it hidden behind a claim about the wrong machine.
+
+New gate: `tools/test_panel_console_state.py` (19 answers plus 6 panel call sites, in `ready_check` and
+the PS4 build). It pulls the helpers out of the page and RUNS them against a two-console fleet - a grep
+cannot tell you that picking the PS4 changes the answer. It also asserts what stays fleet-wide on
+purpose: `stateOf()` is the GRID's answer and is deliberately unchanged.
+
+---
+
+## [3.76.0] - 2026-09-27 - "The engine switches itself on" `[VERIFIED]`
+
+Two pieces of friction the owner should never have met: they had to press a button to arm the helper, then
+close and reopen the game, then refresh the app before the tiles would come alive. All three are gone.
+
+### The helper arms itself, for games that have something, and only those
+
+GoldHEN reads `plugins.ini` only when a game **starts**, so the decision has to be made before the launch
+- which is exactly why a button could never be enough. It is also a decision we can make exactly: we know
+what is installed and we know what the library covers.
+
+Measured on this console: **14 installed titles, 5 with cheats.** So the payload now writes a `[TID]`
+section for those and nothing else, and a game with nothing **never loads our module at all** - which is
+strictly better than the blanket `[default]` form in every way. `[default]` is passed through untouched;
+autoarm never reaches for it.
+
+Verified on the live console at boot:
+
+```
+autoarm true   armed_titles 4   armed_default false
+armed_for  CUSA01589,CUSA14409,CUSA20499,CUSA42556
+```
+
+**Four, not five** - because `CUSA23827` (Call of Duty Warzone) is on a skip list seeded on first run.
+The owner has said plainly that they never run it to avoid a ban, and injecting our code into an online
+game is precisely the risk they are avoiding. The file says why and it is theirs to edit.
+
+**The purge is still the recovery path, one file away.** With autoarm off, boot behaves exactly as it
+always did - so if an agent build ever misbehaves again, the owner opens the app, switches it off, and
+every game is clean on the next boot with no re-jailbreak. Verified both directions: off purged 2 items
+and reported `installed:false armed_titles:0`; on restored all four.
+
+**It does not churn the owner's file.** The whole result is compared byte for byte with what was read and
+written only if it differs - confirmed on the console, where a second reconcile left `plugins.ini`
+byte-identical (827 bytes, same sha). Also re-armed automatically after a cheat intake, since a title that
+had nothing a moment ago may have something now.
+
+### The Cheats panel notices the engine by itself
+
+`refreshModsQuiet()` already re-applied every tile from fresh state - and nothing ever called it on a
+timer, so a panel opened before the agent was serving stayed grey until the app was reloaded by hand. It
+polls every 3 s while the panel is on screen (`?state=1` measures 61 ms), and when `running` **flips** the
+whole section is rebuilt in place rather than patched - because the "helper is not in this game" note and
+the arm button are separate rows, and leaving them beside tiles that have just come alive is worse than a
+redraw. 3 s also sits inside the agent's six-second busy window, so a panel somebody is looking at keeps
+the engine at its fast poll rate for free.
+
+### Two bugs the harness caught, one of them its own
+
+`agent_autoarm_apply` rewrites the owner's plugin list on every boot, so it shipped with tests (the
+`test_gh_ini.py` suite is now 90 checks). The idempotence check failed, for two reasons:
+
+* **the harness was lying.** On Windows `open()` without `O_BINARY` translates `\n` to `\r\n` on write and
+  back on read. The PS4 does nothing of the kind, so every pass added a `\r` to every copied line, the
+  file grew, and a perfectly idempotent writer looked broken by an artifact the console cannot produce.
+  The harness forces binary mode now, which makes it faithful rather than merely green.
+* **a real one, and the same bug as two changes ago:** the line autoarm *emits* had a bare `\n` while the
+  file it edits may use CRLF. On a `plugins.ini` the owner had edited on a PC, our inserted line would
+  have been the one odd line out - and it would then compare unequal on every single boot and be
+  rewritten for ever, which is the exact churn the purge gate was fixed to avoid. The document's own
+  ending is detected once and used for every line we write.
+
+---
+
+## [3.74.0] - 2026-09-27 - "One message, and one signal to trust" `[VERIFIED]`
+
+The engine's own message appeared **twice** at game start. One announcement per game now, and the fix is
+about picking the right signal rather than adding a flag.
+
+**What was wrong.** "Allow another announcement" was keyed on the running TITLE going empty:
+
+```c
+if (!cur[0]) announced_for[0] = 0;      /* wrong */
+```
+
+The running title is not steady during a game LAUNCH. `rt_refresh_once` needs
+`sceSystemServiceGetAppIdOfBigApp` to report an id AND a process walk to find a process carrying it, and
+across a long load those two briefly do not agree - so the title reads empty for a poll or two, the flag
+cleared, and the message went out again.
+
+**Why it had to be reasoned about, not reproduced.** Sampling the running title 20 times at rest showed
+**zero** empty readings. The flicker only exists inside the loading window, which had already passed by
+the time anything could be measured. Every notification site in the payload was listed first to confirm
+only one of them could be responsible.
+
+**The signal that is honest here is the agent's own heartbeat.** `alive.bin` is rewritten every two
+seconds by the agent itself and is stale only when there is no agent - which is exactly the condition
+that should permit a fresh announcement. It says nothing about the shell, the foreground app or a process
+walk. Two consecutive misses are required, so one slow beat cannot cause a repeat either, and a change of
+title still announces immediately because that really is a different game.
+
+## [3.73.0] - 2026-09-27 - "Fifteen times faster, measured" `[VERIFIED]`
+
+The cheat engine was correct but slow, and this is what it cost - measured on the console with Dark Souls
+II running and `rc == 0` required on every one of 30 samples:
+
+```
+                        before            after
+one agent round trip    495 ms avg        33 ms avg     15x
+/api/cheat/running      501 ms            39 ms         12.9x
+/api/mods/<TID>        1003 ms            61 ms         16.6x
+a cheat toggle         1490 ms            85 ms         17.5x
+```
+
+Every panel action is a whole number of agent round trips, and each round trip was costing almost exactly
+the agent's fixed 500 ms poll. Nothing else in the path was slow - the shop answers `/api/health` in
+17 ms - so that one interval was the entire latency budget.
+
+**The agent now polls at 25 ms while a session is in progress and 500 ms when idle**, with any request
+keeping the fast window alive for six seconds (the panel's own polling sustains it for as long as somebody
+is actually cheating). Polling fast all the time would have been the wrong fix: that loop lives inside
+somebody's game for as long as they play, and 40 file checks a second forever to answer a question nobody
+is asking is a real cost. **A game nobody is cheating in now costs less than it did before.**
+
+Two things that had to move in the same change:
+
+* **the heartbeat became time-based.** It was written every 4th iteration, which was every 2 s at a fixed
+  500 ms poll - but at 25 ms that is ten file writes a second inside the game, far worse than the latency
+  it buys. It now goes out at most every 2 s of accumulated sleep whatever the poll rate is, with the
+  elapsed time accumulated from the sleeps themselves so it needs no clock and therefore no new import.
+* **the shop checks for the answer every 10 ms** instead of 50 while a request is outstanding, because
+  otherwise its own granularity would have become the new floor and thrown away half the gain.
+
+**A measurement that was wrong, and how it was caught.** An earlier pass reported `/api/mem/read` at
+10 ms and nearly recorded that as excellent performance. It was a **fast failure**: the shop
+short-circuits on a stale heartbeat rather than waiting out the timeout, and the game had been closed.
+Two separate tests in that round also measured nothing useful - one never checked `rc`, and another asked
+for 65,536 bytes from a route that clamps to 256, so "16 chunk round trips" was one round trip every time.
+Every timing here validates the reply before counting it. `AGENT_ALIVE_MAX_AGE` is now one constant shared
+by both readers of that heartbeat instead of the same `8` written twice.
+
+---
+
+## [3.72.0] - 2026-09-27 - "Our voice, not GoldHEN's" `[VERIFIED]`
+
+The owner noticed that the banner at game start said **"Loaded 1 plugin(s) 1. pms_agent"** in GoldHEN's
+gold styling, and asked the right question: is the engine really ours, or are we running on GoldHEN?
+
+### The honest answer, written down because it should not have to be asked twice
+
+**Ours:** the whole engine - reading a cheat file in any of three formats, resolving an address against
+the live image base, gating every write on the bytes the file documents, applying and reverting, the
+panel, the library, the shop, the install lane. And the module itself: our source, our own crt
+(`crt_prx.c`), our build recipe, our signing, our pinned 16-symbol import set. It links **nothing** of
+GoldHEN's - not its SDK, not its hook library, not its syscall-500 gateway.
+
+**Not ours:** the **injection**. GoldHEN's `plugin_loader` reads `/data/GoldHEN/plugins.ini` when a game
+starts and `dlsym`s `plugin_load`. Carrying a module across a process boundary on a PS4 is a
+jailbreak-level service: it needs kernel reach into the loader path, and this payload has **measured
+EPERM** on both `mdbg(573)` and `ptrace(26)` - which is exactly why the engine runs inside the game
+instead of outside it. That cannot be replaced without becoming a jailbreak, which GoldHEN already is.
+The PS5 needs no equivalent only because its SDK hands us `kernel_copyin`/`kernel_copyout`.
+
+**The banner, though, was ours to take.** It came from GoldHEN's own `show_load_notification` setting,
+in a file we already write, describing our plugin in its voice, at a moment that is not even useful.
+
+### So the visible engine is ours now
+
+* the module calls itself **"PKG MUTANT SHOP Cheat Engine"** instead of `pms_agent`, so anything on
+  GoldHEN's side that names a plugin names ours properly;
+* `show_load_notification` is switched **off while our helper is armed** and **restored on purge** -
+  it is the owner's setting and it governs every plugin they run, so we hold it down only while we have
+  something listed. Verified live: the boot purge put it back to `true`, arming set it to `false`;
+* the **shop** announces the engine itself, through the notification path it already uses for cheat
+  toasts: *"PKG MUTANT SHOP: the cheat engine is on for this game. Switch cheats on and off from the
+  app."* It fires when `alive.bin` shows the agent actually **serving**, not when the module is merely
+  mapped - the agent waits six seconds before touching anything, so GoldHEN's banner was announcing
+  readiness that did not exist yet. And it adds **no import** to the in-game module, which is the one
+  place where a new import is still a risk worth avoiding.
+
+### Two bugs the host harness caught before the console did
+
+`gh_set_load_notification()` edits one key in the owner's config, so it shipped with tests - and they
+failed immediately:
+
+* it decided "does the file already say what I want" by comparing the **line's length** against the
+  length the wanted line would be. With a trailing CR, `show_load_notification=true` and
+  `...=false` are both 28 bytes, so it concluded nothing needed changing, wrote nothing, and
+  **returned success**. A length is not a value. It now builds the whole document and compares it byte
+  for byte with what it read - which is exact, and still avoids rewriting a file that does not change.
+* the rewritten line **dropped the line's trailing CR**. `plugins.ini` is the owner's file and may well
+  have been edited on a PC, so a CRLF config would have come back with one mixed line in the middle.
+  The ending is preserved now, and the test suite carries a CRLF case because that is what exposed it.
+
+`tools/test_gh_ini.py` is up to 68 checks.
+
+### A measurement that was wrong, corrected
+
+While looking for cheat-engine latency this pass reported `/api/mem/read` at **10 ms**. That was a
+**fast failure, not a fast success**: the shop short-circuits on a stale `alive.bin` heartbeat rather
+than waiting out the timeout, and the game had already been closed. Real round-trip numbers still need a
+running game and are not claimed here. `AGENT_ALIVE_MAX_AGE` is now one constant shared by both readers
+of that heartbeat, instead of the same `8` written twice.
+
+---
+
+## [3.71.0] - 2026-09-26 - "Three symbols" `[VERIFIED ON CONSOLE]`
+
+**PS4 cheats now activate and deactivate in a running game, from the app.** Verified end to end on the
+owner's console, and then CONFIRMED ON SCREEN: Dark Souls II running, the helper inside it, "Max Souls"
+switched on from the PC, the patched bytes read back out of live memory, and the owner's soul count
+jumping to **999,999,999** after killing one enemy - the same 0x3B9AC9FF the disassembly around the
+patch site carries twice. The toggle was also driven off and on again and the game was left byte-for-byte
+as it was found before the final test.
+
+The cheat is a CODE PATCH, not a value poke, and that distinction is worth keeping: it rewrites
+`mov [rdi+0xEC], ecx` into `mov [rdi+0xEC], eax` so the game stores the cap instead of the real value the
+next time it writes your souls. Nothing visible happens until that instruction runs, which briefly looked
+like a failure ("the message showed but the souls are still 0") when it was the engine working correctly
+and waiting for the game.
+
+### The cause, after weeks of wrong answers
+
+Every edition of the in-game helper had crashed games - sometimes badly enough to need a reboot and a
+re-jailbreak. The build recipe, the signing, the crt, the module param, the SDK version, the DYNAMIC
+table, the export list, the `.bss`, the socket, SIGPIPE and `printf` had all been suspected, checked
+and cleared, and the honest position at 3.70.0 was that the cause was unknown.
+
+Two builds settled it, on one game launch each:
+
+* **`PMS_AGENT_NULL`** - `plugin_load` sets a global and returns, **zero undefined symbols**. Dark
+  Souls II **loaded and played**, and GoldHEN announced the plugin on screen. So the module format,
+  the signing, our own crt, the paid, the SDK version and the whole build recipe are **fine** - and
+  nothing from GoldHEN's SDK is needed, which was the one thing the owner had ruled out.
+* **`PMS_AGENT_MINIMAL`** - the same build plus `fopen`/`fwrite`/`fclose`, called from `plugin_load`.
+  **Crashed.**
+
+Three symbols apart. **libc stdio is what breaks a module inside a game**, whether it is called on the
+load path or from a worker thread six seconds later (the file-channel agent did the latter and crashed
+too).
+
+What had misled the whole investigation: `game_patch` - a plugin this console loads cleanly, which does
+real file work - imports `fprintf`, `getc`, `putc` and the `stderr` FILE object. That reads like "the
+FILE machinery resolves inside a game". It does not follow that `fopen` is safe to call, and
+`game_patch` never calls it: it uses `sceKernelOpen`/`Read`/`Write`/`Close`/`Lseek`/`Mkdir`. Two
+different claims, and only the first was ever evidenced.
+
+### The fix
+
+Every file operation in the agent is now a `sceKernel*` call - the exact set `game_patch` proves. Its
+import list went from 18 names to 16, with all stdio gone, and each signature was read out of the
+toolchain's own `libkernel.h` rather than inferred.
+
+`rename` went too. It was the one import nothing on this console demonstrated, and it only existed so
+a reader could not see a half-written file - which the protocol already guarantees better: a response
+carries its own length, so an incomplete one is an error and never a value. `sceKernelUnlink` is
+deliberately not used either, although it exists; a file is emptied with `O_TRUNC`.
+
+Three things that fell out of dropping the atomic rename, all of which would have been maddening to
+diagnose on a console:
+
+* both readers could now catch a reply **mid-write**. They wait for the declared length instead of
+  calling it malformed, and neither deletes the file before it parses - the old code deleted the
+  agent's in-progress answer.
+* `cmd.bin` is emptied rather than deleted, so the shop's `rename` onto it became a rename onto an
+  **existing** file - which is exactly what fails on these consoles. It clears the target first.
+* the PC harness's own `sceKernelOpen` mock translated FreeBSD flags, but on a PC `main.c` is compiled
+  against glibc's headers, where `O_TRUNC` (01000) is numerically FreeBSD's `O_CREAT`. `O_TRUNC` was
+  silently dropped, `cmd.bin` was never emptied, the agent re-served every request, and eight checks
+  failed in a set that moved between runs - none of them pointing at the agent. **The mock was the
+  bug.** It passes the flags straight through now, because in that build the producer and the consumer
+  share one header.
+
+### The switch is in the app now
+
+`agent_enable_for_title()` had existed on the console for a while with **no caller anywhere** in `web/`
+or `companion/` - the only control was the Settings row, which arms the helper in *every* game, and
+3.70.0 started refusing that unless it is asked for by name. So the app had no working way to switch
+the helper on at all. The Cheats panel now carries **"Turn the in-game helper on for this game"**,
+which appends a `[TID]` section and touches no other game and no other plugin the owner runs. The
+Settings row keeps the console-wide form and now says `all_games` out loud. The companion refuses a
+request with no `enabled` field rather than turning it into a purge.
+
+### Measured, for the record
+
+```
+agent_present true   pid 119   base 0x400000   module eboot.bin   title CUSA01589
+can_cheat     true   helper true   titles_agree true
+0x400000  2F6C6962657865632F6C642D656C662E  -> "/libexec/ld-elf.so.1"
+0x803B9E  898FEC000000   the cheat file's documented OFF bytes
+toggle ON   ok:true  entries=1 written=1 skipped=0 failed=0   -> 8987EC000000
+toggle OFF  ok:true  entries=1 written=1 skipped=0 failed=0   -> 898FEC000000
+```
+
+The agent survives a payload reload inside a session that is already running - the boot purge deletes
+the `.prx` and unlists it, which does not unload a module already mapped into a live process. So
+updating the shop mid-game does not interrupt cheats; only the next game launch needs the helper
+switched on again. Verified.
+
+The PC suite is 30/30 across five consecutive runs, driving the real agent against the real shop
+client, and it now fails the build if any stdio call reappears - with a positive control proving the
+pattern catches stdio and leaves the `sceKernel*` replacements alone.
+
+---
+
+## [3.70.0] - 2026-09-26 - "Forty-six findings, and a gate that could not fail" `[VERIFIED]`
+
+A 72-agent audit of the PS4 cheat work. Everything below is fixed, and the two things it got wrong
+about its own headline finding are recorded as plainly as the things it got right.
+
+### The gate that had been checking nothing
+
+`tools/test_agent_protocol.py` carries a static gate over the in-game module: no signals, no raw
+POSIX file calls, no `printf` that could block inside somebody's game. Both of its patterns began
+with a **literal ASCII backspace byte** where a word-boundary `\b` was meant. `main.c` contains no
+such byte, so every `findall()` returned an empty list and the suite printed "26 check(s), 0
+failure(s)" for a check that **could not fail**. It now reads a comment- and string-stripped copy of
+the source in one alternating pass (so the project's own prose *about* `signal()` and `stat()` does
+not count as calls), allows the `fwrite` the file channel is built on, and **runs both patterns
+against a known-bad snippet and fails if they do not trip**. A gate that cannot fail is not a gate -
+which is the whole lesson, and it is now enforced by the file itself.
+
+### The diagnostic that was about to ship
+
+`ps4-app/onconsole/agent_bundle.h` `.incbin`s `build/pms-agent.prx` by that exact path, and the PS4
+ELF embeds whatever is there - and the exe ships that ELF. A `PMS_AGENT_MINIMAL=1` build wrote to that
+filename, so every PS4 ELF built afterwards silently carried a diagnostic probe instead of the agent.
+(The audit said *both* console ELFs embed it; only `server_ps4.c` includes `agent_bundle.h`.) Each variant now owns
+its own basename (`pms-agent-minimal.prx`, `pms-agent-nulltest.prx`) and cannot touch the shipping
+name.
+
+### The owner's plugin list
+
+`/data/GoldHEN/plugins.ini` is **their** file - every other plugin they run is listed in it, and it
+survives a reboot and a re-jailbreak. Six defects at once, all of them found by lifting the real
+functions out of the payload, compiling them on the PC and driving them against a temporary file
+(`tools/test_gh_ini.py`, now a build gate and part of `ready_check`, 45 checks):
+
+* **Every write failed.** `rename()` will not replace an existing file here - this repo already
+  records that quirk in the agent's own `write_atomic` - so the new whole-file writer returned "could
+  not be written" for every toggle. It now tries the replace first and only clears the way when the
+  platform refuses, because unlinking first would leave the console with no plugin list at all for
+  the width of that window.
+* A **substring** match counted prose that merely mentions the file as a listing. It is a token match
+  now: optional whitespace, our own `;` spelling, then the first token.
+* The scan **stopped at the first mention**, on a comment claiming "we only ever write one" - which
+  `agent_enable_for_title` falsifies by appending a second mention in a `[TID]` section. A per-title
+  arm was invisible to the only instrument the project has for "is this module wired into a game".
+  `/api/engine/agent` now reports `armed_default`, `armed_titles` and `armed_for`.
+* The branch that inserts our line **inside** an existing `[default]` was unreachable (`!X && X`), so
+  arming appended a **second** `[default]` at the end of the file. Two passes now.
+* Both writers copied each line through `char[512]` and then emitted the **clamped** copy, so any
+  line of 512 bytes or more in the owner's config permanently lost its tail. The original span is
+  emitted now; the bounded copy survives for the tests only.
+* `agent_purge` re-entered the writer whenever a line was merely *present*, so every boot rewrote the
+  file to byte-identical content while klog announced a removal that had not happened.
+
+### Never arm every game by accident
+
+`POST /api/engine/agent` defaulted `enabled` to 1, so a **bodyless POST, an empty `{}`, or a
+misspelled `{"enable":0}`** switched the helper on inside every game. The key is mandatory now, via a
+sentinel - moving the default to 0 would have turned the same malformed request into a silent purge -
+and the every-game branch additionally requires `all_games:1`, with its own sentence rather than a
+false "the plugin list could not be written".
+
+### Writing into the wrong game
+
+* `/api/cheat/running` is the route the panel decides `can_cheat` from. It took the **title from the
+  console** and the **pid and base from the agent** and never asked whether they describe the same
+  game - so an agent still answering from a game the owner had just closed reported the *new* title as
+  ready to cheat with the *old* game's pid. `running_game` already refused this; the route that gates
+  the button did not. The compare is written once now and enforced in both places.
+* Two routes reached for the PS4's no-ASLR load address whenever `base` was absent, turning "I do not
+  know this game's base" into "this game is at 0x400000". They ask the agent first.
+* A **write** is now allowed only inside `eboot.bin`; reads still reach any module. Every offset in the
+  library is relative to the executable, and `eboot.bin` is the one module that cannot be unloaded
+  while the process lives, which takes the stale-map fault off the write path. Refused with its own
+  status, and covered by the harness.
+* The page protection is **put back** after a patch. Guarded, because a protection that came back 0
+  must not be restored - handing a live code page `VM_PROT_NONE` would fault the game.
+* `/api/mem/write` - a GET, with everything in the query string - was the one state-changing route on
+  this console **outside** the cross-site guard. The PS5 had always guarded its equivalent.
+* The file channel is **serialized**. A thread per connection and no lock meant two requests shared a
+  seq counter, two static buffers and one pair of files on disk; one could read the other's reply and
+  act on it, and acting on it means writing bytes into a running game. A short bounded wait, then
+  "busy" - never a queue on a route the panel polls.
+
+### The version picker was a dead control
+
+* Clicking a version **changed nothing on screen**. `cheatSection()` builds a detached node and the
+  click handler threw the result away. It replaces the node in place now.
+* A version string is a **filename key**, and the longest in the shipped library is 29 characters
+  (`01.03_ac3_engine_orbis_fn.elf`). Every buffer that parsed `?version=` was 16 or 24 bytes, so those
+  versions were clipped and resolved to no file at all. All of them are 48 now, with a check that
+  keeps it that way. The label shows the numeric head with the rest as a dim qualifier; `data-ver`
+  still carries the whole string, because the tails are different executables of the same disc.
+* The picked version now **travels with the write**. A mod is applied by index, so listing one
+  version's cheats while the console resolves another's applies a different cheat and reports success
+  under the wrong name. Both consoles refuse a version they cannot match exactly.
+* `compatible` was computed partly from "exact against what was **asked for**", so deliberately
+  picking a non-installed version painted the row green and hid the mismatch note. It is about what is
+  installed, on both the console and the companion.
+* The override was keyed by title alone, so switching console tabs carried it into the other
+  console's library, and it could never be cleared for a title with no readable installed version.
+
+### Things that were simply not true
+
+* Three comments and one owner-facing message said the exe bundles only `web/` and therefore "has
+  nothing to push - by design". The spec has **four** datas entries, one of them the cheat library,
+  which the companion expands beside the exe at startup. The PS4 depends on it.
+* A branch chose a string saying cheats need a PS5. Nothing emits the value it tested, and the claim
+  has been false since PS4 cheats shipped. Deleted, and the string it selected was rewritten in all
+  15 languages; a second copy of it was dead weight and is gone.
+* "Start the game first", shown to somebody looking at that game on their television, because
+  `running` means *can_cheat* on a PS4. The note now mirrors the tooltip.
+* `/api/cheat/library` asserted `"status":"ready"` as a literal, so an entirely empty library reported
+  the same status as a full one.
+* `/api/cheat/find` and `/api/patch/list` echoed the requested version back as `installed_version` -
+  the request returned as a fact about the console.
+* A **stale** cheat archive shipped silently. PyInstaller fails loudly on a missing data file and says
+  nothing about an out-of-date one; the spec now repacks and then insists.
+
+### Smaller, but real
+
+* A game patch XML dropped on the console was filed as a **cheat**. All 376 patch documents are XML,
+  so the generic `<?xml` fallback claimed them as `shn` - which removed them from the patch directory
+  and, because a generic file outranks an other-version match, made them outrank the real versioned
+  trainer for 200 titles. `cheat_sniff` tests for `<Patch`/`<TitleID>` first (measured: **0** of the
+  5,193 cheat files contain either), and a patch is filed under **every** `<ID>` it covers - 303 of
+  376 cover more than one title, and the filename matches the first id in only 156.
+* Intake now descends one level into a folder named like the library's own, so a USB stick holding a
+  copy of it files something instead of reporting "filed 0".
+* A live `.part` temp sat inside the four folders the cheat sync pushes from, so it could be sent -
+  and it is written as a dotfile now, with `.part` excluded at the listing as well.
+* The agent's `.bss` went from **138,848 bytes to 16,640**: two 64 KiB scratch buffers on a path that
+  never moves more than 256 bytes, reserved inside somebody's game. The build prints `.bss` and every
+  `PT_LOAD` pair now, and refuses to exceed a ceiling.
+* The worker no longer exits silently and permanently when it cannot find a writable directory - the
+  commonest reason is that the game started before the payload created it. It keeps looking, and
+  leaves one mark the first time, in the shipping build, with no new import.
+* `sceKernelGetAppInfo` is off the game's load path. `plugin_load` is now `scePthreadCreate`,
+  `scePthreadDetach`, `return 0` and nothing else.
+* `\n` appeared as two literal characters mid-line in **both** console build scripts, so a gate ran as
+  `test_console_tracker.py n`.
+* An engine refusal reached the owner as `entries=3 written=0 skipped=0 failed=3`. There is a sentence
+  now, written once in the shared engine and carried to the PS4 by the sync tool - and it says
+  **partly applied** when that is what happened, because the engine carries on past a failed entry.
+* A refused or timed-out toggle repainted from the state it was drawn with, so a mod with real bytes
+  in the running game showed as cleanly off. Both arms re-read the console.
+
+### What the audit got wrong, recorded because it matters more than what it got right
+
+Its headline finding was that the module's `.bss` made the loaded memory image exceed the file image,
+correlated across 13 modules. **The minimal build falsifies it**: measured, `memsz == filesz` in every
+`PT_LOAD` of that build, it imports only `fopen`/`fwrite`/`fclose`, and it still broke the game. The
+buffers were shrunk anyway, because 128 KiB inside somebody's game for a 256-byte path is
+indefensible - but not as a fix, and the code says so.
+
+Its second finding was that a note in this project claiming "no breadcrumb means the failure is at or
+before module load" is a **non-sequitur**, and that is correct. A failed `fopen` inside the game's
+sandbox produces the same empty result, and so does a fault anywhere inside `plugin_load`. That claim
+has been struck from the source and from the project's memory.
+
+What the minimal build **does** establish is narrower and still useful: with no thread, no segment
+scan, no protocol, no `.bss` and three stdio imports, the game still broke. None of our own logic can
+be the cause. A `PMS_AGENT_NULL=1` build now exists that imports **nothing at all** - verified, its
+dynamic symbol table has zero undefined entries - which is the cheapest remaining question and the
+last one that can be asked without touching the signing plumbing.
+
+The in-game helper remains **disarmed** on the console, as it has been since it first broke a game.
+Cheat browsing, the version picker, patches and the whole library work on the PS4 today; only writing
+into a running game waits on that question.
+
+---
+
+## [3.68.0] - 2026-09-26 - "Cheats are a PS4 feature now" `[VERIFIED]`
+
+The PS4 cheat engine was finished. Not the engine itself - that part was already right, and is
+literally the PS5's, copied by `tools/ps4_sync_cheat_core.py` - but everything around it, which
+was still written on the assumption that mods were something only a PS5 could do.
+
+### The in-game helper, and the test that proves it without a console
+
+A PS4 cannot reach a running game's memory from outside. `mdbg` (syscall 573) returns **EPERM** and
+`ptrace` returns **EPERM before it even looks the target up** - both measured from this payload on
+13.52, read-only probes, twice. So the engine runs **inside** the game: `pms-agent.prx`, a small
+GoldHEN plugin that answers four questions on `127.0.0.1:9231` - are you there, what process is
+this, read these bytes, write these bytes - and knows nothing about cheats, files or titles.
+
+Its first version **crashed games**, and the cause is worth naming because it is invisible: a write
+to a socket the shop had already closed raised **SIGPIPE, whose default action terminates the
+process**, and the process was somebody's game. No message, no log line, just a crash after a while
+of play. The same build also made every memory read fail, because the shop put the length of its
+outgoing payload in the request header - which for a read is zero, and the agent refuses a zero
+length. From the panel that is indistinguishable from "no game is running".
+
+Neither fault needed a PS4 to find. Both needed a test, and now there is one.
+**`tools/test_agent_protocol.py` compiles the actual shipped plugin** (against
+`ps4-app/plugin/test/stubinc`, whose declarations are copied from the toolchain's own headers)
+**and the actual client lifted out of `server_ps4.c`, and runs them against each other** on the PC.
+The fake game is one mmap'd megabyte carved into three module segments with real gaps between them,
+so the refusal checks mean something. 31 checks, including the two faults above reproduced
+directly: the SIGPIPE disposition is *queried* after `plugin_load` rather than set, and a client
+that rips its connection down mid-answer must leave the agent alive. `ready_check` gates it.
+
+**The agent also keeps up with the game now.** Its module map was built at `plugin_load`, which is
+the earliest moment of a game's life, so an address in a library the game loaded seconds later was
+refused as "not in any module segment" - correctly, by a map that was simply out of date, and it
+read as a bad cheat file. A miss now costs one syscall (`sceKernelGetModuleList` reports how many
+modules there are without asking about each one) and rebuilds only when that count has changed.
+The map is rebuilt and never added to, because a segment belonging to an unloaded module would let
+a read through to memory that is gone - and that fault is fatal inside the game.
+
+### A PS4 game's toggles were being sent to the PS5
+
+One line. `modsConsole()` returned `""` for a PS4 so the PC would resolve the request to a console
+that could actually serve it. That was right when the PS4 payload answered every cheat route with
+"not available on the PS4 yet"; once the PS4 had an engine it meant **the console the request was
+about was the one id the request was forbidden to carry**.
+
+Alongside it: the companion had no `/api/engine/agent` relay at all, so the helper's on/off control
+did nothing from a PC; `/api/cheats/paths` refused on `is_ps4()` before asking the console; and
+Settings hid the whole Cheats card behind "mods run on a PS5 today". All three described a console
+that stopped existing in this release.
+
+### "The game is running" and "a cheat can be written into it" are two questions
+
+On a PS5 they are one - the payload reaches game memory itself. On a PS4 they come apart, and it is
+the ordinary case rather than an edge one: a game started before the helper was listed is running,
+has its cheat file, and cannot be written to. The companion read `running` from title + cheat file
+alone, so every tile was offered as pressable, the write went to pid 0, and the panel reported a
+failure that reads as a bad cheat file. It now reads the console's own `can_cheat`, and passes
+`game_running` and `helper` through so the tile can say the true thing: **close the game and open
+it again**. The console's own refusal tells the two causes apart the same way.
+
+### Game patches could never be reverted on a PS4
+
+The shared patch engine saved the original bytes of every line it overwrote with `fopen`/`fwrite`.
+**`fopen` does not work in the PS4 payload** - every other writer in `server_ps4.c` uses `open()`
+for exactly this reason - so it returned NULL, the patch applied perfectly, and Revert answered "no
+saved original bytes" for ever. The record is written with a file descriptor now, one `write()` per
+line rather than three, and a short write abandons the record instead of leaving half of one:
+reverting half a record restores some lines and then writes wrong bytes at the next offset, into a
+running game.
+
+### The running game goes to the top of the library on both consoles
+
+Two separate faults with one symptom.
+
+**The PS4's watcher accepted NPXS ids.** Six lines above it a comment says the system processes
+"must never be reported as the running game"; the code said `CUSA` or `NPXS`. NPXS is exactly what
+it must not accept - the shell, the store and **the browser** are all of them - so the moment the
+owner opened this page on the console itself, the "running game" became a system app, matching no
+card. `CUSA` or `PPSA`, like the PS5.
+
+**The PS5's own `/api/health` never carried `running_title` at all**, so a page served by the PS5
+never floated anything either. It does now, for two library calls behind a three-second memo - the
+title needs no process walk, only the pid does.
+
+**And the PC asks every console, not just one.** `/api/health` filled `running_title` from the
+console the request was "about", which on a PC with no `?console=` is the first one configured. A
+game running on the other console was never asked after.
+
+### The PS4 can take delivery of a cheat file
+
+It had no intake at all: the Rescan button, the FTP drop folder that `/api/cheat/paths` advertises
+by name, a USB stick with a `/cheats` folder - all PS5-only, and the PS4 answered the rescan route
+with "not implemented yet". The intake moves into the shared engine (one implementation, both
+consoles): it decides what a file **is** by looking inside it, so a `.mc4` is only believed once it
+decrypts to Trainer XML, and it copies rather than moves from a USB stick because that stick is the
+owner's. The library directories are created at boot, so a console with no PC has somewhere to put
+a cheat.
+
+**Verified on the console:** a real cheat file written into the inbox as `PMSTEST99999_01.00.txt`
+came back filed at `.../cheats/json/PMSTEST99999_01.00.json`, byte-identical, and immediately
+findable by `/api/cheat/find`.
+
+### The shipped exe carries the cheat library
+
+A PS5 is self-sufficient - its ELF embeds all 7022 files. A PS4 cannot be: its payload lives in a
+shared system daemon whose heap it does not own. So it takes the library from the PC, and **the
+shipped exe had none to give** - `CHEATS_DIR` pointed into the frozen bundle at a folder nothing
+put there, so cheats on a PS4 were a repo-only feature. The exe now carries the library as one
+10 MB archive (`tools/pack_cheats.py`, 6275 files, 26.5 MB of JSON and XML) and expands it beside
+its own `config.json` exactly once, keyed on the archive's identity. One archive and not 6275 loose
+files because the one-file build unpacks every bundled data file into `%TEMP%` on every launch.
+The exe goes from 29.5 MB to 39.0 MB.
+
+### The rest of the PS4's cheat surface
+
+* **`/api/mem/write`**, with the same expect-gate and `expect_mismatch` reply as the PS5. Read-only
+  was right while nothing could write; the agent writes now.
+* **The patch route asked "is the game running" before "does this title have a patch file"**, so a
+  title with no patches was told to launch a game. And it never checked `AppVer`, so a patch written
+  for another build was applied to whatever was running - the one thing the PS5 refuses outright.
+  It now answers with `title_id`, `name`, `app_ver`, `installed_version`, `partial` and a message,
+  and raises the same toast the PS5 does.
+* **`/api/cheat/find` answered in a different shape** - `reason` where the PS5 says `match`, and no
+  `exact` - and the companion reads both by name, so every PS4 answer read as "no reason given".
+* **`/api/patch/list` claimed `ok:true` with no patch file**, ignored the `&version=` the companion
+  sends, and omitted `installed_version` and `file`.
+* **`running_game()` trusted two sources that can disagree.** The pid and base come from the agent;
+  the title comes from the console. An agent still answering from a game the owner has left would
+  hand back a live pid for a title that is no longer running. They are compared now, and a
+  disagreement is a refusal rather than a guess about which one is stale.
+* **`agent_deploy()` re-listed the plugin on every boot**, so an owner who deliberately turned the
+  helper off got it back at the next payload reload. It only enables what it has just installed for
+  the first time.
+* **A POST to `/api/fs/delete` answered a silent `{}`** - every `/api/fs/` operation except write
+  lives in the GET half. Third time this trap has been hit on this console (the queue buttons, the
+  Save button), found while cleaning up after the intake test.
+* The tile subline read `m.type` and `m.patches`, which **no payload and no companion route has
+  ever sent**, so the second line of every mod tile has always been empty. It reads `entries` now,
+  which both consoles do send.
+* Rescan in Settings went out with no `?console=`, so on a fleet it filed onto whichever console
+  the PC resolved first.
+
+### There is no way to start a game from the payload, and that is now written down
+
+A route to launch a game was written - so the last link in the chain could be proved with nobody in
+the room - and then taken out again, because it cannot be done here. Measured with
+`/api/engine/symprobe` against all five libraries the payload loads:
+
+```
+sceLncUtilLaunchApp              false   <- the only one with a real signature
+sceSystemServiceLaunchApp        true    <- declared `void f()`: no arguments, no shape
+sceSystemServiceKillApp          true    <- typed, but three of its four ints are unnamed
+sceUserServiceGetForegroundUser  true
+```
+
+There is no `libSceLncUtil.sprx` in `/system/common/lib` (439 entries) or `/system/priv/lib` (23),
+both listed from the console; its exports live inside ShellCore. Using the one that does resolve
+would mean inventing its arguments, which is the thing that crashed a console here once. **So the
+last step - a cheat landing in a running game - is verified by a person starting a game.**
+Everything before it is verified here.
+
+---
+
+## [3.67.0] - 2026-09-25 - "It knows where its consoles are" `[VERIFIED]`
+
+The PS4 icon stopped working and the app showed the console as offline. Two different faults, and
+only one of them was ours - but the one that was ours had been waiting to happen on any network
+with DHCP.
+
+### The app could not follow a console that changed address
+
+**Measured.** The PS4 was restarted, took a new DHCP lease and came back at `10.0.0.86`.
+`config.json` still said `10.0.0.87`. Discovery found the console perfectly - `confirmed=True
+platform=ps4` - and **nothing compared what it found against what was saved**, because an ADDRESS
+was the only name this app had ever had for a console, and the address is exactly what changed. A
+healthy console was reported offline indefinitely while it sat one number along, answering.
+
+Three things were needed and they only work together:
+
+**1. Identity.** Every console now writes itself a sixteen-character id the first time the payload
+runs, keeps it in `/data/pkg-mutant-shop/console-id`, and reports it in `/api/health`. It survives
+reboots, address changes and payload rebuilds. It is random and local - not a serial, not a MAC,
+not an account - and deleting the file simply gets a new one. Both payloads carry the identical
+function; the single line that differs is the clock helper, which the two files have always spelled
+differently.
+
+**2. Reconciliation.** `track_consoles()` is now the only writer of a console's address. Identity
+first, and only then the fallback of "the one unclaimed console of that platform".
+
+**3. Continuously.** A watcher checks the cheap thing often (one `/api/health` per console every
+45 s) and the expensive thing rarely (a /24 sweep only after a console has actually gone quiet, and
+at most once every three minutes). Doing this once at startup would have fixed today and missed
+tomorrow, because a lease expires while the app is running.
+
+**Its refusals are the point.** It will not move an entry onto a console whose id belongs to a
+different entry, will not choose between two equally plausible candidates, and never renames or
+removes anything. `tools/test_console_tracker.py` runs nine cases against a fake network - five of
+them are refusals - and gates both ELF builds. Writing it caught a real bug immediately: calling
+`reconcile_consoles()` after a correct move **emptied the console list**, because that function
+folds the settings panel's address fields into the list and the test had none set.
+
+### A PS4 that is switched on gets its shop back by itself
+
+A GoldHEN payload lives in RAM. It does not survive a reboot, and GoldHEN has no autoload folder -
+its config has a `[BinLoader]` switch and nothing that runs a payload at startup. So after every
+restart *something* has to hand the ELF to the loader. The home-screen icon does that when pressed,
+and now the PC does it when nobody presses anything: a console that is reachable but has no shop
+gets the payload handed to it, once every five minutes at most. The exe carries the PS4 payload for
+this (+7 MB).
+
+**The POST is still the only thing that touches port 9090.** A connection that is accepted and left
+empty is what stops that loader listening - this console has lost it that way twice - so the
+shared `_port_open()` helper now carries that warning where anyone reaching for it will read it.
+
+### The icon says which failure it hit
+
+The owner saw a black screen and then "cannot start". That message was ours and it was accurate -
+no payload loader answered - but it covers two situations that need different actions:
+
+* the jailbreak is not loaded at all; or
+* the jailbreak **is** loaded and only its payload loader is gone, which is the ordinary state
+  after a rest/resume and is documented in `ps4-app/onconsole/README.md`: *"9090 does not survive
+  rest mode: after a suspend/resume, FTP and klog come back and the payload loader does not"*.
+
+One connect to FTP tells them apart, and the icon now names the one it hit. It also retries the
+loader once after two seconds, because pressing the icon moments after the exploit lands can find
+the loader still coming up.
+
+### Verified
+
+Both consoles on 3.67.0 reporting durable ids (`d125ea52…` and `25301f11…`), stable across reads
+and across a payload reload. The tracker was run against a copy of the real config with the PS4
+genuinely moved: it followed `10.0.0.87 -> 10.0.0.86` and took `ps4_ip` with it. The home-screen
+package on the console is now byte-identical to the built one (`caf069e4…`, `stale:false`), and the
+PS4 cheat engine still lists (`CUSA20499`, 5 mods).
+
+**Still not verified: turning a cheat on inside a running game.** That is the next thing, and it
+needs a game.
+
+---
+
+## [3.66.0] - 2026-09-24 - "The PS4 gets the engine" `[VERIFIED, except in-game]`
+
+Cheats work on the PS4 now. Not GoldHEN's - ours, the same engine the PS5 has been running, reading
+the same library and answering the same API. Getting there meant proving two things impossible
+before finding the thing that was not.
+
+### Both ways in from outside are shut, and that is measured, not assumed
+
+3.65.0 established that `mdbg` (syscall 573) returns **EPERM** from our payload. This version asked
+the only other question the PS4 toolchains on this machine document: `ptrace`. `/api/engine/ptraceprobe`
+issues `PT_ATTACH` against a pid picked out of the live process list precisely so it does **not**
+exist - nothing is attached to, no game is involved - and FreeBSD looks a process up *before* it
+checks permission, so a reachable syscall would have answered `ESRCH`.
+
+It answered **`EPERM`**, before it even looked.
+
+Two independent userland routes to another process's memory, both refused at the credential check.
+Not a missing call, not a wrong struct: our payload simply does not have the privilege, and under
+GoldHEN there is no way to grant it. **Neither should ever be probed again** - that is recorded
+where the next person will look.
+
+### So the engine went inside the game, which is where GoldHEN's has always been
+
+Read off the console rather than recalled: `/data/GoldHEN/config.ini` carries
+`[PluginLoader] Game_Patch_Enabled = 1`, and `/data/GoldHEN/plugins/` holds `plugin_loader.prx` and
+`game_patch.prx`. GoldHEN loads code **into the game process**, where patching memory needs no
+permission at all because the memory belongs to the process doing the writing. Its plugins are
+fake-signed with the ELF body in plaintext, so the contract was readable directly from the files
+the console already had: `plugin_load` / `plugin_unload`, dlsym'd by the loader, driven by
+`plugins.ini` with `[settings]`, `[default]` and `[<TitleID>]` sections.
+
+**`ps4-app/plugin/pms-agent.prx`** is ours. It is deliberately a pair of hands and not a brain: it
+knows nothing about cheats, files, formats or titles, and answers four questions - are you there,
+what process is this, read these bytes, write these bytes. Everything else stays in the shop, where
+it can be tested without a console. Four rules, each for a reason:
+
+* **Nothing happens until it is asked.** `plugin_load` starts a listener and returns.
+* **No address is touched without asking the kernel first.** `sceKernelVirtualQuery` on both ends of
+  every range - only its *return code*, never its struct, whose fields the OpenOrbis header names
+  `unk01`/`unk02`. A cheat with a bad offset gets an error instead of crashing the game, and a bad
+  offset is the *normal* failure of a cheat file written for another build.
+* **Loopback only.** Game memory is never exposed to the network.
+* **Failure is silent.** If the socket will not bind it returns anyway and the game runs as if the
+  plugin were not there. A cheat tool must never be why a game will not start.
+
+It builds from the OpenOrbis toolchain alone - `crtlib.o`, `link.x`, `create-fself --lib` - with no
+GoldHEN SDK dependency, which matters because that SDK would not clone on this machine. One trap
+cost a build: **`--export-dynamic`**. Nothing inside the module references `plugin_load` (the only
+caller is the loader, from outside, by dlsym), so the linker dropped it and produced a clean `.prx`
+with an *empty* dynamic table - which loads without complaint and does nothing. The build now
+refuses if either entry point is missing.
+
+### The PS4 runs the PS5's cheat engine, not a second copy of it
+
+`tools/ps4_sync_cheat_core.py` extracts 61 functions from `ps5-app/onconsole/server.c` into
+`ps4-app/onconsole/cheat_core.h` - the AES for `.mc4`, the Trainer-XML converter for `.shn`, the
+library picker, the document walker, the expect-gate, conflict detection, apply/revert and the
+whole game-patch engine. None of it is platform-specific; it reaches memory only through
+`mem_read`/`mem_write`, which each console defines for itself. **Both** ELF builds run it with
+`--check`, so a change to the PS5 that the extractor can no longer find fails the PS5 build too -
+the failure belongs where the edit was made.
+
+Writing that extractor surfaced a real trap worth recording: counting `{` and `}` per line to find
+a function's end is wrong, because `next_mod_block()` is *written in terms of* the characters `'{'`
+and `'}'`. Its depth never returned to zero. Any function quoting a brace would have been truncated
+the same way and, being merely short rather than absent, would have done it **silently**.
+
+### Measured on the console, with the library synced to it
+
+`/api/mods/CUSA14409` on the PS4: found `CUSA14409_01.04.json`, read the installed version `01.00`
+out of app.db, and flagged `compatible: false, reason: "other version"` - the same judgement the
+PS5 makes. All three formats parse there: JSON, a `.shn` converted from Trainer XML (4 mods), and an
+AES-256-CBC `.mc4` decrypted (5 mods).
+
+The cheat library sync no longer refuses a PS4. Its old reason was sound and is now obsolete, and
+the background sync asks **every** console rather than a PS5 by name - the PS4 needs it more, since
+the PS5's ELF ships the library inside it while the PS4's arrives only this way.
+
+### The panel is one code path again
+
+The PS4 branch added in 3.65.0 - borrow the PS5's list, show it read-only, explain why - is gone
+along with the string it displayed and the inert tile renderer it used. Both tabs ask their own
+console and render identically, and everything the panel already did about a game that is not
+running applies to the PS4 for free. `platform === "ps4"` is no longer treated as a refusal.
+
+### An off switch, because it loads into every game
+
+`plugins.ini` puts the helper in `[default]`, so it loads into every game that starts.
+`POST /api/engine/agent {"enabled":false}` comments that one line out and leaves every other line
+of GoldHEN's config untouched - it may list plugins this app knows nothing about. Two of this
+version's bugs were in that writer and both failed safe: `fopen()` does not work from this payload
+(every other writer in the file uses `open()`/`write()` - now so does this one), and a headroom
+check of 1024 bytes against a buffer only 512 larger than the file declared every real config
+"truncated" and refused. Neither ever corrupted the file, which is what the refusal was for.
+
+### What is NOT verified
+
+The in-game half. Everything above was measured with no game running; the agent has never been
+loaded into one, because the owner asked that the game side wait until they were home. The listing,
+the formats, the version matching, the toggle's refusal path and the helper switch are all
+confirmed. Turning a cheat **on** is not, and is the first thing to do next.
+
+---
+
+## [3.65.0] - 2026-09-24 - "What the PS4 actually said" `[VERIFIED]`
+
+A claim this project had been repeating for three versions turned out to be wrong, and the owner
+said so. Finding out exactly how wrong took two read-only probes on their console, and the answer
+changed what several screens are allowed to say.
+
+### "The PS4 gives our engine no way to reach a running game's memory" was not true
+
+`server_ps4.c` has said since it was written that the cheat engine has no PS4 equivalent, because
+GoldHEN provides no `kexec` and therefore no kernel read/write. The first half is correct and was
+measured three separate times. The conclusion was not.
+
+The PS5 engine *writes* memory through a page-table walk because that is what a PS5 needs - but it
+*reads* through `mdbg_copyout`, and mdbg is not kernel work at all. It is syscall 573, a userland
+call, declared and implemented by the SDK whose crt this payload already links, and already
+compiled into `PKG-MUTANT-SHOP-PS4.elf`. What blocks it is narrower than "no way": the SDK's own
+wrapper elevates the calling process to `SCE_AUTHID_COREDUMP` before calling, that elevation is
+four `kernel_*` calls, and those need the kexec we do not have - so the wrapper returns -1 *before
+ever issuing the syscall*.
+
+So the syscall was issued directly, with the elevation skipped. `/api/engine/memprobe` reads
+sixteen bytes of **our own process, into our own buffer** - no game involved, nothing written - and
+reports the raw return rather than a verdict. On FW 13.52 the kernel answers **EPERM**. The door is
+real; we do not have this particular key. That is a measured limit with a named cause, which is a
+different thing from the impossibility the code claimed.
+
+Nothing here was guessed. Syscall number, both operation codes and all three struct layouts were
+read out of `crt/syscall.h` and `crt/mdbg.c`; the syscall stub is the SDK's own `__syscall`, copied
+rather than rewritten, because inventing a calling convention is the class of guess that has cost
+this project a console. `ps5debug-NG` on this machine issues the identical 573 with the identical
+`{1, 0x12|0x13}`, which is as close to independent confirmation of the ABI as is available here.
+
+### How GoldHEN does it, read off the owner's own console
+
+Not from its source, which is not on this machine, and not from memory. From the files GoldHEN has
+installed on the PS4: `/data/GoldHEN/config.ini` carries `[PluginLoader] Game_Patch_Enabled = 1`,
+and `/data/GoldHEN/plugins/` holds `plugin_loader.prx` and `game_patch.prx`. It loads code **into
+the game process**, where patching memory needs no permission at all because the memory is the
+process's own. Its cheat library is at `/data/GoldHEN/cheats/{json,shn,mc4}` - the same three
+formats ours ships 7,022 of.
+
+That is the mechanism a PS4 engine of ours would have to use, and it needs a `.prx` built against
+GoldHEN's plugin ABI. That ABI is not on this machine and is not something to infer, so this
+version does not pretend to have it.
+
+### The PS4 says which game is running
+
+`/api/health` has answered `running_title: ""` since the PS4 payload existed, with a comment saying
+honestly that no PS4 signature for the question could be read anywhere and that inferring one is
+how this project once crashed a console. The caution was right; the premise was not. The payload
+SDK ships a working sample that enumerates processes with `sysctl{CTL_KERN, KERN_PROC,
+KERN_PROC_PROC}` and asks each pid via `sceKernelGetAppInfo`, and OpenOrbis declares the PS4's own
+foreground call - `sceSystemServiceGetAppIdOfBigApp`, **not** the PS5's `...OfRunningBigApp`.
+
+The two toolchains disagreed about the app-info layout: title id at offset 12 with 14 bytes, or at
+offset 16 with 10. They cannot both be right, so `/api/engine/proclist` reported **both candidates
+as raw text** and let the console settle it. Across all 63 running processes offset 12 was empty
+every time and offset 16 held real ids - `NPXS21002`, `NPXS20001`, `NPXS20975`. OpenOrbis is right
+for 13.52. A wrong offset yields a plausible wrong pid, and a wrong pid is the one thing a memory
+write must never be handed, which is why the probe printed both instead of choosing.
+
+`sceKernelGetAppInfo` resolved from nowhere until `libkernel.sprx` was added to the dlopen list -
+`RTLD_DEFAULT` does not reach it, exactly as it reached no BGFT symbol when this file was new. Same
+lesson, second library. The answer is memoised for two seconds; health still returns in 16-21 ms.
+
+### Mods & Patches: the PS4 tab is the same section, not a notice beside it
+
+Four faults, all the same mistake - the PS4 tab was written as a fallback rather than as the
+section it lives in:
+
+* The PS5 tab lays its cheats out as two columns of tiles; the PS4 tab drew full-width rows, so
+  switching tab changed the shape of the panel instead of its contents. Both now render the same
+  `.modgrid` of the same `.modtile`s - the PS4's inert, because there is nothing to press.
+* The tabs sat in their own strip under the heading, pushing the section down and reading as a
+  second console picker. They are now on the heading's own line, after the count, hard right, and
+  bigger than the label they sit beside because they are controls.
+* **A PS5 game offered a PS4 tab.** A PPSA title cannot be installed on a PS4 at all. The tabs now
+  come from `eligibleConsoles()` - the same answer the install picker has used since the
+  two-console work - so a PS5 game gets one tab, and one tab means no strip is drawn.
+* **The panel collapsed to one column when the PS4 tab had no cheats.** A 900 ms check drops the
+  two-column layout when the right side comes back empty, which is right for a title with no cheat
+  file - but it re-laid the whole panel out underneath the control the owner had just pressed. A
+  section that offers a way back has to still be there to go back to.
+
+The selected tab was also styled with `var(--acc)`, which this stylesheet does not define; it is
+`--accent`. An undefined custom property makes the whole declaration invalid, so the selected tab
+was never highlighted at all.
+
+`tools/test_mods_tabs.py` pulls those functions out of the page and **runs** them against a fake
+fleet - six cases, including PPSA getting exactly one tab. A grep cannot tell you that. It gates
+both ELF builds and `ready_check`.
+
+### Icons the PS4 cannot draw
+
+Several icons render as the empty box a font uses for "I do not have this character", the laptop on
+the storage tiles most visibly because it is on the front page. Every one was an astral-plane
+pictograph and the PS4's browser ships no colour emoji - no font-family list can rescue a glyph the
+device does not have. They are drawn now: small inline SVGs, sized in `em` and coloured with
+`currentColor`, so no font is involved. Console tiles gained an icon they never had, so a row that
+mixes computers and consoles says which is which before you read the names.
+
+One exception, on purpose: the console picker is a `<select>`, and an `<option>` renders text and
+nothing else. Those two lose the gamepad and keep the name. The online dot stays - `●`/`○` are BMP
+geometric shapes, not emoji.
+
+### The panel says which consoles hold the game
+
+The status badge answers "is it installed?" for the one console the panel is aimed at, which is
+what the Install button needs. With two consoles the more common question is the other one, and a
+game on both looked identical to a game on one - the only way to tell was to switch the picker and
+read the badge again. A new pill lists every console that has it, marking the ones with an update
+waiting, built from the same `stateOfOn()` the badge uses so the two cannot disagree. Nothing
+renders on a single-console setup.
+
+---
+
 ## [3.64.0] - 2026-09-23 - "Asking before answering" `[VERIFIED]`
 
 The rest of the 143-agent audit: the medium and low findings, re-triaged against the code as it

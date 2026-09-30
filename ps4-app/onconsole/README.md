@@ -60,8 +60,30 @@ one marker between patches, so the third silently never applied and looked "alre
 Symbol resolution stays fatal: a payload that cannot find what it needs must refuse, not run blind.
 
 **Consequence:** with `kexec` absent there is **no kernel read/write** on this console, so the
-CR3-page-walk cheat engine cannot be ported as it stands. `/api/cheat*`, `/api/mods*` and
-`/api/patch*` answer with a plain "not available on the PS4 yet" rather than pretending.
+PS5's CR3-page-walk cannot be ported as it stands — and neither userland alternative is open
+either: `mdbg` (syscall 573) returns **EPERM** and `ptrace` returns **EPERM before it even looks
+the target up**, both measured from this payload on 13.52.
+
+**So the engine runs INSIDE the game instead.** `ps4-app/plugin/` is a small GoldHEN plugin
+(`pms-agent.prx`) that GoldHEN's own `plugin_loader` puts into every game; it serves four
+requests — ping, info, read, write — on `127.0.0.1:9231`, and knows nothing about cheats, files or
+titles. The engine itself is unchanged and shared: `tools/ps4_sync_cheat_core.py` copies it out of
+`ps5-app/onconsole/server.c` into `cheat_core.h`, and both ELF builds run that tool with `--check`
+so the two cannot drift. `mem_read`/`mem_write` are the only things that differ between the
+consoles. The plugin travels inside this ELF (`agent_bundle.h`) and is written to the console at
+boot, so there is nothing for an owner to copy.
+
+`/api/cheat/*`, `/api/mods/*`, `/api/patch/*` and `/api/mem/*` are all answered here now. Toggling
+needs the helper to be inside the running game — a game started before the helper was listed is
+running and cannot be written to, and the refusal says exactly that. The protocol between the two
+halves is tested on a PC with no console at all by `tools/test_agent_protocol.py`, which compiles
+both shipped sources and runs them against each other; `ready_check` gates it.
+
+**There is no way to start a game from this payload.** `sceLncUtilLaunchApp` is the only launch
+call with a real signature in the toolchain and it does not resolve here (no `libSceLncUtil.sprx`
+in `/system/common/lib` or `/system/priv/lib`); `sceSystemServiceLaunchApp` resolves but is
+declared `void f()`, so calling it would mean inventing its arguments. That means the last step of
+the chain — a cheat landing in a running game — is verified by a person starting a game.
 
 ## What the payload gets under GoldHEN
 

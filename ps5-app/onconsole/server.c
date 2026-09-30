@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.64.0"
+#define SHOP_VERSION "3.86.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the
@@ -952,6 +952,8 @@ static int sq_col_index(const char *sql, const char *col) {
 }
 
 static const char *json_str_after(const char *p, const char *key, char *out, size_t outsz);
+static const char *json_str_after_lim(const char *p, const char *end, const char *key,
+                                      char *out, size_t outsz);
 
 /* ---------------- every PC on the network, not just the last one ----------
  * Each companion announces itself to us. This used to be a SINGLE slot, so the
@@ -1087,6 +1089,25 @@ static char *http_get_ip(const char *ip, int port, const char *path, long *out_l
  * the console app show the same information as the PC companion.
  * ------------------------------------------------------------------------- */
 #define APP_DB_PATH "/system_data/priv/mms/app.db"
+/* WHAT THE CONSOLE'S CONTENT LOOKS LIKE RIGHT NOW, in one short string.
+ *
+ * app.db holds the installed titles and their APP_VER; addcont.db holds the add-ons. Between them
+ * they decide every "installed", "Update" and "DLC" the page draws. Two stats, so this is safe to
+ * answer on the health poll, and the companion only has to notice the string changing to know it
+ * should re-read the library - which is what makes the Updates section react to an install, an
+ * update, a delete or an add-on WITHOUT the page being reloaded by hand.
+ *
+ * Deliberately not a hash of the file: a hash means reading it, and the point of this is that it
+ * costs nothing. Size plus mtime moves for every write sqlite makes to either database. */
+#define ADDCONT_DB_PATH "/system_data/priv/mms/addcont.db"
+static void content_sig(char *out, size_t osz) {
+    struct stat a, b;
+    long long as = 0, am = 0, bs = 0, bm = 0;
+    if (stat(APP_DB_PATH, &a) == 0) { as = (long long)a.st_size; am = (long long)a.st_mtime; }
+    if (stat(ADDCONT_DB_PATH, &b) == 0) { bs = (long long)b.st_size; bm = (long long)b.st_mtime; }
+    snprintf(out, osz, "%lld-%lld-%lld-%lld", as, am, bs, bm);
+}
+
 #define MAX_TITLES  256
 
 typedef struct {
@@ -1536,15 +1557,18 @@ static void merge_pc_library(const char *ip, int port, char **buf, size_t *cap, 
         else if (*p == '}') {
             depth--;
             if (depth == 0 && obj) {
+                /* BOUNDED TO THIS ENTRY. "platform" chooses the install lane and "install_key" is
+                   what an install is started with; an entry missing either used to take the next
+                   entry's, which is a peer's game installed with another game's key. */
                 char tid[24] = {0}, nm[240] = {0}, plat[8] = {0}, key[300] = {0};
                 char icon[300] = {0};
-                json_str_after(obj, "title_id", tid, sizeof(tid));
-                json_str_after(obj, "name", nm, sizeof(nm));
-                json_str_after(obj, "platform", plat, sizeof(plat));
-                json_str_after(obj, "install_key", key, sizeof(key));
-                json_str_after(obj, "icon_url", icon, sizeof(icon));
+                json_str_after_lim(obj, p, "title_id", tid, sizeof(tid));
+                json_str_after_lim(obj, p, "name", nm, sizeof(nm));
+                json_str_after_lim(obj, p, "platform", plat, sizeof(plat));
+                json_str_after_lim(obj, p, "install_key", key, sizeof(key));
+                json_str_after_lim(obj, p, "icon_url", icon, sizeof(icon));
                 char thumb[300] = {0};
-                json_str_after(obj, "thumb_url", thumb, sizeof(thumb));
+                json_str_after_lim(obj, p, "thumb_url", thumb, sizeof(thumb));
                 /* An add-on with no base game must stay an add-on here too, or the console
                    shows it as a game and the Add-ons category never appears. */
                 int upd_only = 0;
@@ -2610,6 +2634,13 @@ static size_t patch_unescape(const char *in, size_t len, char *out, size_t outsz
 /* Our own library. The ELF creates it and migrates whatever it finds in the old CheatRunner
    location, so the app owns everything it needs under one directory. */
 #define SHOP_DATA_DIR     "/data/pkg-mutant-shop"
+#define PB_DIR      "/data/pkg-mutant-shop/payloads"
+/* SEEDED ONCE, KEPT FOR EVER. The homebrew packages are 264 MB and cannot ride inside an ELF that
+   Payload Manager loads into RAM, so the PC copies them here the first time the two meet and the
+   console installs them from here afterwards with no PC at all - pkgfile_path_allowed() already
+   accepts /data/..., so the ordinary local install lane serves them to the installer over
+   loopback with nothing new to get right. */
+#define HB_DIR      "/data/pkg-mutant-shop/homebrews"
 #define CHEAT_ROOT        SHOP_DATA_DIR "/cheats"
 #define CHEAT_JSON_DIR    CHEAT_ROOT "/json"
 #define CHEAT_SHN_DIR     CHEAT_ROOT "/shn"
@@ -2632,6 +2663,12 @@ typedef struct {
     unsigned char on[CHEAT_MAX_BYTES];  int on_len;
     unsigned char off[CHEAT_MAX_BYTES]; int off_len;
     int absolute;              /* <Absolute> in .shn/.mc4 — offset is not image-relative */
+    /* THE MODULE THE CHEAT MEANT. Talixme's trainer records the index of a loaded module in
+       <Section>, and 306 entries in the library we ship carry a non-zero one. This engine resolves
+       ONE base - the main executable - so for those entries base + offset is not where the cheat
+       points, and the gate refuses them. Kept only so the refusal can say that, instead of blaming
+       the game's version for something that is a property of the cheat file. */
+    int section;
 } cheat_entry_t;
 /* Canonical x86-64 user range: outside this we risk kernel space or PS5 MMIO. */
 #define ADDR_OK(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
@@ -2643,15 +2680,28 @@ static int parse_mod_entries_ex(const char *blk, const char *blk_end, cheat_entr
 static const char *next_mod_block(const char *from, const char **end);
 static const char *mods_array_start(const char *json);
 static int cheat_apply_mod_doc(const char *json, int non_json, int index, int want_on, pid_t pid,
-                               intptr_t base, int force, char *detail, size_t dsz);
+                               intptr_t base, int force, int check_only, char *detail, size_t dsz);
 static int cheat_apply_blk(const char *json, int non_json, const char *blk, const char *end,
                            int index, int want_on, pid_t pid, intptr_t base, int force,
-                           char *detail, size_t dsz);
+                           int check_only, char *detail, size_t dsz);
+/* The signature search: the routes that start and read it sit ~2,000 lines above the engine. */
+typedef struct pms_sig pms_sig_t;
+static int sig_start(const char *pattern, pid_t pid, intptr_t base, long long from, long long to);
+static void sig_cancel(void);
+static void sig_status_json(char *out, size_t osz);
+static const char *cheat_master_span(const char *json, const char **end);
+static int cheat_master_info(const char *json, int *removable);
+static int cheat_master_off(const char *json, pid_t pid, intptr_t base, int non_json,
+                            char *why, size_t wsz);
+/* Declared here because the routes that answer with it sit above its definition. */
+static void cheat_rc_message(int rc, const char *detail, int want_on, char *out, size_t osz);
 static char *slurp(const char *path, long *out_len);
 static const char *json_str_after(const char *p, const char *key, char *out, size_t outsz);
+static const char *json_str_after_lim(const char *p, const char *end, const char *key,
+                                      char *out, size_t outsz);
 static const char *find_mod_block(const char *json, int index, const char **end);
 static int cheat_apply_mod(const char *file, int index, int want_on, pid_t pid, intptr_t base,
-                           int force, char *detail, size_t dsz);
+                           int force, int check_only, char *detail, size_t dsz);
 static int install_title_dir(const char *tid, int do_uninstall_first, int *rc_uninstall, int *rc_all);
 #define TILE_TID       "PKGM00001"
 #define TILE_APP_DIR   "/user/app/" TILE_TID
@@ -2975,8 +3025,16 @@ static void tbuf_put_json_xml(tbuf_t *b, const char *s, size_t n) {
 
 /* Returns a malloc'd JSON document in the shape our engine already parses, or NULL. */
 static char *shn_xml_to_json(const char *xml, size_t xml_len) {
-    (void)xml_len;
     if (!xml) return NULL;
+    /* UTF-16 IS NOT A PARSE FAILURE THIS CAN HIDE. Four .shn files in the shipped library are
+       UTF-16, and every strstr below misses on the NUL bytes - so the result was a well-formed
+       document with no cheats in it, which reads to the owner as "this game has nothing" rather
+       than "this file cannot be read". NULL makes the caller say the second. */
+    if (xml_len >= 2) {
+        unsigned char b0 = (unsigned char)xml[0], b1 = (unsigned char)xml[1];
+        if ((b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF)) return NULL;
+        if (b0 == 0x00 || b1 == 0x00) return NULL;      /* UTF-16 with no mark */
+    }
     char *chunk = (char *)malloc(SHN_CHUNK_MAX);
     if (!chunk) return NULL;
     tbuf_t o = {0};
@@ -3005,7 +3063,85 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
     tbuf_puts(&o, "\",\"process\":\"");
     if (hdr[0] && (v = xml_attr(hdr, "Process", &al))) tbuf_put_json(&o, v, al);
     else tbuf_puts(&o, "eboot.bin");
-    tbuf_puts(&o, "\",\"mods\":[");
+    tbuf_putc(&o, '"');
+    tbuf_putc(&o, ',');
+
+    /* ---- <StartUP> -> "master" ---------------------------------------------------------------
+     * 126 blocks in 73 Trainer files, named "Master Code 1 (Must Be On)" and meant exactly that: a
+     * shared routine and its scratch, which the cheats in the same file are diffs against. It was
+     * never looked at, because this loop only ever walked <Cheat>. Emitted into the same key the
+     * json files use, so cheat_master_decide reads one shape for both formats - and these carry
+     * ValueOff, so a master that came from here can be removed again.
+     * Written before "mods" only for tidiness; nothing depends on key order. */
+    /* EVERY <StartUP>, NOT THE FIRST. 126 blocks across 73 files, so 36 of them carry more than one -
+       "Master Code 1", "Master Code 2" - and the cheats in those files are diffs against all of them.
+       Reading one of two installed half a routine, which is the failure the rest of this engine
+       refuses by name. They all go into the one "master" object, which is how the engine treats it:
+       one list, applied whole or not at all. */
+    {
+        int su_any = 0, su_first = 1, su_dropped = 0;
+        const char *su = xml;
+        while ((su = strstr(su, "<StartUP")) != NULL) {
+            const char *suc = strchr(su, '>');
+            const char *su_end = strstr(su, "</StartUP>");
+            if (!suc || !su_end) break;
+            if (!su_any) { tbuf_puts(&o, "\"master\":{\"memory\":["); su_any = 1; }
+            const char *lc = suc;
+            while (lc < su_end && (lc = strstr(lc, "<Cheatline")) != NULL && lc < su_end) {
+                /* CLAMPED TO THIS BLOCK. These came from strstr over the whole rest of the document,
+                   so a cheatline whose </Cheatline> was missing copied a following <Cheat>'s bytes
+                   into the master. A line that does not close inside the block ends it. */
+                const char *lclose = strstr(lc, "</Cheatline>");
+                const char *lself  = strstr(lc, "/>");
+                if (lclose && lclose >= su_end) lclose = NULL;
+                if (lself && lself >= su_end) lself = NULL;
+                const char *lend;
+                if (lclose && (!lself || lclose < lself)) lend = lclose + 12;
+                else if (lself) lend = lself + 2;
+                else break;
+                size_t cl = (size_t)(lend - lc);
+                if (cl >= SHN_CHUNK_MAX) { su_dropped++; lc = lend; continue; }
+                memcpy(chunk, lc, cl); chunk[cl] = 0;
+                size_t ol = 0, onl = 0, offl = 0, scl = 0;
+                const char *off  = xml_child(chunk, "Offset",   &ol);
+                const char *on   = xml_child(chunk, "ValueOn",  &onl);
+                const char *offv = xml_child(chunk, "ValueOff", &offl);
+                const char *sect = xml_child(chunk, "Section",  &scl);
+                if (off && ol && on && onl) {
+                    if (!su_first) tbuf_putc(&o, ',');
+                    su_first = 0;
+                    tbuf_puts(&o, "{\"offset\":\"");
+                    tbuf_put_hex(&o, off, ol);
+                    tbuf_puts(&o, "\",\"on\":\"");
+                    tbuf_put_hex(&o, on, onl);
+                    tbuf_puts(&o, "\",\"off\":\"");
+                    if (offv) tbuf_put_hex(&o, offv, offl);
+                    tbuf_putc(&o, '"');
+                    if (sect && scl) {
+                        tbuf_puts(&o, ",\"section\":\"");
+                        tbuf_put_json(&o, sect, scl);
+                        tbuf_putc(&o, '"');
+                    }
+                    tbuf_putc(&o, '}');
+                }
+                lc = lend;
+            }
+            su = su_end + 10;
+        }
+        if (su_any) {
+            tbuf_puts(&o, "]");
+            /* A MASTER MISSING A PIECE IS WORSE THAN A MOD MISSING ONE. The Cheat loop counts an
+               oversize line and makes its mod refuse; this silently skipped it. cheat_master_decide
+               reads "dropped" and refuses the whole master (MW_PART). */
+            if (su_dropped) {
+                char dn[40];
+                snprintf(dn, sizeof(dn), ",\"dropped\":%d", su_dropped);
+                tbuf_puts(&o, dn);
+            }
+            tbuf_puts(&o, "},");
+        }
+    }
+    tbuf_puts(&o, "\"mods\":[");
 
     int first = 1;
     const char *cur = xml;
@@ -3045,11 +3181,15 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
             if (cl >= SHN_CHUNK_MAX) { dropped++; lc = lend; continue; }   /* counted, not hidden */
             memcpy(chunk, lc, cl); chunk[cl] = 0;
 
-            size_t ol = 0, onl = 0, offl = 0, abl = 0;
+            size_t ol = 0, onl = 0, offl = 0, abl = 0, scl = 0;
             const char *off  = xml_child(chunk, "Offset",   &ol);
             const char *on   = xml_child(chunk, "ValueOn",  &onl);
             const char *offv = xml_child(chunk, "ValueOff", &offl);
             const char *abs_ = xml_child(chunk, "Absolute", &abl);
+            /* WHICH MODULE THE OFFSET IS IN. 770 cheatlines in the shipped library carry a non-zero
+               one; this engine places the main executable only, so those cannot be applied, and the
+               number is what lets the refusal say that instead of blaming the game's version. */
+            const char *sect = xml_child(chunk, "Section", &scl);
             if (off && ol && (on || offv)) {
                 if (!first_mem) tbuf_putc(&o, ',');
                 first_mem = 0;
@@ -3062,6 +3202,11 @@ static char *shn_xml_to_json(const char *xml, size_t xml_len) {
                 tbuf_putc(&o, '"');
                 if (abs_ && abl && (abs_[0] == '1' || abs_[0] == 't' || abs_[0] == 'T'))
                     tbuf_puts(&o, ",\"absolute\":true");
+                if (sect && scl) {
+                    tbuf_puts(&o, ",\"section\":\"");
+                    tbuf_put_json(&o, sect, scl);
+                    tbuf_putc(&o, '"');
+                }
                 tbuf_putc(&o, '}');
             }
             lc = lend;
@@ -3236,6 +3381,13 @@ static const char *cheat_sniff(const char *path) {
            (unsigned char)*p2 == 0xEF || (unsigned char)*p2 == 0xBB ||
            (unsigned char)*p2 == 0xBF) p2++;   /* whitespace + UTF-8 BOM */
     if (*p2 == '{') kind = "json";
+    /* A GAME PATCH XML, AND IT HAS TO BE TESTED BEFORE THE GENERIC "<?xml" FALLBACK. Every patch
+       document is XML, so the fallback below claimed all 376 of them as "shn" - they were filed into
+       shn/ as <TID>.shn, which removed them from CHEAT_PATCH_DIR entirely AND, because a generic file
+       outranks an other-version match, made them outrank the real versioned trainer for 200 titles.
+       Safe by measurement, not by hope: 0 of the 5,193 cheat files in the shipped library contain
+       "<Patch" or "<TitleID>", and all 376 patch documents do. */
+    else if (strstr(data, "<Patch") || strstr(data, "<TitleID>")) kind = "patch";
     else if (strstr(data, "<Trainer") || strstr(data, "<?xml")) kind = "shn";
     else {
         /* Base64-looking? Only a successful decrypt to Trainer XML proves it is .mc4. */
@@ -3268,7 +3420,55 @@ static int move_file(const char *src, const char *dst) {
 
 /* Sort every recognisable cheat file out of one directory into our library.
    Returns how many were filed. */
-static int cheat_intake_dir(const char *dir, int move_it) {
+/* FILE A GAME PATCH UNDER EVERY TITLE IT COVERS, and count it once.
+ *
+ * patch_file_for() only ever stats CHEAT_PATCH_DIR/<TID>.xml, so a patch document is reachable only
+ * under a name that is a title id. The sender's filename will not do: measured over all 376 shipped
+ * patches, 303 cover more than one title and the filename matches the FIRST <ID> in only 156 of them,
+ * while the filename appears somewhere among the <ID>s in all 376. Filing under the first id alone
+ * would therefore leave 220 titles with no patch file at all, and look like it had worked.
+ *
+ * THE FAN-OUT CANNOT USE move_file(). rename() takes the source away on the first copy and copies
+ * 2..n then have nothing to read - so every destination is COPIED, and the source is removed once at
+ * the end and only when the caller asked for a move. The return value is 0 or 1, never n: this is one
+ * document being filed, and reporting "filed 5" for one file is a lie the owner would act on.
+ */
+static int cheat_intake_patch(const char *sp, int move_it) {
+    long len = 0;
+    char *doc = slurp(sp, &len);
+    if (!doc) return 0;
+    int wrote = 0;
+    const char *p = doc;
+    while ((p = strstr(p, "<ID>")) != NULL) {
+        p += 4;
+        const char *e = strchr(p, '<');
+        if (!e) break;
+        size_t n = (size_t)(e - p);
+        if (n == 0 || n >= 24) continue;                  /* not a title id */
+        char id[24];
+        memcpy(id, p, n);
+        id[n] = 0;
+        int ok = 1;
+        for (size_t i = 0; i < n; i++) {
+            char c = id[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9'))) { ok = 0; break; }
+        }
+        if (!ok) continue;                                /* whatever that was, it is not an id */
+        char dp[700];
+        snprintf(dp, sizeof(dp), "%s/%s.xml", CHEAT_PATCH_DIR, id);
+        /* SAME PATH: already where it belongs. Falling through would unlink it and then copy from a
+           file that no longer exists. */
+        if (!strcmp(dp, sp)) { wrote++; continue; }
+        if (file_exists(dp)) unlink(dp);                  /* a re-drop is an intentional replace */
+        if (copy_file(sp, dp) == 0) wrote++;
+    }
+    free(doc);
+    if (wrote && move_it) unlink(sp);
+    return wrote ? 1 : 0;
+}
+
+static int cheat_intake_dir(const char *dir, int move_it, int depth) {
     DIR *d = opendir(dir);
     if (!d) return 0;
     int filed = 0;
@@ -3277,9 +3477,26 @@ static int cheat_intake_dir(const char *dir, int move_it) {
         if (e->d_name[0] == '.') continue;
         char sp[700];
         snprintf(sp, sizeof(sp), "%s/%s", dir, e->d_name);
+
+        /* ONE LEVEL DOWN, into a folder named like the library's own. A stick or a /data/cheats that
+           holds a COPY of the library - json/ shn/ mc4/ patches/ - used to report "filed 0" and file
+           nothing, because every entry here is a directory and file_exists() rejects it. One level
+           only, and only those names, so this can never walk somebody's whole drive.
+           S_ISDIR via stat, not dirent's d_type: nothing else in this file relies on d_type and it is
+           not dependable across filesystems. */
+        struct stat est;
+        if (depth == 0 && stat(sp, &est) == 0 && S_ISDIR(est.st_mode)) {
+            if (!strcmp(e->d_name, "json") || !strcmp(e->d_name, "shn") ||
+                !strcmp(e->d_name, "mc4")  || !strcmp(e->d_name, "patches") ||
+                !strcmp(e->d_name, "incoming"))
+                filed += cheat_intake_dir(sp, move_it, 1);
+            continue;
+        }
+
         if (!file_exists(sp)) continue;
         const char *kind = cheat_sniff(sp);
         if (!kind) continue;
+        if (!strcmp(kind, "patch")) { filed += cheat_intake_patch(sp, move_it); continue; }
         const char *destdir = !strcmp(kind, "shn") ? CHEAT_SHN_DIR
                             : !strcmp(kind, "mc4") ? CHEAT_MC4_DIR : CHEAT_JSON_DIR;
         /* Keep the sender's name (it carries TITLEID_VERSION) but force the true extension. */
@@ -3290,6 +3507,9 @@ static int cheat_intake_dir(const char *dir, int move_it) {
                     path_ext_is(stem, ".mc4")  || path_ext_is(stem, ".txt"))) *dot = 0;
         char dp[700];
         snprintf(dp, sizeof(dp), "%s/%s.%s", destdir, stem, kind);
+        /* ALREADY WHERE IT BELONGS - which is the normal case once this descends into a library-shaped
+           folder. Without this, the unlink below deletes the file and the copy that follows fails. */
+        if (!strcmp(dp, sp)) continue;
         if (file_exists(dp)) unlink(dp);          /* a re-drop is an intentional replace */
         if ((move_it ? move_file(sp, dp) : copy_file(sp, dp)) == 0) filed++;
     }
@@ -3300,12 +3520,12 @@ static int cheat_intake_dir(const char *dir, int move_it) {
 /* Everywhere we look for dropped-in cheats. USB first-class: plug a stick in with a
    /cheats folder and the console files them on its own. */
 static int cheat_intake_all(void) {
-    int n = cheat_intake_dir(CHEAT_INBOX_DIR, 1);
-    n += cheat_intake_dir("/data/cheats", 1);
+    int n = cheat_intake_dir(CHEAT_INBOX_DIR, 1, 0);
+    n += cheat_intake_dir("/data/cheats", 1, 0);
     for (int i = 0; i < 8; i++) {
         char up[64];
         snprintf(up, sizeof(up), "/mnt/usb%d/cheats", i);
-        n += cheat_intake_dir(up, 0);             /* copy from USB — never delete the user's stick */
+        n += cheat_intake_dir(up, 0, 0);          /* copy from USB — never delete the user's stick */
     }
     return n;
 }
@@ -3443,8 +3663,11 @@ static int cheat_pick_file(const char *tid, const char *ver, char *out, size_t o
     return 0;
 }
 
-/* Every version we hold a cheat file for, for one title. Lets the UI say
-   "cheats exist for 01.03, your game is 01.00" instead of just going quiet.
+/* Every version we hold a cheat file for, for one title. THIS FEEDS THE VERSION PICKER, and since
+   3.83.2 the picker is the only thing on the panel that names the other versions at all - the two
+   notes that used to say it in a sentence were removed at the owner's request. So the stated reason
+   for this function is not "a note" any more; it is the control the owner presses to load another
+   version's cheats. Deleting it takes the picker with it.
 
    Only names in a format the engine opens count, and exactly that extension is cut off. The
    version used to be whatever sat between the underscore and the LAST dot, with no look at the
@@ -3539,6 +3762,12 @@ static int install_pkg_local(const char *path, char *cid_out, size_t cid_sz);
 static void handle(int fd, const char *rawpath, const char *req);
 static const char *strcasestr_local(const char *hay, const char *needle);
 static int pm_get(const char *path);   /* Payload Manager :8084 - spawns our installer */
+static int pm_running(const char *filename);  /* ...and answers which payloads are alive */
+static int hb_list_json(char *out, size_t outsz);  /* homebrew packages this console can reach */
+static void pm_stem(const char *name, char *out, size_t outsz);  /* comparable payload name */
+static int udp_port_taken(int port);              /* the only way to see a UDP service */
+static int pb_stage_for_pldmgr(const char *name, char *out, size_t outsz);  /* see the basename trap */
+static int app_ids_json(char *out, size_t outsz);  /* ...and the title ids it already has */
 /* Only one spawned install at a time: they share one request file.
 
    The comment that used to sit here said "not a mutex - the accept loop is single-threaded for
@@ -3728,7 +3957,7 @@ static int route_changes_state(const char *rawpath, int is_post) {
         "/api/patch/revert", "/api/engine/cancel", "/api/engine/spawn-cleanup",
         "/api/engine/fetch", "/api/tile/install", "/api/game/delete-backup", "/api/game/delete",
         "/api/move", "/api/cheat/rescan", "/api/cheats/rescan", "/api/register-pc",
-        "/api/open", "/api/notify", "/api/install", NULL
+        "/api/open", "/api/notify", "/api/install", "/api/payloads/load", NULL
     };
     char path[1024];
     snprintf(path, sizeof(path), "%s", rawpath);
@@ -4415,6 +4644,23 @@ static long json_num_after(const char *json, const char *key, long def) {
 
 /* Resolve the cheat file for a title using its installed version (same rule the
    GET side uses), so a toggle acts on exactly the file the panel is showing. */
+/* WHICH FILE DOES THIS REQUEST MEAN? Without a version, the installed one. With a version, THAT
+   version's file - and if the library has no file for exactly that version the request is REFUSED
+   rather than quietly served from a neighbour, because a mod is applied by its INDEX into whatever
+   the panel listed. Returns 0 resolved, -1 nothing at all, -2 nothing for that exact version.
+   The PS4 carries the same pair for the same reason (ps4-app/onconsole/server_ps4.c). */
+static int mods_file_for(const char *tid, char *out, size_t outsz);
+
+static int mods_file_for_req(const char *tid, const char *want_ver, char *out, size_t outsz) {
+    if (outsz) out[0] = 0;
+    if (!want_ver || !want_ver[0]) return mods_file_for(tid, out, outsz);
+    const char *why = "none";
+    int exact = cheat_pick_file(tid, want_ver, out, outsz, &why);
+    if (!out[0]) return -1;
+    if (!exact) { if (outsz) out[0] = 0; return -2; }
+    return 0;
+}
+
 static int mods_file_for(const char *tid, char *out, size_t outsz) {
     char iver[24] = {0};
     title_t *rows = (title_t *)calloc(MAX_TITLES, sizeof(title_t));
@@ -4464,8 +4710,23 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             return;
         }
 
+        /* THE SAME FILE THE PANEL LISTED - see mods_file_for_req. A mod is applied by INDEX, so a
+           mismatch here applies a different cheat and reports ok:true under the wrong name. */
+        char wver[48] = {0};
+        json_str_after(body ? body : "", "version", wver, sizeof(wver));
         char file[600];
-        if (mods_file_for(tid, file, sizeof(file)) != 0) {
+        int frc = mods_file_for_req(tid, wver, file, sizeof(file));
+        if (frc == -2) {
+            char ev[110], o[520];
+            json_escape(wver, ev, sizeof(ev));
+            snprintf(o, sizeof(o),
+                     "{\"ok\":false,\"error\":\"no_cheat_file_for_version\",\"version\":\"%s\","
+                     "\"message\":\"There is no cheat file for that version of this game, so nothing "
+                     "was changed. Pick a version the list offers.\"}", ev);
+            send_json(fd, o);
+            return;
+        }
+        if (frc != 0) {
             send_json(fd, "{\"ok\":false,\"error\":\"no_local_cheat_found\"}");
             return;
         }
@@ -4498,17 +4759,26 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
                 if (!blk) break;
                 from = end;
                 char detail[200] = {0};
-                int rc = cheat_apply_blk(doc, non_json, blk, end, m, 0, pid, base, 0,
+                int rc = cheat_apply_blk(doc, non_json, blk, end, m, 0, pid, base, 0, 0,
                                          detail, sizeof(detail));
                 if (rc > 0) reverted++;
                 else if (rc == 0) already++;
                 else failed++;
             }
+            /* AND THE MASTER CODE, LAST. Every mod that was patching the master's own routine has
+               just been put back, so the routine itself is no longer needed. Only the Trainer form
+               can go: it documents the bytes it replaced. The json form answers "the file does not
+               say what was there before it" and stays until the game is closed, which is exactly what
+               the panel tells that owner. */
+            char mrem[120] = {0};
+            int master_gone = cheat_master_off(doc, pid, base, non_json, mrem, sizeof(mrem));
+            if (mrem[0]) ilog("cheats: %s", mrem);
             free(doc);
-            char o[220];
+            char o[260];
             snprintf(o, sizeof(o),
-                     "{\"ok\":true,\"disabled\":%d,\"already_off\":%d,\"failed\":%d}",
-                     reverted, already, failed);
+                     "{\"ok\":true,\"disabled\":%d,\"already_off\":%d,\"failed\":%d,"
+                     "\"master_removed\":%s}",
+                     reverted, already, failed, master_gone > 0 ? "true" : "false");
             send_json(fd, o);
             if (failed)
                 notifyf("Cheats turned off\n%d undone, %d would not undo - close the game to "
@@ -4528,16 +4798,23 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
             char nm[200] = {0};
             json_str_after(body ? body : "", "name", nm, sizeof(nm));
             char detail[200] = {0};
-            int rc = cheat_apply_mod(file, idx, want, pid, base, force, detail, sizeof(detail));
+            int rc = cheat_apply_mod(file, idx, want, pid, base, force, 0, detail, sizeof(detail));
             const char *what = nm[0] ? nm : "Cheat";
             cheat_result_toast(what, want, rc, detail, rtid);
-            char ed[300], o[600];
+            char ed[300], o[1100];
+        /* A SENTENCE FOR THE OWNER, alongside the numbers for us. Without it errText() in the page
+           falls through to `detail` and toasts "entries=3 written=0 skipped=0 failed=3". It is left
+           out entirely when there is nothing to explain, so a success carries no message at all. */
+            char msg[420] = {0}, emsg[500];
+            cheat_rc_message(rc, detail, want, msg, sizeof(msg));
             json_escape(detail, ed, sizeof(ed));
+            json_escape(msg, emsg, sizeof(emsg));
             snprintf(o, sizeof(o),
                      "{\"ok\":%s,\"rc\":%d,\"mod\":%d,\"on\":%d,\"pid\":%d,\"base\":\"0x%llx\","
-                     "\"detail\":\"%s\"}",
+                     "\"detail\":\"%s\"%s%s%s}",
                      rc >= 0 ? "true" : "false", rc, idx, want, (int)pid,
-                     (unsigned long long)base, ed);
+                     (unsigned long long)base, ed,
+                     msg[0] ? ",\"message\":\"" : "", msg[0] ? emsg : "", msg[0] ? "\"" : "");
             send_json(fd, o);
             return;
         }
@@ -5249,11 +5526,16 @@ static int rest_scan(int *pids, char names[][64], int max, int *pm_ok) {
         if (*p != '}') continue;
         depth--;
         if (depth != 0 || !obj) continue;
+        /* BOUNDED TO THIS OBJECT. Unbounded, an entry with no "name" took the NEXT process's name
+           while keeping its own pid - and rest_should_stop(name) is what decides whether to stop that
+           pid. A decision and a target from two different processes is how you stop something nobody
+           asked you to. `p` is this object's closing brace. */
         char nm[96] = {0};
-        json_str_after(obj, "name", nm, sizeof(nm));
+        json_str_after_lim(obj, p, "name", nm, sizeof(nm));
         int pid = 0;
         const char *pp = strstr(obj, "\"pid\"");
-        if (pp) { pp = strchr(pp, ':'); if (pp) pid = (int)strtol(pp + 1, NULL, 10); }
+        if (pp && pp < p) { pp = strchr(pp, ':'); if (pp && pp < p) pid = (int)strtol(pp + 1, NULL, 10); }
+        else pp = NULL;
         obj = NULL;
         if (pid <= 0 || !nm[0] || pid == my_pid) continue;
         if (!rest_should_stop(nm)) continue;
@@ -5614,6 +5896,58 @@ static int fs_write_serve(int fd, const char *rawpath, const char *buf, int n, i
     return 0;
 }
 
+/* ---- THIS CONSOLE'S DURABLE ID -----------------------------------------------------------------
+ * Sixteen hex characters in a file beside the shop's own data, generated once and kept for ever.
+ * It exists so a PC can recognise this console after its ADDRESS changes - which happens on any
+ * network with DHCP, and which used to leave the app showing a healthy console as offline because
+ * the only name it had for it was the address that moved.
+ *
+ * Random and local. Not a serial number, not a MAC, not an account. Delete the file and the console
+ * gets a new one; a PC then treats it as a console it has never met, which is the honest reading.
+ */
+#define CONSOLE_ID_PATH SHOP_DATA_DIR "/console-id"
+
+static char g_console_id[20];
+
+static const char *console_id(void) {
+    if (g_console_id[0]) return g_console_id;
+
+    long n = 0;
+    char *have = slurp(CONSOLE_ID_PATH, &n);
+    if (have) {
+        int k = 0;
+        for (long i = 0; i < n && k < 16; i++) {
+            char c = have[i];
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) g_console_id[k++] = c;
+            else if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+            else { k = 0; break; }          /* not ours - regenerate rather than trust it */
+        }
+        free(have);
+        if (k == 16) { g_console_id[16] = 0; return g_console_id; }
+        g_console_id[0] = 0;
+    }
+
+    /* Enough for a name that only has to be unique across the consoles in one house: the clock,
+       our pid, and two addresses that move with ASLR from run to run. */
+    /* now_ms_local() here, now_ms() in the PS4 copy - the two payloads spell their own clock
+       helper differently and always have. It is the ONLY line that differs between them. */
+    unsigned long long seed = (unsigned long long)now_ms_local();
+    seed ^= ((unsigned long long)getpid() << 32);
+    seed ^= (unsigned long long)(uintptr_t)&seed;
+    seed ^= ((unsigned long long)(uintptr_t)g_console_id) << 13;
+    static const char HEX[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        g_console_id[i] = HEX[(seed >> 33) & 0xF];
+    }
+    g_console_id[16] = 0;
+
+    mkdir(SHOP_DATA_DIR, 0777);
+    int f = open(CONSOLE_ID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f >= 0) { ssize_t w = write(f, g_console_id, 16); (void)w; close(f); }
+    return g_console_id;
+}
+
 /* The icon experiment's timing, on its own thread. It used to run inline in /api/notify: the
    plain toast, a 2 s pause and the probe, on the accept loop - so one probe request froze every
    API on this console (health, library, installs, cheats) for about three seconds. */
@@ -5629,6 +5963,11 @@ static void *notify_probe_thread(void *arg) {
     free(p);
     return NULL;
 }
+
+/* Defined beside running_game(), where the two SceSystemService calls it is written against
+   are declared. /api/health below needs it, so it is announced here rather than moving a
+   definition past its own prototypes. */
+static int running_title_cached(char *out, size_t outsz);
 
 static void handle(int fd, const char *rawpath, const char *req) {
     char path[1024];
@@ -6547,7 +6886,7 @@ static void handle(int fd, const char *rawpath, const char *req) {
             send_json(fd, o);
             return;
         }
-        char ver[16] = {0};
+        char ver[48] = {0};
         qparam(rawpath, "version", ver, sizeof(ver));
         char pick[600]; const char *why = "none";
         int exact = cheat_pick_file(tid, ver, pick, sizeof(pick), &why);
@@ -6579,16 +6918,41 @@ static void handle(int fd, const char *rawpath, const char *req) {
         }
         if (!tid[0]) { send_json(fd, "{\"ok\":false,\"reachable\":true,\"error\":\"bad title\"}"); return; }
 
-        /* The installed version is what decides whether a cheat file really matches. */
-        char iver[24] = {0};
+        /* TWO VARIABLES, AND THE DIFFERENCE MATTERS. `iver` is what this console has installed: it
+           feeds installed_version, the compatible test and patches_json, none of which may report
+           what the caller ASKED for as though it were a fact about the console. `pver` is the version
+           the picker selected, and all it chooses is which cheat file to read.
+           48 bytes because a version is a FILENAME KEY, not a number - the longest in the shipped
+           library is 29 characters ('01.03_ac3_engine_orbis_fn.elf'), and a clipped one resolves to
+           no file at all. */
+        char iver[48] = {0};
         title_t *trows = (title_t *)calloc(MAX_TITLES, sizeof(title_t));
         int tn = trows ? read_console_titles(trows, MAX_TITLES) : -1;
         for (int i = 0; i < tn; i++)
             if (!strcmp(trows[i].tid, tid)) { snprintf(iver, sizeof(iver), "%s", trows[i].ver); break; }
         free(trows);
+        char pver[48] = {0};
+        if (!qparam(rawpath, "version", pver, sizeof(pver))) pver[0] = 0;
+
+        /* ?state=1 - the live on/off of each mod and nothing else, which is the refresh the panel
+           fires after every toggle. The page has always sent it and this console has always ignored
+           it. */
+        char stq[8] = {0};
+        int state_only = (qparam(rawpath, "state", stq, sizeof(stq)) && stq[0] && stq[0] != '0');
 
         char pick[600]; const char *why = "none";
-        int exact = cheat_pick_file(tid, iver, pick, sizeof(pick), &why);
+        int exact = cheat_pick_file(tid, pver[0] ? pver : iver, pick, sizeof(pick), &why);
+        if (pver[0] && !exact) {
+            char ev[110], o[520];
+            json_escape(pver, ev, sizeof(ev));
+            snprintf(o, sizeof(o),
+                     "{\"ok\":false,\"reachable\":true,\"title_id\":\"%s\","
+                     "\"installed_version\":\"%s\",\"selected_version\":\"%s\","
+                     "\"error\":\"no_cheat_file_for_version\",\"mods\":[],\"patches\":[],"
+                     "\"candidates\":[]}", tid, iver, ev);
+            send_json(fd, o);
+            return;
+        }
         if (!pick[0]) {
             /* No CHEAT file — but the title may still have game PATCHES, which live in a
                separate library. Dark Souls Remastered is exactly that case, and returning an
@@ -6603,10 +6967,11 @@ static void handle(int fd, const char *rawpath, const char *req) {
             snprintf(o, OSZ,
                      "{\"ok\":%s,\"reachable\":true,\"engine\":\"mutant\","
                      "\"error\":\"%s\",\"title_id\":\"%s\",\"installed_version\":\"%s\","
+                     "\"selected_version\":\"%s\","
                      "\"mods\":[],\"patches\":%s,\"candidates\":[]}",
                      has_patch ? "true" : "false",
                      has_patch ? "" : "no_local_cheat_found",
-                     tid, iver, pj ? pj : "[]");
+                     tid, iver, pver, pj ? pj : "[]");
             send_json(fd, o);
             free(o); free(pj);
             return;
@@ -6624,8 +6989,12 @@ static void handle(int fd, const char *rawpath, const char *req) {
         json_str_after(doc, "version", fver, sizeof(fver));
         const char *fmt = path_ext_is(pick, ".shn") ? "shn"
                         : path_ext_is(pick, ".mc4") ? "mc4" : "json";
-        /* An unknown installed version is NOT a mismatch - only flag one we can prove. */
-        int compatible = (!iver[0]) || exact || (fver[0] && !strcmp(fver, iver));
+        /* An unknown installed version is NOT a mismatch - only flag one we can prove. And NOT
+           `exact`, which is exact against the version in the REQUEST: including it meant that
+           deliberately picking another version reported compatible:true and the panel painted it
+           green with "matched", hiding the mismatch note. The question is whether the file suits the
+           game on the console, and only iver answers that. */
+        int compatible = (!iver[0]) || (fver[0] && !strcmp(fver, iver));
         const char *reason = why;
         if (!iver[0] && !strcmp(why, "other version")) reason = "installed version unknown";
 
@@ -6641,10 +7010,11 @@ static void handle(int fd, const char *rawpath, const char *req) {
         size_t len = 0;
         len += snprintf(out + len, OUTSZ - len,
             "{\"ok\":true,\"reachable\":true,\"engine\":\"mutant\",\"title_id\":\"%s\","
-            "\"installed_version\":\"%s\",\"file_version\":\"%s\",\"file\":\"%s\","
+            "\"installed_version\":\"%s\",\"selected_version\":\"%s\","
+            "\"file_version\":\"%s\",\"file\":\"%s\","
             "\"path\":\"%s\",\"format\":\"%s\",\"compatible\":%s,\"reason\":\"%s\","
             "\"running\":%s,\"pid\":%d,\"base\":\"0x%llx\",\"mods\":[",
-            tid, iver, fver, eb, ep, fmt, compatible ? "true" : "false", reason,
+            tid, iver, pver, fver, eb, ep, fmt, compatible ? "true" : "false", reason,
             live ? "true" : "false", live ? (int)rpid : 0,
             (unsigned long long)(live ? rbase : 0));
         /* One walk of the document (next_mod_block) and the block goes to the state reader
@@ -6658,7 +7028,7 @@ static void handle(int fd, const char *rawpath, const char *req) {
             if (!blk) break;
             from = end;
             char nm[240] = {0};
-            json_str_after(blk, "name", nm, sizeof(nm));
+            json_str_after_lim(blk, end, "name", nm, sizeof(nm));   /* this block's name */
             int dropped = 0;
             int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
             char en[500]; json_escape(nm, en, sizeof(en));
@@ -6672,17 +7042,26 @@ static void handle(int fd, const char *rawpath, const char *req) {
                 !strcmp(stt, "partial") ? "true" : "false",
                 live ? "true" : "false");
         }
-        char vers[600];
-        cheat_versions_json(tid, vers, sizeof(vers));
+        /* INITIALISED, because state_only skips the call that fills it and it is formatted with %s
+           straight into the reply - uninitialised stack there puts garbage inside "versions" and
+           JSON.parse throws, blanking the panel. */
+        char vers[600] = "[]";
+        char *pj = NULL;
         /* Game patches used to be a hardcoded empty array here, so the 376-file patch library
            was invisible and the panel's patch rows never rendered. Sized to what is genuinely
            left in `out` — a title can carry 59 patches and must not run past the buffer. */
-        size_t left = (len + 800 < OUTSZ) ? (OUTSZ - len - 800) : 0;
-        size_t PSZ = left > 24576 ? 24576 : left;
-        char *pj = (PSZ > 64) ? (char *)malloc(PSZ) : NULL;
-        if (pj) patches_json(tid, iver, pj, PSZ);
-        snprintf(out + len, OUTSZ - len, "],\"patches\":%s,\"candidates\":[],\"versions\":%s}",
-                 pj ? pj : "[]", vers);
+        if (!state_only) {
+            cheat_versions_json(tid, vers, sizeof(vers));
+            size_t left = (len + 800 < OUTSZ) ? (OUTSZ - len - 800) : 0;
+            size_t PSZ = left > 24576 ? 24576 : left;
+            pj = (PSZ > 64) ? (char *)malloc(PSZ) : NULL;
+            if (pj) patches_json(tid, iver, pj, PSZ);
+        }
+        int m_rem = 0, m_has = cheat_master_info(doc, &m_rem);   /* see cheat_master_info */
+        snprintf(out + len, OUTSZ - len,
+                 "],\"patches\":%s,\"candidates\":[],\"master\":%s,\"master_removable\":%s,"
+                 "\"versions\":%s}",
+                 pj ? pj : "[]", m_has ? "true" : "false", m_rem ? "true" : "false", vers);
         send_json(fd, out);
         free(pj);
         free(out); free(ents); free(doc);
@@ -7013,7 +7392,7 @@ static void handle(int fd, const char *rawpath, const char *req) {
             if (!blk) break;
             from = end;
             char nm[240] = {0};
-            json_str_after(blk, "name", nm, sizeof(nm));
+            json_str_after_lim(blk, end, "name", nm, sizeof(nm));   /* this block's name */
             int dropped = 0;
             int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
             char esc2[500]; json_escape(nm, esc2, sizeof(esc2));
@@ -7030,7 +7409,10 @@ static void handle(int fd, const char *rawpath, const char *req) {
         snprintf(idbuf, sizeof(idbuf), "%s", id);
         char vers[600] = "[]";
         if (idbuf[0]) cheat_versions_json(idbuf, vers, sizeof(vers));
-        snprintf(out+len, OUTSZ-len, "],\"versions\":%s}", vers);
+        /* A MASTER CODE CHANGES WHAT TURNING EVERYTHING OFF MEANS - see cheat_master_info. */
+        int m_rem = 0, m_has = cheat_master_info(json, &m_rem);
+        snprintf(out+len, OUTSZ-len, "],\"versions\":%s,\"master\":%s,\"master_removable\":%s}",
+                 vers, m_has ? "true" : "false", m_rem ? "true" : "false");
         send_json(fd, out);
         free(out); free(ents); free(json);
         return;
@@ -7091,25 +7473,102 @@ static void handle(int fd, const char *rawpath, const char *req) {
         qparam(rawpath,"mod",mb,sizeof(mb)); qparam(rawpath,"on",ob,sizeof(ob));
         qparam(rawpath,"base",bb,sizeof(bb)); qparam(rawpath,"force",fb,sizeof(fb));
         qparam(rawpath,"name",nm,sizeof(nm));
+        /* &check=1 RUNS THE WHOLE DECISION AND WRITES NOTHING. The reads, the gates and the reasons
+           are identical to a real apply, so this cannot disagree with it - which is the point. */
+        char ckb[8] = {0};
+        qparam(rawpath, "check", ckb, sizeof(ckb));
+        int check_only = ckb[0] ? atoi(ckb) : 0;
         int idx = mb[0]?atoi(mb):0, want = ob[0]?atoi(ob):1, force = fb[0]?atoi(fb):0;
         pid_t pid = (pid_t)atoi(pb);
         intptr_t base = bb[0] ? (intptr_t)strtoull(bb,NULL,0) : 0x400000;
         char detail[200] = {0};
-        int rc = cheat_apply_mod(file, idx, want, pid, base, force, detail, sizeof(detail));
+        int rc = cheat_apply_mod(file, idx, want, pid, base, force, check_only,
+                                 detail, sizeof(detail));
         /* Say what actually happened, to which game, in plain words. "written=N" is the
            number of memory patches that landed; a refusal is not a silent no-op. */
         char gtitle[24] = {0};
         pid_t gpid = 0; intptr_t gbase = 0;
         running_game(gtitle, sizeof(gtitle), &gpid, &gbase);
         const char *what = nm[0] ? nm : "Cheat";
-        cheat_result_toast(what, want, rc, detail, gtitle);
-        char ed[300], out[600];
+        /* NOTHING HAPPENED, SO NOTHING IS ANNOUNCED. A toast for a question is noise. */
+        if (!check_only) cheat_result_toast(what, want, rc, detail, gtitle);
+        char ed[300], out[1100];
+        /* A SENTENCE FOR THE OWNER, alongside the numbers for us. Without it errText() in the page
+           falls through to `detail` and toasts "entries=3 written=0 skipped=0 failed=3". It is left
+           out entirely when there is nothing to explain, so a success carries no message at all. */
+        char msg[420] = {0}, emsg[500];
+        cheat_rc_message(rc, detail, want, msg, sizeof(msg));
         json_escape(detail, ed, sizeof(ed));
+        json_escape(msg, emsg, sizeof(emsg));
         snprintf(out, sizeof(out),
-                 "{\"ok\":%s,\"rc\":%d,\"mod\":%d,\"on\":%d,\"pid\":%d,\"base\":\"0x%llx\",\"detail\":\"%s\"}",
+                 "{\"ok\":%s,\"rc\":%d,\"mod\":%d,\"on\":%d,\"pid\":%d,\"base\":\"0x%llx\","
+                 "\"detail\":\"%s\"%s%s%s}",
                  rc >= 0 ? "true" : "false", rc, idx, want, (int)pid,
-                 (unsigned long long)base, ed);
+                 (unsigned long long)base, ed,
+                 msg[0] ? ",\"message\":\"" : "", msg[0] ? emsg : "", msg[0] ? "\"" : "");
         send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find/status")) {
+        char out[2048];
+        sig_status_json(out, sizeof(out));
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find/cancel")) {
+        sig_cancel();
+        send_json(fd, "{\"ok\":true,\"cancelled\":true}");
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find")) {
+        /* THE SIGNATURE SEARCH. Read-only, one at a time, in its own thread - see sig_start. This is
+           the primitive that porting a cheat by signature, the mask patch lines and finding an address
+           from scratch all need, and none of them can exist without it.
+           Offsets are IMAGE-RELATIVE, like a cheat file's. */
+        char pt[200] = {0}, pb[16] = {0}, bb[32] = {0}, f1[24] = {0}, f2[24] = {0};
+        if (!qparam(rawpath, "pattern", pt, sizeof(pt)) || !pt[0]) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need a pattern, e.g. pattern=488B05????????89\"}");
+            return;
+        }
+        qparam(rawpath, "pid", pb, sizeof(pb));
+        qparam(rawpath, "base", bb, sizeof(bb));
+        qparam(rawpath, "from", f1, sizeof(f1));
+        qparam(rawpath, "to", f2, sizeof(f2));
+        pid_t spid = (pid_t)atoi(pb);
+        intptr_t sbase = bb[0] ? (intptr_t)strtoull(bb, NULL, 0) : 0;
+        long long sfrom = f1[0] ? strtoll(f1, NULL, 0) : 0;
+        long long sto = f2[0] ? strtoll(f2, NULL, 0) : 0;
+                /* WHAT "THE WHOLE MODULE" MEANS HERE. The base comes from running_game(), which measures it -
+           the no-ASLR address is a last resort, not a default, exactly as on the PS4 side. The span is
+           a guess on this console (nothing here reports a module size), so the reply says so and the
+           gaps count tells the caller how much of it could not be read. */
+        int span_guessed = 0;
+        if (!spid || !sbase) {
+            char rtid[24] = {0};
+            pid_t apid = 0; intptr_t abase = 0;
+            if (running_game(rtid, sizeof(rtid), &apid, &abase) == 1) {
+                if (!spid) spid = apid;
+                if (!sbase) sbase = abase;
+            }
+        }
+        if (!sbase) sbase = 0x400000;
+        if (sto <= 0) { sto = (long long)(64 << 20); span_guessed = 1; }
+        int rc = sig_start(pt, spid, sbase, sfrom, sto);
+        const char *why = rc == 0 ? "" :
+                          rc == -1 ? "a search is already running - read /api/mem/find/status" :
+                          rc == -2 ? "that is not a usable signature: at least 4 bytes, 3 of them real" :
+                          rc == -3 ? "that range is empty, or wider than a single search will sweep" :
+                          rc == -5 ? "there is no game running to search" :
+                                     "could not start the search thread";
+        char o[420], ew[300];
+        json_escape(why, ew, sizeof(ew));
+        snprintf(o, sizeof(o),
+                 "{\"ok\":%s,\"rc\":%d,\"pid\":%d,\"base\":\"0x%llx\",\"from\":%lld,\"to\":%lld,"
+                 "\"span_guessed\":%s%s%s%s}",
+                 rc == 0 ? "true" : "false", rc, (int)spid, (unsigned long long)sbase, sfrom, sto,
+                 span_guessed ? "true" : "false",
+                 why[0] ? ",\"error\":\"" : "", why[0] ? ew : "", why[0] ? "\"" : "");
+        send_json(fd, o);
         return;
     }
     if (!strcmp(path, "/api/mem/read")) {
@@ -7459,11 +7918,63 @@ static void handle(int fd, const char *rawpath, const char *req) {
         send_json(fd, o);
         return;
     }
-    if (!strcmp(path, "/api/payloads")) {      /* what the bundled helpers did on boot */
-        char esc2[400], out[520];
+    if (!strcmp(path, "/api/payloads")) {
+        /* TWO QUESTIONS, ONE ROUTE - AND THIS ROUTE ALREADY EXISTED. It reported what the bundled
+           helpers did on boot (`bundled` and `status`, kept below so nothing that reads them
+           breaks), and the Payloads & Homebrews panel needs what is true NOW. A second
+           `if (!strcmp(path, "/api/payloads"))` added further down was simply unreachable - the
+           first match wins - so both answers are assembled here.
+
+           The catalogue itself is a static file this ELF already carries and the page reads it
+           directly; parsing it in C to re-emit it would be a second implementation of the same
+           file, and every one of those in this project has eventually disagreed with the first. */
+        char live[760]; int ln = 0; live[0] = 0;
+        for (int i = 0; i < PAYLOAD_BUNDLE_COUNT; i++) {
+            const pb_entry_t *e = &PAYLOAD_BUNDLE[i];
+            /* A PORT IS EVIDENCE, NOT THE ONLY EVIDENCE. Measured on this console: Payload Manager
+               lists shadowmountplus.elf at a live pid while :10101 is closed, and kstuff and
+               nanodns bind nothing a probe can reach at all. */
+            /* Three ways a payload can prove it is up, and a thing that listens on UDP is
+               only ever caught by the third. */
+            int up = pm_running(e->filename)
+                     || (e->port > 0 && !e->udp && port_busy(e->port))
+                     || (e->port > 0 && e->udp && udp_port_taken(e->port));
+            if (!up) continue;
+            ln += snprintf(live + ln, sizeof(live) - (size_t)ln, "%s\"%s\"",
+                           ln ? "," : "", e->filename);
+            if (ln >= (int)sizeof(live) - 48) break;
+        }
+        char have[1400];
+        hb_list_json(have, sizeof(have));
+        /* SIZED FROM THE REAL COUNT, NOT A GUESS. This console reports 72 installed titles at
+           about 12 bytes each, and a 900-byte buffer silently truncated the list - dropping the
+           very homebrew that had just been installed, so the panel said "Install" about something
+           that was already there. Room for ~250 titles. */
+        /* WHAT WOULD ACTUALLY RUN, not what happens to be lying in the folder. /api/payloads/load
+           resolves a request by stem against the BUNDLE, so the file it would start is
+           PB_DIR/<bundled name> - and listing the directory instead reported leftovers from older
+           builds under the same stem, one of which won the comparison and made a PC re-send a
+           payload the console already had. Ask the bundle, stat one file per entry. */
+        char have_p[900]; int hp = 0; have_p[0] = 0;
+        for (int i = 0; i < PAYLOAD_BUNDLE_COUNT && hp < (int)sizeof(have_p) - 90; i++) {
+            char fp[600];
+            snprintf(fp, sizeof(fp), "%s/%s", PB_DIR, PAYLOAD_BUNDLE[i].filename);
+            struct stat ps;
+            if (stat(fp, &ps) != 0 || !S_ISREG(ps.st_mode)) continue;
+            hp += snprintf(have_p + hp, sizeof(have_p) - (size_t)hp,
+                           "%s{\"n\":\"%s\",\"s\":%lld}",
+                           hp ? "," : "", PAYLOAD_BUNDLE[i].filename, (long long)ps.st_size);
+        }
+        char apps[3200];
+        app_ids_json(apps, sizeof(apps));
+        char esc2[400], out[2600];
         json_escape(g_pb_log, esc2, sizeof(esc2));
-        snprintf(out, sizeof(out), "{\"ok\":true,\"bundled\":%d,\"status\":\"%s\"}",
-                 PAYLOAD_BUNDLE_COUNT, esc2);
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"on_console\":true,\"platform\":\"PS5\",\"console\":\"%s\","
+                 "\"source_here\":false,\"items\":null,\"hb_dir\":\"%s\","
+                 "\"bundled\":%d,\"status\":\"%s\","
+                 "\"state\":{\"live\":[%s],\"kept\":[%s],\"apps\":[%s],\"have\":[%s]}}",
+                 console_id(), HB_DIR, PAYLOAD_BUNDLE_COUNT, esc2, live, have, apps, have_p);
         send_json(fd, out);
         return;
     }
@@ -7550,6 +8061,51 @@ static void handle(int fd, const char *rawpath, const char *req) {
                  (a_name || a_nid) ? "true" : "false", mod, hrc, (unsigned)h,
                  nm, a_name, nid, a_nid, g_preload_log);
         send_json(fd, o);
+        return;
+    }
+    /* ---------------------------------------------------- Payloads & Homebrews ---------------
+     * THE PANEL HAS TO WORK WITH NO PC. The catalogue is a static file this ELF already carries
+     * (web/assets/payloads-catalog.json, embedded by gen_web_bundle.py and written to WEB_ROOT at
+     * boot), so the page reads that directly and this end answers only what is TRUE RIGHT NOW and
+     * cannot be known from a file. No JSON is parsed here on purpose: re-emitting the catalogue in
+     * C would be a second implementation of a file the page can simply read, and every one of
+     * those in this project has eventually disagreed with the first.
+     *
+     * Installing a seeded homebrew needs NO route of its own - /api/install already takes
+     * install_key "local:<path>" and pkgfile_path_allowed() already accepts /data/... */
+    if (!strcmp(path, "/api/payloads/load")) {
+        char want[256] = {0};
+        /* rawpath, NOT req. qparam() takes the request PATH - every other caller in this file
+           passes rawpath - and handing it the whole request text made it parse the query out of a
+           line that still had " HTTP/1.1" on the end, so the name never matched anything and the
+           console answered "this build does not carry that one" about a payload it was holding. */
+        qparam(rawpath, "name", want, sizeof(want));
+        /* BY STEM, NOT BY FILENAME. The page asks using the name the owner sees
+           ("webkit-autoloader-installer_v0.5.1.elf") and this ELF carries it under the stable
+           catalogue id ("webkit-autoloader-installer.elf"), because a versioned path in an .incbin
+           breaks the build the first time an update lands. pm_stem() is what makes the two meet -
+           the same function that matches a running process to the file it was built from. */
+        char wstem[128];
+        pm_stem(want, wstem, sizeof(wstem));
+        for (int i = 0; i < PAYLOAD_BUNDLE_COUNT; i++) {
+            const pb_entry_t *e = &PAYLOAD_BUNDLE[i];
+            char estem[128];
+            pm_stem(e->filename, estem, sizeof(estem));
+            if (strcmp(estem, wstem)) continue;
+            char full[700];
+            if (pb_stage_for_pldmgr(e->filename, full, sizeof(full)) != 0) {
+                send_json(fd, "{\"ok\":false,\"message\":\"That one is not on this console yet.\"}");
+                return;
+            }
+            char q[800];
+            snprintf(q, sizeof(q), "/loadpayload:%s", full);
+            int rc = pm_get(q);
+            send_json(fd, rc == 0
+                      ? "{\"ok\":true,\"message\":\"Sent it to Payload Manager.\"}"
+                      : "{\"ok\":false,\"message\":\"Payload Manager did not take it.\"}");
+            return;
+        }
+        send_json(fd, "{\"ok\":false,\"message\":\"This build does not carry that one.\"}");
         return;
     }
     if (!strcmp(path, "/api/tile/status") || !strcmp(path, "/api/tile/install")) {
@@ -7640,7 +8196,16 @@ static void handle(int fd, const char *rawpath, const char *req) {
         /* Roomy on purpose: snprintf truncates SILENTLY, and a health response cut mid-string
            is malformed JSON and a UI that cannot read health at all. The build stamp alone adds
            ~34 characters. Removing the four dead dpi_* fields left slack here - keep it. */
-        char o[720];
+        /* The game on screen right now, so a page served BY this console floats it to the top
+           of the library the way a page served by the PC always has. Two library calls behind a
+           three-second memo - see running_title_cached. */
+        char rt[24] = {0};
+        running_title_cached(rt, sizeof(rt));
+        /* See content_sig: two stats, so the companion can notice an install, an update, a delete
+           or an add-on from the health poll it already makes, without pulling app.db. */
+        char csig[96];      /* four %lld (20 each) and three dashes is 83 - sized from the format */
+        content_sig(csig, sizeof(csig));
+        char o[980];
         snprintf(o, sizeof(o),
                  "{\"ok\":true,\"on_console\":true,\"server\":\"on-console\",\"connected\":true,"
                  "\"version\":\"" SHOP_VERSION "\",\"built\":\"" SHOP_BUILD "\","
@@ -7648,12 +8213,13 @@ static void handle(int fd, const char *rawpath, const char *req) {
                  "\"ftp_online\":%s,\"ftp_port\":%d,"
                  "\"shadowmount\":%s,\"shadowmount_port\":%d,"
                  "\"engine\":\"pms-spawn\",\"engine_ready\":%s,\"engine_port\":8084,"
-                 "\"companion_port\":8710,\"lan_ip\":\"%s\"}",
+                 "\"companion_port\":8710,\"lan_ip\":\"%s\",\"console_id\":\"%s\","
+                 "\"running_title\":\"%s\",\"apps_sig\":\"%s\"}",
                  lan_ip_str(),
                  ftp_up ? "true" : "false", fport,
                  smp_up ? "true" : "false", SMP_API_PORT,
                  engine_up ? "true" : "false",
-                 lan_ip_str());
+                 lan_ip_str(), console_id(), rt, csig);
         send_json(fd, o);
     } else if (!strcmp(path, "/api/library")) {
         char *j = build_library_json();
@@ -8246,7 +8812,8 @@ static int install_full(const char *uri, int cred_pid, char *cid_out, size_t cid
  *   - never relaunch something already running (that is how the install host gets wedged), and
  *   - never block boot: this runs on its own thread, after the HTTP server is already serving.
  * ---------------------------------------------------------------------------------------- */
-#define PB_DIR      "/data/pkg-mutant-shop/payloads"
+/* PB_DIR and HB_DIR are declared with the other shop paths near the top - the routes that read
+   them are several thousand lines above this point. */
 /* CR/LF as explicit codes - avoids any escaping issues in the request line */
 static const char PM_HDR_TAIL[] = { 13,10, 'H','o','s','t',':',' ','1','2','7','.','0','.','0','.','1', 13,10,
   'C','o','n','n','e','c','t','i','o','n',':',' ','c','l','o','s','e', 13,10, 13,10, 0 };
@@ -8259,6 +8826,241 @@ static const char PM_HDR_TAIL[] = { 13,10, 'H','o','s','t',':',' ','1','2','7','
    then waited 60-90 s for a verdict that could never come before blaming a busy console. The
    receive timeout is 10 s, not 30: this runs on the accept thread for install-spawn, and a hung
    Payload Manager froze every API on this console for half a minute per request. */
+/* Is a payload running, by the stem of its name?
+
+   A PORT IS EVIDENCE, NOT THE ONLY EVIDENCE - measured on this console 2026-09-30, Payload Manager
+   lists shadowmountplus.elf at a live pid while :10101 is closed, and kstuff and nanodns bind
+   nothing a TCP probe can reach at all. So the process list is asked first and the port is the
+   second opinion.
+
+   STEMS, NOT FILENAMES. pldmgr reports the name a payload was BUILT as, which is not always the
+   name of the file we ship: "ftpsrv-ps5.elf" runs as "ftpsrv.elf" and "pldmgr_v0.5.2.elf" as
+   "pldmgr.elf". Comparing raw names called two live payloads stopped. */
+static void pm_stem(const char *name, char *out, size_t outsz) {
+    size_t n = 0;
+    for (const char *p = name; *p && n + 1 < outsz; p++)
+        out[n++] = (char)((*p >= 'A' && *p <= 'Z') ? *p - 'A' + 'a' : *p);
+    out[n] = 0;
+    if (n > 4 && !strcmp(out + n - 4, ".elf")) { n -= 4; out[n] = 0; }
+    /* trailing -ps4 / -ps5 / _ps4 / _ps5 */
+    if (n > 4 && (out[n - 4] == '-' || out[n - 4] == '_') && out[n - 3] == 'p' && out[n - 2] == 's'
+        && (out[n - 1] == '4' || out[n - 1] == '5')) { n -= 4; out[n] = 0; }
+    /* trailing _v1.2.3 / -v1.2 / _1.2 */
+    for (size_t i = n; i-- > 0;) {
+        char c = out[i];
+        if ((c >= '0' && c <= '9') || c == '.') continue;
+        if ((c == '_' || c == '-') && i + 1 < n) {
+            size_t j = i + 1;
+            if (out[j] == 'v') j++;
+            if (j < n && out[j] >= '0' && out[j] <= '9') { out[i] = 0; }
+        }
+        break;
+    }
+}
+
+/* Is a UDP port already taken? That is the only honest test for a service that listens on UDP and
+   replies to nobody.
+
+   nanodns is exactly that. A TCP connect to :53 proves nothing, and a DNS query sent to the console
+   from the LAN gets no answer even when nanodns IS running - measured on both consoles, against its
+   own spoofing domains as well as ordinary ones. What CAN be observed is that the port is occupied:
+   bind it, and if the bind is refused because the address is in use, something else holds it.
+
+   NO SO_REUSEADDR, deliberately: with it the bind would succeed alongside the running server and
+   the test would report "free" for ever, which is the same shape of permanently-wrong answer the
+   9021-vs-10101 mix-up gave. The socket is closed immediately either way, so a port that really was
+   free is left exactly as it was found.
+
+   Both 127.0.0.1 and 0.0.0.0 are tried, because a server bound to one does not always conflict with
+   the other, and either conflict is proof. */
+static int udp_port_taken(int port) {
+    if (port <= 0) return 0;
+    const char *addrs[2] = { "127.0.0.1", "0.0.0.0" };
+    for (int i = 0; i < 2; i++) {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s < 0) continue;
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons((unsigned short)port);
+        a.sin_addr.s_addr = inet_addr(addrs[i]);
+        int rc = bind(s, (struct sockaddr *)&a, sizeof(a));
+        int err = errno;
+        close(s);
+        if (rc != 0 && (err == EADDRINUSE || err == EACCES)) return 1;
+    }
+    return 0;
+}
+
+/* Put a payload where Payload Manager will actually find it, and give back that path.
+
+   THE BASENAME TRAP, WHICH THIS PROJECT HAS ALREADY PAID FOR ONCE. /loadpayload resolves by
+   BASENAME against pldmgr's own registered directory, not by the path it is handed - so asking it
+   to load /data/pkg-mutant-shop/payloads/ftpsrv.elf gets "Payload Manager did not take it" when
+   nothing of that name is registered there. companion/deploy.py already writes our own ELF to
+   /data/pldmgr/payloads/<NAME>/<NAME>.elf for exactly this reason; this does the same for the
+   payloads we carry, so a console can start one with no PC involved at all.
+
+   Copied only when the destination differs, so pressing Run twice costs one stat. */
+static int pb_stage_for_pldmgr(const char *name, char *out, size_t outsz) {
+    char stem[128];
+    pm_stem(name, stem, sizeof(stem));
+    if (!stem[0]) return -1;
+    char src[600], dir[600];
+    snprintf(src, sizeof(src), "%s/%s", PB_DIR, name);
+    struct stat ss;
+    if (stat(src, &ss) != 0 || ss.st_size <= 0) return -1;
+    mkdir("/data/pldmgr", 0777);
+    mkdir("/data/pldmgr/payloads", 0777);
+    snprintf(dir, sizeof(dir), "/data/pldmgr/payloads/%s", stem);
+    mkdir(dir, 0777);
+    snprintf(out, outsz, "%s/%s.elf", dir, stem);
+
+    struct stat ds;
+    if (stat(out, &ds) == 0 && ds.st_size == ss.st_size) return 0;   /* already the same bytes */
+
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    char part[700];
+    snprintf(part, sizeof(part), "%s.part", out);
+    int of = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (of < 0) { close(in); return -1; }
+    char buf[65536];
+    ssize_t r;
+    int bad = 0;
+    /* write() in a loop rather than write_all(): this file's write_all returns void, so a short or
+       failed write would be invisible - and a truncated payload that Payload Manager then runs is
+       the worst way to find that out. */
+    while ((r = read(in, buf, sizeof(buf))) > 0) {
+        size_t left = (size_t)r;
+        const char *p = buf;
+        while (left) {
+            ssize_t w = write(of, p, left);
+            if (w <= 0) { bad = 1; break; }
+            p += w; left -= (size_t)w;
+        }
+        if (bad) break;
+    }
+    close(in);
+    close(of);
+    if (bad || r < 0) { unlink(part); return -1; }
+    /* rename onto an existing file does not work on these consoles */
+    if (rename(part, out) != 0) { unlink(out); if (rename(part, out) != 0) { unlink(part); return -1; } }
+    return 0;
+}
+
+static int pm_running(const char *filename) {
+    char want[128];
+    pm_stem(filename, want, sizeof(want));
+    if (!want[0]) return 0;
+    int s = connect_local(PLDMGR_PORT, 6000, 5000);
+    if (s < 0) return 0;
+    char req[256];
+    int n = snprintf(req, sizeof(req), "GET /processes_list HTTP/1.0%s", PM_HDR_TAIL);
+    write_all(s, req, (size_t)n);
+    /* 16 KB: this console answers with 89 processes in about 3.5 KB. A list that outgrows the
+       buffer simply stops being scanned, which under-reports rather than inventing a green light. */
+    char *b = (char *)malloc(16384);
+    if (!b) { close(s); return 0; }
+    size_t got = 0;
+    for (;;) {
+        ssize_t r = read(s, b + got, 16384 - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got >= 16384 - 1) break;
+    }
+    close(s);
+    b[got] = 0;
+    for (size_t i = 0; i < got; i++)
+        if (b[i] >= 'A' && b[i] <= 'Z') b[i] = (char)(b[i] - 'A' + 'a');
+    int hit = 0;
+    const char *p = b;
+    while ((p = strstr(p, "\"name\"")) != NULL) {
+        const char *q = strchr(p + 6, '"');
+        if (!q) break;
+        q++;
+        const char *e = strchr(q, '"');
+        if (!e) break;
+        char nm[128], st[128];
+        size_t L = (size_t)(e - q);
+        if (L >= sizeof(nm)) L = sizeof(nm) - 1;
+        memcpy(nm, q, L); nm[L] = 0;
+        pm_stem(nm, st, sizeof(st));
+        if (!strcmp(st, want)) { hit = 1; break; }
+        p = e;
+    }
+    free(b);
+    return hit;
+}
+
+static const char *APPMETA_ROOTS[] = { "/user/appmeta", "/mnt/usb0/user/appmeta", NULL };
+
+/* The title ids this console already has, so the panel can say "Installed" without a PC.
+
+   Read from the folder the console itself keeps per installed title - appmeta on the PS5, the app
+   directory on the PS4 - because that is the same evidence the library trusts. The page matches
+   these against the catalogue's title_id; nothing here needs to know what a homebrew is. */
+static int app_ids_json(char *out, size_t outsz) {
+    int n = 0;
+    out[0] = 0;
+    for (int r = 0; APPMETA_ROOTS[r] && n < (int)outsz - 40; r++) {
+        DIR *d = opendir(APPMETA_ROOTS[r]);
+        if (!d) continue;
+        struct dirent *de;
+        while ((de = readdir(d)) && n < (int)outsz - 40) {
+            if (de->d_name[0] == '.') continue;
+            size_t L = strlen(de->d_name);
+            if (L < 6 || L > 12) continue;
+            n += snprintf(out + n, outsz - (size_t)n, "%s\"%s\"", n ? "," : "", de->d_name);
+        }
+        closedir(d);
+    }
+    return n;
+}
+
+static const char *HB_ROOTS[] = {
+    HB_DIR,
+    "/mnt/usb0/homebrews", "/mnt/usb1/homebrews", "/mnt/usb2/homebrews", "/mnt/usb3/homebrews",
+    "/mnt/ext0/homebrews", "/mnt/ext1/homebrews", "/mnt/ext2/homebrews",
+    "/mnt/usb0", "/mnt/usb1", "/mnt/ext0", "/mnt/ext1",
+    NULL
+};
+
+/* Every homebrew package this console can reach BY ITSELF, as {"n":name,"s":bytes,"p":path}.
+
+   THIS IS WHAT "NO PC AT ALL" ACTUALLY NEEDS. The owner installs this app from a USB stick or over
+   FTP with no companion running, so the packages have to be findable the same way: drop them on a
+   stick, or in our data folder, and the panel lists them.
+
+   MATCHED BY SIZE, NOT BY NAME. The page pairs these with the catalogue on the exact byte count,
+   because the owner renames files and a length is a fact about the contents rather than the label.
+   Two homebrews would have to be byte-for-byte the same size to be confused, and the catalogue
+   carries a sha256 for anything that ever has to be certain.
+
+   Only the top level of each root is read. A full walk of a 2 TB drive, on an accept loop, for a
+   panel that redraws every six seconds, is not a trade worth making. */
+static int hb_list_json(char *out, size_t outsz) {
+    int n = 0;
+    out[0] = 0;
+    for (int r = 0; HB_ROOTS[r] && n < (int)outsz - 200; r++) {
+        DIR *d = opendir(HB_ROOTS[r]);
+        if (!d) continue;
+        struct dirent *de;
+        while ((de = readdir(d)) && n < (int)outsz - 200) {
+            if (de->d_name[0] == '.' || !path_ext_is(de->d_name, ".pkg")) continue;
+            char full[700];
+            snprintf(full, sizeof(full), "%s/%s", HB_ROOTS[r], de->d_name);
+            struct stat st;
+            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) continue;
+            n += snprintf(out + n, outsz - (size_t)n,
+                          "%s{\"n\":\"%s\",\"s\":%lld,\"p\":\"%s\"}",
+                          n ? "," : "", de->d_name, (long long)st.st_size, full);
+        }
+        closedir(d);
+    }
+    return n;
+}
+
 static int pm_get(const char *path) {
     int s = connect_local(PLDMGR_PORT, 10000, 8000);
     if (s < 0) return -1;
@@ -8479,8 +9281,11 @@ static void *payload_bootstrap(void *arg) {
     {
         int need = 0;
         for (int i = 0; i < PAYLOAD_BUNDLE_COUNT; i++) {
-            int p = PAYLOAD_BUNDLE[i].port;          /* 0 = ships with us, never auto-started */
-            if (p > 0 && !port_busy(p)) need++;
+            /* BOTH FIELDS, NOT ONE. autostart is the permission and port is the evidence; a
+               payload that runs without binding anything (ShadowMountPlus does exactly that) is
+               otherwise a candidate to be started again on every boot for ever. */
+            if (PAYLOAD_BUNDLE[i].autostart && PAYLOAD_BUNDLE[i].port > 0
+                && !port_busy(PAYLOAD_BUNDLE[i].port)) need++;
         }
         if (need > 0)
             notifyf("Starting %d background service%s for game backups\n"
@@ -8518,7 +9323,7 @@ static void *payload_bootstrap(void *arg) {
            also start Elf Arsenal, Arsenal's dpiv2 loses the port forever and etaHEN spins writing
            megabytes of "bind | Address already in use". Measured on 12.70. Whoever holds :12800
            first keeps it, so we start at most one install host and never a second. */
-        int port = e->port;
+        int port = (e->autostart ? e->port : 0);
         if (port <= 0) {
             n += snprintf(g_pb_log + n, sizeof(g_pb_log) - n, "%s%s=%s",
                           n ? "," : "", e->name, wrote ? "shipped" : "write-failed");
@@ -8696,6 +9501,42 @@ int sceKernelGetAppInfo(pid_t pid, app_info_t *info);
 int sceSystemServiceGetAppIdOfRunningBigApp(void);
 int sceSystemServiceGetAppTitleId(int app_id, char *title_id_out);
 
+/* JUST THE TITLE OF THE FOREGROUND GAME, cheaply, for /api/health.
+ *
+ * running_game() below is the full answer and is expensive: the PID it also returns can only be
+ * had by enumerating every process through sysctl and calling sceKernelGetAppInfo on each one.
+ * The title needs none of that - the app id names the title directly - and the title is all the
+ * library grid wants in order to float the running game to the top.
+ *
+ * MEMOISED FOR THREE SECONDS because health is polled by every open page at once, and this is a
+ * call into SceSystemService rather than a local read. Three seconds is invisible to somebody
+ * launching a game and puts a hard ceiling on the cost however many screens are watching.
+ *
+ * Returns 0 and fills `out`, or negative with `out` empty. */
+static int running_title_cached(char *out, size_t outsz) {
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static char cached[24];
+    static long long at = 0;
+
+    if (outsz) out[0] = 0;
+    pthread_mutex_lock(&lk);
+    long long now = now_ms_local();
+    if (!at || now - at > 3000) {
+        char tid[24] = {0};
+        int app_id = sceSystemServiceGetAppIdOfRunningBigApp();
+        if (app_id > 0 && sceSystemServiceGetAppTitleId(app_id, tid) == 0 && tid[0] &&
+            ((tid[0] == 'C' && tid[1] == 'U' && tid[2] == 'S' && tid[3] == 'A') ||
+             (tid[0] == 'P' && tid[1] == 'P' && tid[2] == 'S' && tid[3] == 'A')))
+            snprintf(cached, sizeof(cached), "%.20s", tid);
+        else
+            cached[0] = 0;              /* nothing running, or a system app - both are "no game" */
+        at = now;
+    }
+    snprintf(out, outsz, "%s", cached);
+    pthread_mutex_unlock(&lk);
+    return out[0] ? 0 : -1;
+}
+
 static pid_t find_pid_for_app_id(uint32_t app_id) {
     int mib[4] = {1, 14, 8, 0};
     size_t sz = 0;
@@ -8778,11 +9619,22 @@ static char *slurp(const char *path, long *out_len) {
 }
 
 /* Copy the string value of "key":"value" starting at or after p. Returns end ptr or NULL. */
-static const char *json_str_after(const char *p, const char *key, char *out, size_t outsz) {
+/* BOUNDED, because an unbounded one reads the next object's key as this one's.
+ *
+ * Measured: a master block documents only `on` bytes, and asking for its "off" with a plain strstr
+ * from the entry's start walked past the whole master object into the first mod's entry and returned
+ * ITS off bytes - so a master the file says cannot be removed was "removed", into the wrong address.
+ * Every one of the 25,888 mod entries in the shipped library carries all three keys, which is why
+ * only the master blocks exposed it.
+ *
+ * `end` may be NULL, which means "no bound" and is exactly the old behaviour. */
+static const char *json_str_after_lim(const char *p, const char *end, const char *key,
+                                      char *out, size_t outsz) {
     char pat[48];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
     const char *k = strstr(p, pat);
     if (!k) return NULL;
+    if (end && k >= end) return NULL;                 /* it belongs to something after us */
     k += strlen(pat);
     /* Step over exactly `: ` and nothing else. Scanning ahead for the next quote — the old
        behaviour — meant a null value walked straight into the FOLLOWING key and returned its
@@ -8840,15 +9692,29 @@ static const char *json_str_after(const char *p, const char *key, char *out, siz
     return (*k == '"') ? k + 1 : NULL;
 }
 
+static const char *json_str_after(const char *p, const char *key, char *out, size_t outsz) {
+    return json_str_after_lim(p, NULL, key, out, outsz);
+}
+
 /* Find the substring covering mods[index]; returns start ptr and sets *end. */
 static const char *find_mod_block(const char *json, int index, const char **end) {
     const char *m = strstr(json, "\"mods\"");
     if (!m) return NULL;
     m = strchr(m, '[');
     if (!m) return NULL;
-    int depth = 0, cur = -1;
+    /* SAME WALK AS next_mod_block, AND FOR THE SAME REASON: a brace inside a cheat's name is text,
+       not structure, and counting it shifts every block after it. This one is worse than the other if
+       it drifts, because it is indexed - a cheat is applied BY INDEX, so a shifted boundary applies a
+       different cheat than the one that was pressed. */
+    int depth = 0, cur = -1, instr = 0;
     const char *start = NULL;
     for (const char *q = m; *q; q++) {
+        if (instr) {
+            if (*q == 0x5C && q[1]) { q++; continue; }
+            if (*q == '"') instr = 0;
+            continue;
+        }
+        if (*q == '"') { instr = 1; continue; }
         if (*q == '{') { if (depth == 0) { cur++; start = q; } depth++; }
         else if (*q == '}') {
             depth--;
@@ -8870,13 +9736,27 @@ static const char *mods_array_start(const char *json) {
    find_mod_block() walks the document from the top for every index, which made listing a
    96-mod file - and Disable-all over one - quadratic in the file size, on the accept loop. Same
    brace rules as find_mod_block, so the two agree on what block N is. */
+/* STRINGS ARE NOT STRUCTURE. This counted every brace it saw, including the ones inside a cheat's
+ * NAME - and the shipped library has ten of those. Nine are balanced and survived by luck;
+ * CUSA29102_01.01's "Max Items {after using have 2)" is not, and it cost a real cheat: the engine
+ * walked 4 of that file's 5 mods, with "Max experience" swallowed into the block before it. A mod
+ * whose block has eaten its neighbour applies BOTH memory arrays - so pressing one cheat wrote
+ * another one the owner never touched.
+ *
+ * cheat_master_span already skipped strings for exactly this reason; this is the same walk. */
 static const char *next_mod_block(const char *from, const char **end) {
     const char *q = from;
     while (*q && *q != '{' && *q != ']') q++;
     if (*q != '{') return NULL;
     const char *start = q;
-    int depth = 0;
+    int depth = 0, instr = 0;
     for (; *q; q++) {
+        if (instr) {
+            if (*q == 0x5C && q[1]) { q++; continue; }      /* an escape: skip what it escapes */
+            if (*q == '"') instr = 0;
+            continue;
+        }
+        if (*q == '"') { instr = 1; continue; }
         if (*q == '{') depth++;
         else if (*q == '}') { depth--; if (depth == 0) { *end = q + 1; return start; } }
     }
@@ -8925,11 +9805,14 @@ static int parse_mod_entries_ex(const char *blk, const char *blk_end, cheat_entr
             if (depth == 0 && s2) {
                 char off[40] = {0};
                 onh[0] = 0; offh[0] = 0;
-                json_str_after(s2, "offset", off, sizeof(off));
+                /* BOUNDED BY THIS ENTRY (q is its closing brace). Unbounded, a key this entry does
+                   not have was answered by the next object that does - which is how a master block
+                   with no documented original bytes acquired another mod's. */
+                json_str_after_lim(s2, q, "offset", off, sizeof(off));
                 /* NULL with text already copied means the value did not fit the buffer. The old
                    code went on to parse that truncated hex as a shorter, wrong-length write. */
-                const char *ron  = json_str_after(s2, "on",  onh,  hsz);
-                const char *roff = json_str_after(s2, "off", offh, hsz);
+                const char *ron  = json_str_after_lim(s2, q, "on",  onh,  hsz);
+                const char *roff = json_str_after_lim(s2, q, "off", offh, hsz);
                 if (off[0]) {
                     int bad = (onh[0] && !ron) || (offh[0] && !roff);
                     if (n >= max) bad = 1;                    /* beyond the table: not silently lost */
@@ -8945,6 +9828,25 @@ static int parse_mod_entries_ex(const char *blk, const char *blk_end, cheat_entr
                     if (bad) dropped++;
                     else {
                         e->on_len = on_len; e->off_len = off_len;
+                        /* SECTION: which loaded module the offset belongs to. Zero or absent
+                           means the main executable, the only one this engine places. Every one of
+                           the 306 entries in the shipped library quotes it ("section": "11"), so a
+                           bare strtol after the colon stops on the quote and reads 0 - which would
+                           be a check that can never fire. Both forms are accepted. */
+                        const char *sc = strstr(s2, "\"section\"");
+                        if (sc && sc < q) {
+                            const char *sv = strchr(sc, ':');
+                            if (sv && sv < q) {
+                                sv++;
+                                /* A NEWLINE IS WHITESPACE TOO. Every entry in the shipped library is
+                                   on one line, so nothing breaks today - but a pretty-printed file
+                                   would read section 0 and be applied at base + offset, which is
+                                   exactly the write the section refusal exists to stop. */
+                                while (sv < q && (*sv == ' ' || *sv == '\t' || *sv == '\n' ||
+                                                  *sv == '\r' || *sv == '"')) sv++;
+                                e->section = (int)strtol(sv, NULL, 10);
+                            }
+                        }
                         /* .shn/.mc4 can mark an individual offset as already absolute. */
                         const char *ab = strstr(s2, "\"absolute\"");
                         if (ab && ab < q) {
@@ -9039,36 +9941,719 @@ static const char *cheat_mod_state_blk(const char *json, const char *blk, const 
    Three layers: by file (this), by loaded document, by block - so a route that already holds
    the document (Disable-all, the listings) never re-reads and re-decrypts it per mod. */
 static int cheat_apply_mod(const char *file, int index, int want_on, pid_t pid, intptr_t base,
-                           int force, char *detail, size_t dsz) {
+                           int force, int check_only, char *detail, size_t dsz) {
     int non_json = 0;
     char *json = cheat_load_doc(file, &non_json);      /* .json / .shn / .mc4 all land here */
     if (!json) { snprintf(detail, dsz, "cannot read %s", file); return -1; }
-    int rc = cheat_apply_mod_doc(json, non_json, index, want_on, pid, base, force, detail, dsz);
+    int rc = cheat_apply_mod_doc(json, non_json, index, want_on, pid, base, force, check_only,
+                                 detail, dsz);
     free(json);
     return rc;
 }
 
 static int cheat_apply_mod_doc(const char *json, int non_json, int index, int want_on, pid_t pid,
-                               intptr_t base, int force, char *detail, size_t dsz) {
+                               intptr_t base, int force, int check_only, char *detail, size_t dsz) {
     const char *end = NULL;
     const char *blk = find_mod_block(json, index, &end);
     if (!blk) { snprintf(detail, dsz, "mod %d not found", index); return -2; }
-    return cheat_apply_blk(json, non_json, blk, end, index, want_on, pid, base, force, detail, dsz);
+    return cheat_apply_blk(json, non_json, blk, end, index, want_on, pid, base, force, check_only,
+                           detail, dsz);
+}
+
+
+/* ================ SIGNATURE SEARCH ============================================================
+ * See the note on the routes: this is the primitive porting, the mask patch lines and "find an
+ * address from scratch" all need, and none of them can exist without it.
+ *
+ * ONE AT A TIME, IN A THREAD, AND READ-ONLY. mem_read is the agent's file channel on a PS4 (4 KB per
+ * request at a 25 ms poll, so ~3 minutes for a 34 MB module) and a page-table walk on a PS5 (seconds).
+ * The nap between chunks is deliberate: that same channel carries every cheat toggle and every state
+ * read, and a sweep that starved it would make the shop look broken while it ran.
+ * ============================================================================================ */
+#define SIG_MAX       64      /* bytes in a signature - the longest mask in the patch library is ~40 */
+#define SIG_HITS_MAX  64
+#define SIG_CHUNK     (16 * 1024)
+
+typedef struct pms_sig { unsigned char b[SIG_MAX], m[SIG_MAX]; int n; } pms_sig_t;
+
+/* ITS OWN CLOCK, because the two payloads do not agree on the name of theirs - the PS4 has now_ms()
+   and this file has now_ms_local(), and shared code that picked either would fail to build in the
+   other. Four lines is cheaper than a shim. */
+static long long sig_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* "48 8B 05 ?? ?? ?? ?? 89" -> bytes + a mask, where m[i]==0 means "anything here". Accepts spaces,
+   dashes and commas as separators because all three appear in the wild (the Trainer format uses
+   dashes). The wildcard is two question marks, two asterisks or two x's. Returns the byte count, or 0
+   when it is not a usable signature. */
+static int sig_parse(const char *t, pms_sig_t *s) {
+    if (!t || !s) return 0;
+    memset(s, 0, sizeof(*s));
+    int n = 0;
+    for (const char *p = t; *p && n < SIG_MAX; ) {
+        if (*p == ' ' || *p == '-' || *p == ',' || *p == ':' || *p == '\t') { p++; continue; }
+        if ((p[0] == '?' || p[0] == '*' || p[0] == 'x' || p[0] == 'X') && p[1] == p[0]) {
+            s->b[n] = 0; s->m[n] = 0; n++; p += 2; continue;
+        }
+        int hi = hexval(p[0]), lo = p[1] ? hexval(p[1]) : -1;
+        if (hi < 0 || lo < 0) return 0;                  /* not hex and not a wildcard: refuse */
+        s->b[n] = (unsigned char)((hi << 4) | lo);
+        s->m[n] = 1;
+        n++; p += 2;
+    }
+    s->n = n;
+    /* A signature of nothing but wildcards matches everywhere, which is not a search. */
+    int real = 0;
+    for (int i = 0; i < n; i++) if (s->m[i]) real++;
+    return (n >= 4 && real >= 3) ? n : 0;
+}
+
+static struct sig_job {
+    pthread_mutex_t lock;
+    int       running, cancel, ever;
+    pid_t     pid;
+    intptr_t  base;
+    long long from, to, cur;
+    pms_sig_t sig;
+    char      pat[200];
+    long long hits[SIG_HITS_MAX];
+    int       nhits, truncated, unreadable;
+    long long started_ms, ended_ms;
+} g_sig = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0, 0, 0, 0, 0, {{0}, {0}, 0}, {0}, {0}, 0, 0, 0, 0, 0 };
+
+static void *sig_thread(void *arg) {
+    (void)arg;
+    unsigned char *buf = (unsigned char *)malloc(SIG_CHUNK);
+    if (!buf) {
+        pthread_mutex_lock(&g_sig.lock);
+        g_sig.running = 0; g_sig.ended_ms = sig_now_ms();
+        pthread_mutex_unlock(&g_sig.lock);
+        return NULL;
+    }
+    for (;;) {
+        pthread_mutex_lock(&g_sig.lock);
+        int stop = g_sig.cancel || g_sig.cur >= g_sig.to;
+        long long cur = g_sig.cur, to = g_sig.to;
+        pid_t pid = g_sig.pid;
+        intptr_t base = g_sig.base;
+        pms_sig_t sig = g_sig.sig;
+        pthread_mutex_unlock(&g_sig.lock);
+        if (stop) break;
+
+        long long want = to - cur;
+        if (want > SIG_CHUNK) want = SIG_CHUNK;
+        /* A FAILED READ IS A GAP, NOT THE END. A module's range has holes between its segments, and
+           the agent refuses anything outside them - so skip the chunk, count it, and carry on. */
+        int bad = (mem_read(pid, base + (intptr_t)cur, buf, (size_t)want) != 0);
+        long long found[SIG_HITS_MAX];
+        int nf = 0, over = 0;
+        if (!bad) {
+            for (long long i = 0; i + sig.n <= want; i++) {
+                int ok = 1;
+                for (int k = 0; k < sig.n; k++)
+                    if (sig.m[k] && buf[i + k] != sig.b[k]) { ok = 0; break; }
+                if (!ok) continue;
+                /* THE CAP HAS TO BE VISIBLE. This used to stop the loop at SIG_HITS_MAX and only mark
+                   `truncated` when the shared list was full - so a chunk with more matches than fit
+                   dropped the rest in silence, and the status said the list was complete. A porting
+                   tool reading "1 match" from a truncated list would place a cheat at the first of
+                   many. */
+                if (nf < SIG_HITS_MAX) found[nf++] = cur + i; else over = 1;
+            }
+        }
+        /* OVERLAP BY n-1, so a match lying across a chunk boundary is found - and found ONCE, because
+           a match starting inside the overlap cannot complete in the earlier chunk. */
+        long long step = want - (sig.n - 1);
+        if (step < 1) step = want;
+
+        pthread_mutex_lock(&g_sig.lock);
+        if (bad) g_sig.unreadable++;
+        if (over) g_sig.truncated = 1;            /* more in this chunk than the chunk list could hold */
+        for (int i = 0; i < nf; i++) {
+            if (g_sig.nhits < SIG_HITS_MAX) g_sig.hits[g_sig.nhits++] = found[i];
+            else g_sig.truncated = 1;
+        }
+        g_sig.cur = cur + step;
+        pthread_mutex_unlock(&g_sig.lock);
+        usleep(1000);
+    }
+    free(buf);
+    pthread_mutex_lock(&g_sig.lock);
+    g_sig.running = 0;
+    g_sig.ended_ms = sig_now_ms();
+    pthread_mutex_unlock(&g_sig.lock);
+    return NULL;
+}
+
+/* The most a single search will sweep. Nothing legitimate asks for more - the largest module measured
+   here is 34 MB - and without it a mistyped `to` spends an hour reading gaps. */
+#define SIG_SPAN_MAX  ((long long)256 << 20)
+
+/* 0 started, -1 one is already running, -2 not a usable signature, -3 the range makes no sense,
+   -4 the thread would not start, -5 there is no game to search. */
+static int sig_start(const char *pattern, pid_t pid, intptr_t base, long long from, long long to) {
+    pms_sig_t parsed;
+    if (sig_parse(pattern, &parsed) <= 0) return -2;
+    if (to <= from || from < 0) return -3;
+    if (to - from > SIG_SPAN_MAX) return -3;
+    /* NO GAME, NO SEARCH. Without this, a pid of 0 spends thirty-five seconds failing every read and
+       reports "0 found" - which reads as "those bytes are not in the game" rather than "nobody
+       looked". A wrong answer delivered confidently is the thing this project keeps paying for. */
+    if (pid <= 0 || base <= 0) return -5;
+    pthread_mutex_lock(&g_sig.lock);
+    if (g_sig.running) { pthread_mutex_unlock(&g_sig.lock); return -1; }
+    g_sig.sig = parsed;
+    snprintf(g_sig.pat, sizeof(g_sig.pat), "%s", pattern ? pattern : "");
+    g_sig.pid = pid; g_sig.base = base;
+    g_sig.from = from; g_sig.to = to; g_sig.cur = from;
+    g_sig.nhits = 0; g_sig.truncated = 0; g_sig.unreadable = 0;
+    g_sig.cancel = 0; g_sig.running = 1; g_sig.ever = 1;
+    g_sig.started_ms = sig_now_ms(); g_sig.ended_ms = 0;
+    pthread_mutex_unlock(&g_sig.lock);
+
+    pthread_t t;
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &a, sig_thread, NULL) != 0) {
+        pthread_attr_destroy(&a);
+        pthread_mutex_lock(&g_sig.lock);
+        g_sig.running = 0;
+        pthread_mutex_unlock(&g_sig.lock);
+        return -4;
+    }
+    pthread_attr_destroy(&a);
+    return 0;
+}
+
+static void sig_cancel(void) {
+    pthread_mutex_lock(&g_sig.lock);
+    g_sig.cancel = 1;
+    pthread_mutex_unlock(&g_sig.lock);
+}
+
+static void sig_status_json(char *out, size_t osz) {
+    pthread_mutex_lock(&g_sig.lock);
+    char esc[400];
+    json_escape(g_sig.pat, esc, sizeof(esc));
+    long long span = g_sig.to - g_sig.from;
+    long long done = g_sig.cur - g_sig.from;
+    if (done < 0) done = 0;
+    if (span > 0 && done > span) done = span;
+    size_t l = (size_t)snprintf(out, osz,
+        "{\"ok\":true,\"ever\":%s,\"active\":%s,\"pattern\":\"%s\",\"pid\":%d,\"base\":\"0x%llx\","
+        "\"from\":%lld,\"to\":%lld,\"scanned\":%lld,\"percent\":%d,\"found\":%d,"
+        "\"truncated\":%s,\"gaps\":%d,\"ms\":%lld,\"offsets\":[",
+        g_sig.ever ? "true" : "false", g_sig.running ? "true" : "false", esc, (int)g_sig.pid,
+        (unsigned long long)g_sig.base, g_sig.from, g_sig.to, done,
+        span > 0 ? (int)((done * 100) / span) : 0, g_sig.nhits,
+        g_sig.truncated ? "true" : "false", g_sig.unreadable,
+        (g_sig.ended_ms ? g_sig.ended_ms : sig_now_ms()) - g_sig.started_ms);
+    for (int i = 0; i < g_sig.nhits && l < osz - 32; i++)
+        l += (size_t)snprintf(out + l, osz - l, "%s\"%llX\"", i ? "," : "",
+                              (unsigned long long)g_sig.hits[i]);
+    if (l < osz - 4) snprintf(out + l, osz - l, "]}");
+    pthread_mutex_unlock(&g_sig.lock);
+}
+
+/* ================ THE MASTER CODE ("Must Be On") ==============================================
+ *
+ * Some trainers are built in two pieces: a master block that installs a shared routine and the
+ * scratch it works through, and then cheats that are diffs against it. Both formats we read carry
+ * one, and the engine read neither - mods are found only inside the "mods" array.
+ *
+ *   json   "master": { "challenged": "yes", "memory": [ {offset, on}, ... ] }
+ *   shn    <StartUP Text="Master Code 1 (Must Be On)"> <Cheatline>...</Cheatline> </StartUP>
+ *
+ * MEASURED, on the file we ship for Dark Souls II (CUSA01589 01.02) and on the running game. Its
+ * "1 hit kill" installs a cave that does `cmp r15, [rip-0x2473876]` from +0x207786F, and the master's
+ * cave does `mov [rip-0x2473807], rbx` from +0x2077807. Both resolve to the same qword: base -
+ * 0x3FC000, absolute 0x4000 - which the agent reports as NOT inside any module this process has
+ * loaded. So the slot the whole trainer works through does not exist, the game faults the first time
+ * either routine runs, and that is both of the crashes the owner saw: on hitting an enemy (the damage
+ * path) and instantly (the master's hook, which is in a path that runs constantly).
+ *
+ * The master is applied anyway when it CAN be - 17 of the 20 files carry no such operand - because a
+ * cave-resident cheat cannot work without it. run_unreachable() is what separates the two cases.
+ *
+ * Applied whole or not at all, through the same gate a mod uses, and skipped entry by entry when it
+ * is already in place - so the second cheat in a session costs four reads and no writes.
+ * ============================================================================================ */
+static const char *cheat_master_span(const char *json, const char **end) {
+    /* The "master" object, or NULL. Brace-matched with strings skipped: a cheat name can contain a
+       brace, and a span that ends early would hand parse_mod_entries_ex half an array. */
+    if (!json) return NULL;
+    /* THE KEY, NOT THE WORD. "master" appears in cheat NAMES all over the library - "[ENG] Master
+       Code", "Player Inv. Master Code", twenty-one of them - and the first '{' after any of those
+       belongs to something else entirely. A key is followed by a colon. */
+    const char *m = json, *o = NULL;
+    while ((m = strstr(m, "\"master\"")) != NULL) {
+        const char *q = m + 8;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q == ':') {
+            q++;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q == '{') { o = q; break; }
+        }
+        m += 8;
+    }
+    if (!o) return NULL;
+    int depth = 0, instr = 0;
+    for (const char *q = o; *q; q++) {
+        if (instr) {
+            if (*q == '\\' && q[1]) { q++; continue; }
+            if (*q == '"') instr = 0;
+            continue;
+        }
+        if (*q == '"') { instr = 1; continue; }
+        if (*q == '{') depth++;
+        else if (*q == '}') {
+            depth--;
+            if (depth == 0) { if (end) *end = q + 1; return o; }
+        }
+    }
+    return NULL;
+}
+
+/* ---- WHAT A RUN OF CODE REACHES --------------------------------------------------------------
+ *
+ * A cheat that installs a routine brings its own code, and that code can touch memory the game does
+ * not have. Dark Souls II's master does `mov [rip-0x2473807], rbx` from image offset +0x2077807,
+ * which is image base - 0x3FC000, i.e. absolute 0x4000 on these consoles - not inside any module the
+ * process has loaded. The game faults the first time that path runs, which is exactly the crash the
+ * owner reported for "1 hit kill" (on hitting an enemy) and then for the master itself (instantly).
+ *
+ * So before writing a run, resolve the RIP-relative operands in it and refuse if any of them points
+ * somewhere we cannot even read.
+ *
+ * THE DECODE IS NARROW ON PURPOSE. It is not a disassembler: it looks for the exact prefixes that
+ * appear in real cheat files and reads the disp32 that follows. Measured over the whole shipped
+ * library - 8,126 cave mods and 20 master blocks - it finds 265 operands, 260 of which resolve to a
+ * non-negative image offset and five of which resolve to exactly -0x3FC000, in three files. Five
+ * identical values is the authoring tool's convention, not decoder noise. A false positive here
+ * refuses a cheat that might have worked; a false negative crashes a game. */
+#define RIP_MAX_OPS 24
+static const unsigned char RIP_PFX[][3] = {
+    {0x4C,0x3B,0x3D}, {0x48,0x8B,0x05}, {0x48,0x8D,0x05}, {0x48,0x3B,0x05},
+    {0x4C,0x8D,0x3D}, {0x48,0x8B,0x0D}, {0x48,0x89,0x1D}, {0x48,0x8B,0x1D},
+    {0x48,0x89,0x05}, {0x48,0x8B,0x15}, {0x48,0x89,0x0D}, {0x48,0x89,0x15},
+};
+
+static long long rip_disp32(const unsigned char *p) {
+    unsigned int v = (unsigned int)p[0] | ((unsigned int)p[1] << 8)
+                   | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+    return (long long)(int)v;
+}
+
+/* Where the operands in b[0..n) point, given that b[0] sits at the ABSOLUTE address run_addr.
+ *
+ * POSITION-MAJOR, and that is not a style choice. It used to loop prefixes on the outside under a
+ * shared `got < max` cap, so a run with two dozen `4C 3B 3D` operands filled every slot and the later
+ * prefixes - including the `48 89 1D` that writes Dark Souls II's scratch - were never looked at. A
+ * safety check whose whole job is not to miss one cannot be allowed to skip a whole kind. */
+static int rip_targets(const unsigned char *b, int n, intptr_t run_addr, intptr_t *out, int max) {
+    int got = 0;
+    for (int i = 0; i + 7 <= n && got < max; i++) {
+        for (unsigned k = 0; k < sizeof(RIP_PFX) / sizeof(RIP_PFX[0]); k++) {
+            if (b[i] != RIP_PFX[k][0] || b[i+1] != RIP_PFX[k][1] || b[i+2] != RIP_PFX[k][2]) continue;
+            out[got++] = run_addr + i + 7 + (intptr_t)rip_disp32(b + i + 3);   /* prefix(3)+disp32(4) */
+            break;                                    /* one operand per position, whichever matched */
+        }
+    }
+    return got;
+}
+
+/* 1 when this run reaches memory the game does not have, and *bad is the offending ADDRESS.
+ *
+ * ABSOLUTE, throughout. It used to take an image offset and add `base` - which is wrong for every
+ * .shn and .mc4 entry that cheat_addr_mode decided was already absolute, and for any entry carrying
+ * <Absolute>: the operand was resolved from a place the run is not at. The caller knows the real
+ * address, because it just read it.
+ *
+ * THE TARGET IS DECIDED BY READING IT, not by arithmetic about where zero is - and read TWICE before
+ * it is believed. On a PS4 every read is a request over the agent's file channel, and one lost
+ * request must not turn into a permanent verdict about a cheat file. */
+static int run_unreachable(const unsigned char *b, int n, intptr_t run_addr,
+                           pid_t pid, intptr_t *bad) {
+    intptr_t t[RIP_MAX_OPS];
+    int got = rip_targets(b, n, run_addr, t, RIP_MAX_OPS);
+    for (int i = 0; i < got; i++) {
+        unsigned char one;
+        if (!ADDR_OK(t[i])) { if (bad) *bad = t[i]; return 1; }
+        if (mem_read(pid, t[i], &one, 1) == 0) continue;
+        if (mem_read(pid, t[i], &one, 1) == 0) continue;
+        if (bad) *bad = t[i];
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- THE MASTER, DECIDED BEFORE IT IS WRITTEN ------------------------------------------------ */
+enum {                                   /* why a master was refused; travels in the detail */
+    MW_NONE  = 0,
+    MW_MEM   = 1,    /* out of memory                                                        */
+    MW_ADDR  = 2,    /* an entry's own address is out of range or unreadable                 */
+    MW_CAVE  = 3,    /* the space it writes a routine into is not empty - wrong build        */
+    MW_HOOK  = 4,    /* a hook site does not hold code this master's cave re-executes        */
+    MW_REACH = 5,    /* the routine reaches memory the game does not have (the scratch)      */
+    MW_NOOFF = 6,    /* asked to remove it, and the file never said what was there           */
+    MW_WRITE = 7,    /* a write failed after every check passed                              */
+    MW_STATE = 8,    /* asked to remove it, and memory does not hold what it put there       */
+    MW_PART  = 9     /* part of the master could not be read out of its own file              */
+};
+
+typedef struct cheat_master_plan {
+    cheat_entry_t *es;
+    int n;
+    int abs_mode;
+    unsigned char write[CHEAT_MAX_ENTRIES];
+    intptr_t addr[CHEAT_MAX_ENTRIES];
+    long long lo[CHEAT_MAX_ENTRIES], hi[CHEAT_MAX_ENTRIES];   /* the offsets each entry covers */
+    int todo, skipped;
+} cheat_master_plan_t;
+
+static void cheat_master_release(cheat_master_plan_t *p) {
+    if (!p) return;
+    free(p->es);
+    p->es = NULL;
+    p->n = 0;
+}
+
+/* The cave entry a hook entry jumps into, or -1 when this entry is not a hook into our own caves.
+   Every one of the 21 hooks in the 20 master blocks we ship satisfies this, so it is the structure
+   the format actually has rather than a shape invented here. */
+static int master_hook_cave(const cheat_master_plan_t *p, int i) {
+    const cheat_entry_t *e = &p->es[i];
+    if (e->on_len < 5 || (e->on[0] != 0xE9 && e->on[0] != 0xE8)) return -1;
+    long long tgt = (long long)e->offset + 5 + rip_disp32(e->on + 1);
+    for (int j = 0; j < p->n; j++) {
+        if (j == i) continue;
+        if (tgt >= p->lo[j] && tgt < p->hi[j]) return j;
+    }
+    return -1;
+}
+
+/* IS THIS CAVE STILL THE MASTER'S ROUTINE, with a cheat sitting in it?
+ *
+ * The cheats in these files are byte patches INSIDE the master's routine - CUSA05574_01.50 has eight
+ * in one cave - so the moment one is on, the cave no longer equals the master's own bytes. An exact
+ * memcmp therefore said "not in place", the cave was not all-zero either, and the second cheat in the
+ * file was refused as a different build. Measured: 43 mod entries across the 20 master-bearing files
+ * start inside a master span, 9 of those files have two or more sharing one.
+ *
+ * A byte may differ ONLY where some mod in this same document declares a run. Those positions are
+ * exactly the ones a sibling cheat is allowed to own, and the file itself is what says so - the same
+ * reasoning offset_known_state applies to mods, in the other direction.
+ *
+ * Returns 1 when every difference is accounted for. A wrong build fails it: its bytes differ
+ * everywhere and almost none of those positions are declared by any mod. */
+static int master_cave_is_ours(const char *json, const cheat_entry_t *me,
+                               const unsigned char *cur, int wl) {
+    if (wl <= 0 || wl > CHEAT_MAX_BYTES) return 0;
+    unsigned char diff[CHEAT_MAX_BYTES];
+    int ndiff = 0;
+    for (int k = 0; k < wl; k++) {
+        diff[k] = (unsigned char)(cur[k] != me->on[k]);
+        if (diff[k]) ndiff++;
+    }
+    if (!ndiff) return 1;                         /* identical - the ordinary already-in-place case */
+    long long lo = (long long)me->offset, hi = lo + wl;
+    cheat_entry_t *es = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
+    if (!es) return 0;
+    const char *from = mods_array_start(json);
+    for (int m = 0; from && m < CHEAT_MAX_MODS && ndiff > 0; m++) {
+        const char *end = NULL;
+        const char *blk = next_mod_block(from, &end);
+        if (!blk) break;
+        from = end;
+        int n = parse_mod_entries_ex(blk, end, es, CHEAT_MAX_ENTRIES, NULL);
+        for (int i = 0; i < n && ndiff > 0; i++) {
+            int span = es[i].on_len > es[i].off_len ? es[i].on_len : es[i].off_len;
+            long long a = (long long)es[i].offset;
+            for (long long p = a; p < a + span; p++) {
+                if (p < lo || p >= hi) continue;
+                int k = (int)(p - lo);
+                if (diff[k]) { diff[k] = 0; ndiff--; }
+            }
+        }
+    }
+    free(es);
+    return ndiff == 0;
+}
+
+static int bytes_appear_in(const unsigned char *hay, int hn, const unsigned char *needle, int nn) {
+    if (nn <= 0 || nn > hn) return 0;
+    for (int i = 0; i + nn <= hn; i++) if (memcmp(hay + i, needle, (size_t)nn) == 0) return 1;
+    return 0;
+}
+
+/* Decide the whole master. Returns the number of entries that WOULD be written (0 for "nothing to
+   do", which includes "there is no master"), or -(one of MW_*) when it refuses. On any refusal, and
+   on 0, the plan holds nothing to commit - but the caller must still release it, because the entry
+   array is allocated as soon as a master exists (its offsets are what tell a mod whether it sits
+   inside a cave, which the caller needs even when the master cannot be installed). */
+static int cheat_master_decide(const char *json, pid_t pid, intptr_t base, int non_json,
+                               int want_on, cheat_master_plan_t *p) {
+    memset(p, 0, sizeof(*p));
+    const char *mend = NULL;
+    const char *mblk = cheat_master_span(json, &mend);
+    if (!mblk) return 0;                                   /* no master: nothing to do, not an error */
+
+    p->es = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
+    if (!p->es) return -MW_MEM;
+    /* A DROPPED ENTRY IS HALF A ROUTINE. parse_mod_entries_ex counts the entries it could not read
+       (too long for the buffer, malformed hex), and this passed NULL - so a master missing a piece
+       was installed as a routine with a hole in it. The mod path refuses exactly this, in those
+       words; so does this now. */
+    int mdropped = 0;
+    p->n = parse_mod_entries_ex(mblk, mend, p->es, CHEAT_MAX_ENTRIES, &mdropped);
+    if (p->n <= 0) { cheat_master_release(p); return 0; }
+    if (mdropped > 0) return -MW_PART;
+    p->abs_mode = non_json ? cheat_addr_mode(p->es, p->n, pid, base) : 0;
+
+    for (int i = 0; i < p->n; i++) {
+        int span = p->es[i].on_len > p->es[i].off_len ? p->es[i].on_len : p->es[i].off_len;
+        p->lo[i] = (long long)p->es[i].offset;
+        p->hi[i] = p->lo[i] + (span > 0 ? span : 1);
+    }
+
+    /* TAKING IT OUT NEEDS SOMETHING TO PUT BACK. The json form documents only the on bytes - two of
+       Dark Souls II's four master entries replace real game code and the file never says what was
+       there - so there is no honest revert and the game has to be closed. The Trainer <StartUP> form
+       carries ValueOff, and for those this works. */
+    if (!want_on) {
+        for (int i = 0; i < p->n; i++) if (p->es[i].off_len <= 0) return -MW_NOOFF;
+    }
+
+    unsigned char cur[CHEAT_MAX_BYTES];
+    for (int i = 0; i < p->n; i++) {
+        const unsigned char *w = want_on ? p->es[i].on  : p->es[i].off;
+        int wl                 = want_on ? p->es[i].on_len : p->es[i].off_len;
+        const unsigned char *x = want_on ? p->es[i].off : p->es[i].on;   /* the documented opposite */
+        int xl                 = want_on ? p->es[i].off_len : p->es[i].on_len;
+        if (wl <= 0) { p->skipped++; continue; }
+        intptr_t addr = cheat_entry_addr(&p->es[i], base, p->abs_mode);
+        p->addr[i] = addr;
+        if (!ADDR_OK(addr)) return -MW_ADDR;
+        /* READ THE LONGER OF THE TWO RUNS, so both comparisons below are possible. Reading only wl
+           meant a documented opposite state longer than what is being written could never be
+           compared - which on the removal path (wl is off_len, xl is on_len) makes a master with a
+           longer `on` permanently unremovable. */
+        int rl = xl > wl ? xl : wl;
+        if (rl > CHEAT_MAX_BYTES) rl = CHEAT_MAX_BYTES;
+        if (mem_read(pid, addr, cur, (size_t)rl) != 0) {
+            if (rl == wl || mem_read(pid, addr, cur, (size_t)wl) != 0) return -MW_ADDR;
+            rl = wl;
+        }
+        if (memcmp(cur, w, (size_t)wl) == 0) { p->skipped++; continue; }   /* already in place */
+
+        /* THE GATE THIS ENTRY GETS, and every entry gets one. Before this, an entry with no
+           documented original state was written blind - so the master went into a running game on
+           nothing but "these are not already the bytes I am about to write", which is not a check. */
+        int ok = 0;
+        if (xl > 0 && xl <= rl && memcmp(cur, x, (size_t)xl) == 0) {
+            ok = 1;                              /* exactly the documented opposite state - as a mod */
+        } else if (!want_on) {
+            /* REMOVING. There is only one acceptable answer: memory holds what this file wrote. The
+               cave and hook tests below are about installing and mean nothing here - "the space is
+               empty" is false by definition when the thing you are removing is in it. */
+            return -MW_STATE;
+        } else {
+            int cave = master_hook_cave(p, i);
+            if (cave >= 0) {
+                /* A HOOK. A trampoline re-executes the instruction it stole, so the bytes standing
+                   here must appear inside the cave this jump goes to. If they do not, this is not
+                   the site the file was written against. */
+                ok = bytes_appear_in(p->es[cave].on, p->es[cave].on_len, cur, wl);
+                if (!ok) return -MW_HOOK;
+            } else {
+                /* A CAVE. Empty is what the file describes - or the master's own routine with a
+                   sibling cheat sitting in it, which is what this file is FOR. Both are "in place";
+                   anything else is a different build. */
+                ok = 1;
+                for (int k = 0; k < wl; k++) if (cur[k]) { ok = 0; break; }
+                if (!ok && master_cave_is_ours(json, &p->es[i], cur, wl)) {
+                    p->skipped++;                  /* the routine is there; a cheat is in it */
+                    continue;
+                }
+                if (!ok) return -MW_CAVE;
+            }
+        }
+        if (!ok) return -MW_CAVE;
+        intptr_t bad = 0;
+        if (run_unreachable(w, wl, addr, pid, &bad)) return -MW_REACH;
+        p->write[i] = 1;
+        p->todo++;
+    }
+    return p->todo;
+}
+
+/* Write a plan that is already known to be complete.
+ *
+ * STOPS AT THE FIRST FAILURE, and *landed tells the caller how many went in before it. It used to
+ * carry on writing and then report -MW_WRITE with no count, so a hook could be sitting over a cave
+ * that never got filled while the owner was told "Nothing was changed". Every read and every gate has
+ * already passed by the time this runs, so a failure here is the channel giving out - and continuing
+ * past it is how you install half a routine.
+ *
+ * Returns entries written, or -MW_WRITE with *landed set. */
+static int cheat_master_commit(cheat_master_plan_t *p, pid_t pid, int want_on, int *landed) {
+    int written = 0;
+    if (landed) *landed = 0;
+    for (int i = 0; i < p->n; i++) {
+        if (!p->write[i]) continue;
+        const unsigned char *w = want_on ? p->es[i].on : p->es[i].off;
+        int wl = want_on ? p->es[i].on_len : p->es[i].off_len;
+        if (mem_write(pid, p->addr[i], w, (size_t)wl) != 0) {
+            if (landed) *landed = written;
+            return -MW_WRITE;
+        }
+        written++;
+    }
+    if (landed) *landed = written;
+    return written;
+}
+
+/* WHAT MEMORY WILL LOOK LIKE ONCE THE MASTER'S PLAN HAS BEEN WRITTEN.
+ *
+ * A cave-resident cheat's documented original bytes are the MASTER'S bytes - God mode expects
+ * 8B8370010000 at +0x2077807, which is the instruction the master's routine puts there. So a mod
+ * gated against memory as it stands would be refused for every one of those cheats, and gating it
+ * after writing the master is what let a refused mod leave an irreversible master behind. The gate
+ * therefore reads memory and then overlays the master's PLAN before comparing.
+ *
+ * Driven by p->write[], not by the entry list: an entry the master is skipping is already in place,
+ * so what was read is already right. */
+static void master_overlay(const cheat_master_plan_t *p, intptr_t addr, unsigned char *buf, int len,
+                           int want_on) {
+    if (!p || p->n <= 0 || len <= 0) return;
+    for (int i = 0; i < p->n; i++) {
+        if (!p->write[i]) continue;
+        /* WHAT THE PLAN WILL WRITE, WHICHEVER DIRECTION IT WAS DECIDED IN. This always overlaid `on`,
+           which is right for an install and wrong for a removal - reachable only because the caller
+           memsets the plan when turning a mod off, so it was a latent wrong answer rather than a live
+           one. Saying it properly costs one argument. */
+        const unsigned char *src = want_on ? p->es[i].on : p->es[i].off;
+        int wl = want_on ? p->es[i].on_len : p->es[i].off_len;
+        if (wl <= 0) continue;
+        intptr_t lo = p->addr[i];
+        for (int k = 0; k < len; k++) {
+            intptr_t a = addr + k;
+            if (a >= lo && a < lo + wl) buf[k] = src[a - lo];
+        }
+    }
+}
+
+/* Is this mod's own byte run inside one of the master's caves? Those cheats are patches to the
+   master's routine and cannot work without it; anything else in the same file can. */
+/* Does this mod's run OVERLAP one of the master's caves? A run that starts before a cave and reaches
+   into it depends on the master just as much as one that starts inside it, and testing only the start
+   offset missed that. Half-open spans on both sides, so touching ends do not count. */
+static int master_covers(const cheat_master_plan_t *p, unsigned long long off, int len) {
+    long long a = (long long)off, b = a + (len > 0 ? len : 1);
+    for (int i = 0; i < p->n; i++)
+        if (a < p->hi[i] && b > p->lo[i]) return 1;
+    return 0;
+}
+
+/* The sentence for a refused master, for the log and for the detail. */
+static const char *master_why_text(int why) {
+    switch (why) {
+    case MW_MEM:   return "out of memory";
+    case MW_ADDR:  return "an address it needs is not in this game";
+    case MW_CAVE:  return "the space it writes into is not empty - a different build";
+    case MW_HOOK:  return "a hook site does not hold the code it expects - a different build";
+    case MW_REACH: return "it needs memory below the game's image that this console does not map";
+    case MW_NOOFF: return "the file does not say what was there before it";
+    case MW_STATE: return "the game does not hold what this master wrote";
+    case MW_PART:  return "part of it could not be read out of the cheat file";
+    case MW_WRITE: return "a write failed";
+    default:       return "";
+    }
+}
+
+/* TURNING THE MASTER BACK OUT, for the Trainer form that documents its original bytes. Called by
+   Disable-all once every mod has been reverted - the json form answers MW_NOOFF and is left alone. */
+static int cheat_master_off(const char *json, pid_t pid, intptr_t base, int non_json,
+                           char *why, size_t wsz) {
+    if (why && wsz) why[0] = 0;
+    cheat_master_plan_t p;
+    int rc = cheat_master_decide(json, pid, base, non_json, 0, &p);
+    int landed = 0;
+    if (rc > 0) rc = cheat_master_commit(&p, pid, 0, &landed);
+    if (why && wsz) {
+        if (rc > 0) snprintf(why, wsz, "master removed: %d entr%s", rc, rc == 1 ? "y" : "ies");
+        else if (rc == -MW_WRITE)
+            snprintf(why, wsz, "master only PARTLY removed: %d entr%s put back, then a write failed - "
+                     "close the game to clear the rest", landed, landed == 1 ? "y was" : "ies were");
+        else if (rc < 0) snprintf(why, wsz, "master left in place - %s", master_why_text(-rc));
+    }
+    cheat_master_release(&p);
+    return rc;
+}
+
+/* Does this document carry a master code, and can it be taken back out again?
+ *
+ * The answer to the second half is not a matter of opinion: a master can be reverted only if the
+ * file says what was there before it. The json form (20 files) documents only `on` bytes for the two
+ * places it patches, so there is nothing to put back and closing the game is the only way to clear
+ * it. The Trainer <StartUP> form (73 files) carries ValueOff and can be undone. The panel says which
+ * of the two an owner is dealing with, so "I turned everything off" means something definite. */
+static int cheat_master_info(const char *json, int *removable) {
+    if (removable) *removable = 0;
+    const char *end = NULL;
+    const char *blk = cheat_master_span(json, &end);
+    if (!blk) return 0;
+    cheat_entry_t *es = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
+    if (!es) return 0;
+    int n = parse_mod_entries_ex(blk, end, es, CHEAT_MAX_ENTRIES, NULL);
+    int rem = n > 0;
+    for (int i = 0; i < n; i++) if (es[i].off_len <= 0) { rem = 0; break; }
+    free(es);
+    if (removable) *removable = rem;
+    return n > 0;
 }
 
 static int cheat_apply_blk(const char *json, int non_json, const char *blk, const char *end,
                            int index, int want_on, pid_t pid, intptr_t base, int force,
-                           char *detail, size_t dsz) {
+                           int check_only, char *detail, size_t dsz) {
+    /* THE MASTER CODE IS DECIDED HERE AND WRITTEN AT THE END, with the mod, or not at all.
+     *
+     * It used to be installed right here, before the mod was gated - so a mod that was then refused
+     * left an irreversible master behind in a running game. Worse, the master's own entries were
+     * written blind, because a master documents no original bytes and there was nothing to gate on.
+     * On a build the file does not fit that writes a jump into arbitrary code; on the build it DOES
+     * fit it wrote Dark Souls II's cave, whose own first instruction addresses absolute 0x4000 - not
+     * mapped - and the game died the instant a cheat was pressed. cheat_master_decide() now applies
+     * the same standard to every master entry that a mod entry has always had, and run_unreachable()
+     * is the gate that catches the second case. */
+    cheat_master_plan_t mp;
+    int master_n = 0, master_why = 0;
+    if (want_on) {
+        master_n = cheat_master_decide(json, pid, base, non_json, 1, &mp);
+        if (master_n < 0) { master_why = -master_n; master_n = 0; }
+    } else {
+        memset(&mp, 0, sizeof(mp));
+    }
     cheat_entry_t *ents = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
-    if (!ents) { snprintf(detail, dsz, "out of memory"); return -1; }
+    if (!ents) { cheat_master_release(&mp); snprintf(detail, dsz, "out of memory"); return -1; }
     int dropped = 0;
     int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
-    if (n <= 0) { free(ents); snprintf(detail, dsz, "mod %d has no memory entries", index); return -3; }
+    if (n <= 0) {
+        cheat_master_release(&mp);              /* ~1 MB, on the accept loop, every refused toggle */
+        free(ents);
+        snprintf(detail, dsz, "mod %d has no memory entries", index);
+        return -3;
+    }
     if (dropped > 0 && want_on && !force) {
         /* Part of this mod could not be read out of its file. Writing the rest installs half a
            hook - the classic way to hang a game - so the whole mod is refused (rc -4, its own
            toast). Turning OFF still runs: it only ever puts documented bytes back, each one gated
            below, so it can undo what a forced apply or an older build wrote and nothing more. */
+        cheat_master_release(&mp);              /* and here - the other ~1 MB the audit found */
         free(ents);
         snprintf(detail, dsz, "mod %d has %d entr%s the engine cannot read (too large or malformed) "
                  "- refusing to apply part of it", index, dropped, dropped == 1 ? "y" : "ies");
@@ -9076,16 +10661,79 @@ static int cheat_apply_blk(const char *json, int non_json, const char *blk, cons
     }
     int abs_mode = non_json ? cheat_addr_mode(ents, n, pid, base) : 0;
 
+    /* ---- PASS ONE: DECIDE, WRITE NOTHING ---------------------------------------------------------
+     *
+     * A mod's entries are not independent edits. Measured on Dark Souls II's "1 hit kill": one entry
+     * writes a 36-byte routine into a code cave (its documented "off" state is 36 zero bytes, which is
+     * empty space, not original code) and the other patches a jump into that cave. Applying one
+     * without the other is a jump into memory nobody wrote, and the game dies the next time it runs
+     * that path - which is why it crashed on hitting an enemy rather than on switching the cheat on.
+     *
+     * This loop used to write as it went and `continue` past any entry that failed, calling the
+     * result "written=1 failed=1". The file already refuses a mod it cannot fully PARSE for exactly
+     * this reason ("writing the rest installs half a hook"); the same has to be true of an entry that
+     * fails at write time. So every entry is decided here first, and one refusal cancels the mod.
+     *
+     * Costs nothing extra: the gate below already read every entry before writing it. */
     int written = 0, skipped = 0, failed = 0, displaced = -1;
+    /* WHY an entry cannot be written, kept apart. All three used to be one `failed`, and the app
+       then said "the cheat file was made for a different version" for all three - true only of
+       f_bytes. f_addr is a cheat that points outside the process (a section/absolute entry), and
+       f_read is the engine not being able to read at all, which on PS4 means the in-game helper
+       has stopped. f_sec is how many of the failures carry a module index we do not place, which
+       is the difference between "your game is the wrong version" and "this cheat is not for the
+       main executable". */
+    int f_addr = 0, f_read = 0, f_bytes = 0, f_sec = 0, f_write = 0, f_reach = 0;
+    int written_plan = 0;             /* entries the plan would write - check_only reports this */
+
+    /* DOES THIS MOD NEED THE MASTER? Only if its own bytes land inside one of the master's caves -
+       those cheats are patches to the master's routine (five of Dark Souls II's seven are) and are
+       meaningless without it. A mod elsewhere in the same file does not care, so a master that could
+       not be installed must not take it down. */
+    int needs_master = 0;
+    for (int i = 0; i < n && mp.n > 0; i++) {
+        int span = ents[i].on_len > ents[i].off_len ? ents[i].on_len : ents[i].off_len;
+        if (master_covers(&mp, ents[i].offset, span)) { needs_master = 1; break; }
+    }
+    /* FORCE DOES NOT OVERRIDE THIS ONE. It exists to override the BYTE gate - "write it even though
+       the bytes are not what the file says" - and writing a cheat into a routine that was never
+       installed is not a gate being overridden, it is a jump into an empty cave. That is the crash
+       this whole change exists to prevent, and force must not be a way back to it. */
+    if (master_why && needs_master) {
+        cheat_master_release(&mp);
+        free(ents);
+        snprintf(detail, dsz, "master_refused=%d entries=%d - refused, nothing was changed",
+                 master_why, n);
+        return -6;
+    }
+
+    unsigned char *plan = (unsigned char *)malloc((size_t)n);
+    intptr_t *paddr = (intptr_t *)malloc((size_t)n * sizeof(intptr_t));
+    if (!plan || !paddr) {
+        cheat_master_release(&mp);
+        free(plan); free(paddr); free(ents);
+        snprintf(detail, dsz, "out of memory");
+        return -1;
+    }
     for (int i = 0; i < n; i++) {
         cheat_entry_t *e = &ents[i];
         const unsigned char *w = want_on ? e->on  : e->off;
         int wl                 = want_on ? e->on_len : e->off_len;
         const unsigned char *x = want_on ? e->off : e->on;      /* expected current state */
         int xl                 = want_on ? e->off_len : e->on_len;
+        plan[i] = 0;
+        paddr[i] = 0;
         if (wl <= 0) { skipped++; continue; }
         intptr_t addr = cheat_entry_addr(e, base, abs_mode);
-        if (!ADDR_OK(addr)) { failed++; continue; }
+        paddr[i] = addr;
+        if (!ADDR_OK(addr)) { failed++; f_addr++; if (e->section) f_sec++; continue; }
+        /* ANOTHER MODULE'S OFFSET IS NOT THIS MODULE'S. 306 entries in 103 shipped files carry a
+           non-zero `section` - the index of a different loaded module in the tool that wrote them -
+           and this engine resolves exactly one base. 305 of those addresses pass ADDR_OK, so without
+           this the engine computes base + offset and writes there if the bytes happen to match. The
+           refusal message has claimed since 3.82.0 that these are declined; now they are. Not force-
+           able, because there is no version of "force" that makes an offset mean another module. */
+        if (e->section) { failed++; f_sec++; continue; }
         if (!force) {
             /* EVERY write goes through the gate now. It used to run only when the on and off
                runs were the same length; 549 real entries (a 5-byte call replaced by a 2-byte
@@ -9096,9 +10744,15 @@ static int cheat_apply_blk(const char *json, int non_json, const char *blk, cons
             unsigned char cur[CHEAT_MAX_BYTES];
             if (mem_read(pid, addr, cur, (size_t)rl) != 0) {
                 /* the longer run may cross into a page the shorter one does not */
-                if (rl == wl || mem_read(pid, addr, cur, (size_t)wl) != 0) { failed++; continue; }
+                if (rl == wl || mem_read(pid, addr, cur, (size_t)wl) != 0) {
+                    failed++; f_read++; if (e->section) f_sec++; continue;
+                }
                 rl = wl;
             }
+            /* AND WHAT THE MASTER IS ABOUT TO PUT THERE. Without this, every cheat that patches the
+               master's own routine is refused, because the cave it lives in is still empty when this
+               read happens - and writing the master first to avoid that is the bug this replaced. */
+            master_overlay(&mp, addr, cur, rl, want_on);
             if (memcmp(cur, w, (size_t)wl) == 0) { skipped++; continue; }   /* already in state */
             if (xl > 0 && xl <= rl && memcmp(cur, x, (size_t)xl) == 0) {
                 /* holds exactly the documented opposite state - the normal case */
@@ -9110,23 +10764,204 @@ static int cheat_apply_blk(const char *json, int non_json, const char *blk, cons
                 /* Not our expected state — but a sibling mod may legitimately own this hook.
                    Allow the hand-over when the bytes are a documented state; refuse otherwise. */
                 int owner = -1;
-                if (!offset_known_state(json, e->offset, cur, wl, &owner)) { failed++; continue; }
+                if (!offset_known_state(json, e->offset, cur, wl, &owner)) {
+                    failed++; f_bytes++; if (e->section) f_sec++; continue;
+                }
                 if (owner >= 0 && owner != index) displaced = owner;
             }
         }
-        if (mem_write(pid, addr, w, (size_t)wl) == 0) written++; else failed++;
+        /* AND WHAT THIS RUN ITSELF REACHES. A cheat that installs a routine brings its own code,
+           and that code can address memory the game does not have: "1 hit kill" reads image base -
+           0x3FC000 (absolute 0x4000), which is not inside any module this process has loaded. It
+           applied cleanly and then killed the game the first time an enemy was hit. Five entries in
+           the whole shipped library reach outside the image, all of them that same slot. */
+        intptr_t bad_t = 0;
+        if (run_unreachable(w, wl, addr, pid, &bad_t)) {
+            failed++; f_reach++; continue;
+        }
+        plan[i] = 1;                    /* decided: this one is to be written */
+        written_plan++;                 /* what a check-only run reports, and what pass two writes */
     }
+
+    /* ---- THE REFUSAL, BEFORE ANYTHING IS TOUCHED ------------------------------------------------
+     * One entry that cannot be written makes the whole mod unsafe, so nothing is written at all and
+     * the game is left exactly as it was. `force` still goes ahead - that is what it is for - and the
+     * detail says so, because a forced partial apply is a thing somebody should know they did. */
+    if (failed > 0 && !force) {
+        cheat_master_release(&mp);
+        free(plan); free(paddr); free(ents);
+        snprintf(detail, dsz,
+                 "entries=%d ready=%d unwritable=%d bad_addr=%d unreadable=%d mismatch=%d "
+                 "section=%d noreach=%d - refused, nothing was changed",
+                 n, written + skipped, failed, f_addr, f_read, f_bytes, f_sec, f_reach);
+        return -4;
+    }
+
+    /* ---- ASKED, NOT TOLD -------------------------------------------------------------------------
+     * Everything above this line is reads and arithmetic - the same reads, the same gates and the same
+     * reasons as a real apply. check_only stops here, so a caller can find out what would happen
+     * without it happening. The number it returns is what the write loop below WOULD write, and the
+     * detail is the same detail, so a diagnostic and the real thing cannot disagree. */
+    if (check_only) {
+        cheat_master_release(&mp);
+        size_t cl = (size_t)snprintf(detail, dsz, "check=1 ");
+        if (master_n > 0 && cl < dsz) cl += (size_t)snprintf(detail + cl, dsz - cl, "master=%d ", master_n);
+        if (cl < dsz)
+            snprintf(detail + cl, dsz - cl, "entries=%d would_write=%d skipped=%d dropped=%d",
+                     n, written_plan, skipped, dropped);
+        int would = written_plan;
+        free(plan); free(paddr); free(ents);
+        return would;
+    }
+
+    /* ---- THE MASTER GOES IN FIRST, now that the mod is known to be writable ----------------------
+     * The order is the whole point: a cave must hold the master's routine before anything jumps into
+     * it. Nothing above this line has touched the game. */
+    if (master_n > 0) {
+        int landed = 0;
+        int mw = cheat_master_commit(&mp, pid, 1, &landed);
+        if (mw < 0) {
+            /* IT STOPPED AT THE FIRST FAILURE, so `landed` is how much of the routine is in the game.
+               Saying "nothing was changed" here would be false, and it is the shape of failure this
+               whole change exists to prevent - so it says what is there and what to do about it. */
+            cheat_master_release(&mp);
+            free(plan); free(paddr); free(ents);
+            snprintf(detail, dsz,
+                     "master_refused=%d master_landed=%d entries=%d - the master code stopped writing",
+                     MW_WRITE, landed, n);
+            return -6;
+        }
+        master_n = mw;
+    }
+    cheat_master_release(&mp);
+
+    /* ---- PASS TWO: WRITE THE PLAN ---------------------------------------------------------------- */
+    for (int i = 0; i < n; i++) {
+        if (!plan[i]) continue;
+        cheat_entry_t *e = &ents[i];
+        const unsigned char *w = want_on ? e->on  : e->off;
+        int wl                 = want_on ? e->on_len : e->off_len;
+        if (mem_write(pid, paddr[i], w, (size_t)wl) == 0) written++; else { failed++; f_write++; }
+    }
+    free(plan);
+    free(paddr);
     free(ents);
+    /* master=N goes FIRST, so the app can say a master code went in as well. Everything after it
+       writes at detail + dl and dl accumulates - the else arm below used to assign dl from
+       snprintf(detail, ...) and would have written straight over the master prefix. */
     size_t dl = 0;
+    if (master_n > 0 && dsz > 24)
+        dl = (size_t)snprintf(detail, dsz, "master=%d ", master_n);
     if (displaced >= 0)
-        dl = (size_t)snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d displaced_mod=%d",
-                              n, written, skipped, failed, displaced);
+        dl += (size_t)snprintf(detail + dl, dsz - dl,
+                               "entries=%d written=%d skipped=%d failed=%d displaced_mod=%d",
+                               n, written, skipped, failed, displaced);
     else
-        dl = (size_t)snprintf(detail, dsz, "entries=%d written=%d skipped=%d failed=%d",
-                              n, written, skipped, failed);
+        dl += (size_t)snprintf(detail + dl, dsz - dl,
+                               "entries=%d written=%d skipped=%d failed=%d",
+                               n, written, skipped, failed);
     if (dropped > 0 && dl < dsz)                      /* only reachable forced, or turning off */
-        snprintf(detail + dl, dsz - dl, " dropped=%d", dropped);
+        dl += (size_t)snprintf(detail + dl, dsz - dl, " dropped=%d", dropped);
+    /* A WRITE THAT FAILED IN PASS TWO IS NOT A VERSION PROBLEM, and it used to be reported as one:
+       f_write was counted and then dropped on the floor, so cheat_rc_message fell through to "the
+       cheat file was made for a different version" while the master was already in the game. */
+    if (f_write > 0 && dl < dsz)
+        snprintf(detail + dl, dsz - dl, " writefail=%d", f_write);
     return failed ? -(100 + failed) : written;
+}
+
+/* WHAT TO SAY TO THE OWNER when the engine refuses. The routes below report rc and detail, and
+   detail is for us: "entries=3 written=0 skipped=0 failed=3". errText() in the page only prettifies
+   bare snake_case codes, so that line was being toasted at the owner exactly as written.
+
+   Returns an empty string when there is nothing to explain, so a caller can simply omit the field.
+   The numbers are read back out of detail rather than threaded through four call sites: this is our
+   own format, produced a dozen lines above, and parsing it keeps the change to one function.
+
+   PARTLY APPLIED IS ITS OWN ANSWER and matters more than it looks. cheat_apply_blk carries on past a
+   failed entry, so rc can be negative while written is greater than zero - the mod has real bytes in
+   the running game. Calling that a clean failure is how a tile gets repainted OFF over a game that
+   has been half modified. */
+static void cheat_rc_message(int rc, const char *detail, int want_on, char *out, size_t osz) {
+    if (!osz) return;
+    out[0] = 0;
+    if (rc >= 0) return;
+    int written = -1, entries = -1;
+    const char *w = detail ? strstr(detail, "written=") : NULL;
+    const char *e = detail ? strstr(detail, "entries=") : NULL;
+    if (w) written = atoi(w + 8);
+    if (e) entries = atoi(e + 8);
+    if (written > 0) {
+        snprintf(out, osz,
+                 "Only part of this went into the game - %d of %d changes landed, so it is neither "
+                 "fully on nor fully off. Turn it off, then on again. If it keeps happening the "
+                 "cheat file was made for a different version of this game.",
+                 written, entries > written ? entries : written);
+    } else {
+        /* SAY WHICH OF THEM HAPPENED. The detail carries each reason separately, and an absent key
+           (an older payload, or a refusal from somewhere that does not count them) reads as 0 and
+           falls through to the version sentence exactly as before. */
+        int sec = detail && strstr(detail, "section=") ? atoi(strstr(detail, "section=") + 8) : 0;
+        int bad = detail && strstr(detail, "bad_addr=") ? atoi(strstr(detail, "bad_addr=") + 9) : 0;
+        int unr = detail && strstr(detail, "unreadable=") ? atoi(strstr(detail, "unreadable=") + 11) : 0;
+        int nor = detail && strstr(detail, "noreach=") ? atoi(strstr(detail, "noreach=") + 8) : 0;
+        int mre = detail && strstr(detail, "master_refused=")
+                  ? atoi(strstr(detail, "master_refused=") + 15) : 0;
+        int mland = detail && strstr(detail, "master_landed=")
+                    ? atoi(strstr(detail, "master_landed=") + 14) : 0;
+        int wfail = detail && strstr(detail, "writefail=")
+                    ? atoi(strstr(detail, "writefail=") + 10) : 0;
+        if (mre == MW_WRITE) {
+            /* PART OF A ROUTINE IS IN THE GAME. Not "nothing was changed", which is what this used to
+               say - and the one thing that matters is that closing the game is what clears it. */
+            snprintf(out, osz,
+                     "The engine stopped part-way through setting this game up: %d piece%s went in and "
+                     "then the console stopped accepting writes. Close the game to clear it, then try "
+                     "again.", mland, mland == 1 ? "" : "s");
+        } else if (wfail > 0) {
+            snprintf(out, osz,
+                     "The console stopped accepting writes part-way through this cheat, so it is "
+                     "neither on nor off. Close the game to clear it, then try again.");
+        } else if (mre > 0) {
+            /* This cheat is a patch INSIDE a master code's routine, and that routine could not be
+               installed. The reason codes are MW_* in cheat_master_decide; the two an owner can act
+               on are "a different build" and "memory this console does not have". */
+            if (mre == MW_REACH)     /* the code, not a number that moves when the enum does */
+                snprintf(out, osz,
+                         "This cheat needs a scratch space in memory that this game does not have, so "
+                         "nothing was changed. It was written for a setup this console cannot give it, "
+                         "and forcing it would crash the game.");
+            else
+                snprintf(out, osz,
+                         "This cheat is part of a master code, and the master code does not fit the "
+                         "game you have installed. Nothing was changed. Try the cheats for your own "
+                         "version from the version list.");
+        } else if (nor > 0) {
+            snprintf(out, osz,
+                     "This cheat's own code reaches a place in memory that this game does not have, so "
+                     "nothing was changed. That is a property of the cheat file, not of your game - "
+                     "forcing it would crash the game.");
+        } else if (sec > 0) {
+            snprintf(out, osz,
+                     "This cheat is written against a different part of the game than the one the "
+                     "engine can change - it points into another piece of code the game loads, not "
+                     "the main program. Nothing was changed. There is no way to use it as it is.");
+        } else if (bad > 0) {
+            snprintf(out, osz,
+                     "This cheat points somewhere the game does not have memory, so nothing was "
+                     "changed. The file is describing a different build of the game.");
+        } else if (unr > 0) {
+            snprintf(out, osz,
+                     "The engine could not read the game's memory, so nothing was changed. Close "
+                     "the game and open it again, then try once more.");
+        } else {
+            snprintf(out, osz,
+                     "The game did not accept this, and nothing was changed. This almost always "
+                     "means the cheat file was made for a different version of the game than the "
+                     "one %s.",
+                     want_on ? "installed" : "running");
+        }
+    }
 }
 
 /* Create each parent directory of a file path (mkdir per component). */
@@ -9363,8 +11198,52 @@ static void patch_undo_path(const char *tid, int index, const char *iver, char *
    offset never change. (A "first apply wins" O_EXCL file sat here briefly; it made the first
    apply's bytes permanent and never recorded a line that only a later apply reached.)
    patch_revert deletes the file after a complete revert. */
-static FILE *patch_undo_open(const char *up) {
-    return fopen(up, "ab");
+/* THE UNDO RECORD IS WRITTEN WITH A FILE DESCRIPTOR, NOT stdio.
+ *
+ * This engine is shared with the PS4 (tools/ps4_sync_cheat_core.py copies it into
+ * ps4-app/onconsole/cheat_core.h) and fopen does not work in that payload - it returns NULL, and
+ * every other writer in server_ps4.c uses open()/write() for that reason. With stdio here, a PS4
+ * applied patches perfectly and then answered "no saved original bytes" to every Revert, for
+ * ever, because the record it was supposed to read had never been written.
+ *
+ * O_APPEND so several lines of one patch accumulate, and so a second apply of the same patch
+ * cannot overwrite the originals the first one saved. */
+static int patch_undo_open(const char *up) {
+    return open(up, O_WRONLY | O_CREAT | O_APPEND, 0777);
+}
+
+/* One line of the record: offset, length, then the bytes that were there.
+ *
+ * BUILT WHOLE AND WRITTEN ONCE. stdio hid the fact that this was three calls; with a raw
+ * descriptor a short write between them leaves a record that reads back as garbage - and that
+ * garbage is what a later Revert would write into a running game. Returns 0 only when the whole
+ * record reached the file. */
+static int patch_undo_write(int fd, unsigned long long off, int len, const unsigned char *was) {
+    if (fd < 0 || len <= 0 || len > PATCH_MAX_VAL) return -1;
+    unsigned char rec[sizeof(unsigned long long) + sizeof(int) + PATCH_MAX_VAL];
+    size_t n = 0;
+    memcpy(rec + n, &off, sizeof(off)); n += sizeof(off);
+    memcpy(rec + n, &len, sizeof(len)); n += sizeof(len);
+    memcpy(rec + n, was, (size_t)len);  n += (size_t)len;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t w = write(fd, rec + done, n - done);
+        if (w <= 0) return -1;
+        done += (size_t)w;
+    }
+    return 0;
+}
+
+/* Exactly n bytes, or a refusal. read() is allowed to return fewer than asked for on any file. */
+static int undo_read_exact(int fd, void *buf, size_t n) {
+    unsigned char *p = (unsigned char *)buf;
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
 }
 
 /* Apply (or with dry=1 merely inspect) patch `index` of `tid` into the live process.
@@ -9396,7 +11275,7 @@ static int patch_apply(const char *tid, int index, const char *iver, pid_t pid, 
     int n = patch_parse_lines(blk, end, lines, PATCH_MAX_LINES, &unsup);
 
     int written = 0, verified = 0, failed = 0, skipped = 0, already = 0;
-    FILE *undo = NULL;
+    int undo = -1;
     int undo_tried = 0;      /* opened lazily, before the first write, so a run that writes
                                 nothing leaves no empty undo file behind */
     for (int i = 0; i < n; i++) {
@@ -9415,11 +11294,12 @@ static int patch_apply(const char *tid, int index, const char *iver, pid_t pid, 
             patch_undo_path(tid, index, iver, up, sizeof(up));
             undo = patch_undo_open(up);
         }
-        if (undo) {
-            unsigned long long o = L->off; int l = L->len;
-            fwrite(&o, sizeof(o), 1, undo);
-            fwrite(&l, sizeof(l), 1, undo);
-            fwrite(cur, 1, (size_t)l, undo);
+        if (undo >= 0 && patch_undo_write(undo, L->off, L->len, cur) != 0) {
+            /* HALF AN UNDO RECORD IS WORSE THAN NONE: reverting it would restore some lines and
+               then write wrong bytes at the next offset, into a running game. Abandon the record
+               instead. Revert then says plainly that there is nothing saved. */
+            close(undo);
+            undo = -1;
         }
         if (mem_write(pid, at, L->val, (size_t)L->len) != 0) { failed++; continue; }
         written++;
@@ -9427,7 +11307,7 @@ static int patch_apply(const char *tid, int index, const char *iver, pid_t pid, 
         if (mem_read(pid, at, back, (size_t)L->len) == 0 && !memcmp(back, L->val, (size_t)L->len))
             verified++;
     }
-    if (undo) fclose(undo);
+    if (undo >= 0) close(undo);
     snprintf(detail, dsz, "lines=%d written=%d verified=%d already=%d failed=%d unsupported=%d",
              n - unsup, written, verified, already, failed, unsup);
     free(lines);
@@ -9443,21 +11323,22 @@ static int patch_revert(const char *tid, int index, const char *iver, pid_t pid,
                         char *detail, size_t dsz) {
     char up[700];
     patch_undo_path(tid, index, iver, up, sizeof(up));
-    FILE *f = fopen(up, "rb");
-    if (!f) { snprintf(detail, dsz, "no saved original bytes"); return -1; }
+    int f = open(up, O_RDONLY);
+    if (f < 0) { snprintf(detail, dsz, "no saved original bytes"); return -1; }
     int restored = 0, failed = 0;
     for (;;) {
         unsigned long long off; int len;
-        if (fread(&off, sizeof(off), 1, f) != 1) break;
-        if (fread(&len, sizeof(len), 1, f) != 1) break;
+        if (undo_read_exact(f, &off, sizeof(off)) != 0) break;
+        if (undo_read_exact(f, &len, sizeof(len)) != 0) break;
         if (len <= 0 || len > PATCH_MAX_VAL) break;
         unsigned char buf[PATCH_MAX_VAL];
-        if (fread(buf, 1, (size_t)len, f) != (size_t)len) break;
+        if (undo_read_exact(f, buf, (size_t)len) != 0) break;   /* truncated: stop, restore what
+                                                                   was whole, report the rest */
         intptr_t at = base + (intptr_t)off;
         if (ADDR_OK(at) && mem_write(pid, at, buf, (size_t)len) == 0) restored++;
         else failed++;
     }
-    fclose(f);
+    close(f);
     if (restored && !failed) unlink(up);
     snprintf(detail, dsz, "restored=%d failed=%d", restored, failed);
     return restored;

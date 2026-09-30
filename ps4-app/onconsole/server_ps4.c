@@ -58,6 +58,9 @@
 #include <signal.h>
 #include <ps4/klog.h>
 
+#include <sys/ptrace.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
 #include "sqmini.h"
 #include "bgft.h"
 #include "web_bundle.h"
@@ -69,11 +72,23 @@
 #ifndef PMS_LITE
 #include "tile_bundle.h"
 #endif
+/* The in-game agent goes in BOTH builds. Unlike the home-screen package - which lite deliberately
+   gives up, because the app carrying lite has by definition already been installed - a shop that
+   cannot put the agent on the console is a shop where cheats silently do not work, and lite is
+   exactly the copy that runs when the owner presses the icon. */
+/* The in-game agent travels inside this ELF and is written to the console on boot (unlisted -
+   see agent_deploy). It is load-safe now: plugin_load returns instantly with no blocking work, so
+   it cannot freeze a game. tools/test_agent_protocol.py compiles it and proves that on a PC. */
+#include "agent_bundle.h"
+/* The owner's PS4 payloads. In BOTH builds for the same reason the agent is: lite is the copy that
+   runs when the icon is pressed, and a panel that cannot send ftpsrv from the icon is a panel that
+   only works when a PC is already on - which is the whole thing this is here to avoid. 266 KB. */
+#include "payload_bundle_ps4.h"
 
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.64.0"
+#define SHOP_VERSION "3.86.0"
 
 /* The largest POST body this console will take. Bodies here are JSON of a few hundred bytes; the
    cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */
@@ -98,9 +113,49 @@ static long long g_boot_ms = 0;
 static volatile long long g_conns_served = 0;
 
 #define SHOP_DATA_DIR  "/data/pkg-mutant-shop"
+#define PB_DIR         "/data/pkg-mutant-shop/payloads"
+/* SEEDED ONCE, KEPT FOR EVER. The PS4's homebrew packages are 87 MB - Itemzflow and PS4-Xplorer -
+   and this payload is injected into a shared system daemon, so they follow the cheat library's rule
+   rather than the agent's: they live on disk and are installed from there. The PC copies them in
+   the first time the two meet, and after that this console needs nobody. */
+#define HB_DIR         "/data/pkg-mutant-shop/homebrews"
+/* THE FOLDER EVERY OTHER GUIDE TELLS PEOPLE TO USE. GoldHEN's BinLoader takes an ELF over :9090,
+   and by convention people keep the ones they load in /data/payloads - so that is where somebody
+   installing this app from a USB stick or over FTP will put our ELF, with no PC involved at all.
+   We create it and mirror our bundled payloads into it; we never load from it. */
+#define GH_PAYLOAD_DIR "/data/payloads"
+
+/* THE CHEAT LIBRARY, in the same places the PS5 keeps it. Same names, same layout, deliberately:
+   cheat_core.h is the PS5's own code and reads these, and a PS4 that filed its cheats somewhere
+   else would need a second copy of every path-building line in it for no gain at all. */
+#define CHEAT_ROOT        SHOP_DATA_DIR "/cheats"
+#define CHEAT_JSON_DIR    CHEAT_ROOT "/json"
+#define CHEAT_SHN_DIR     CHEAT_ROOT "/shn"
+#define CHEAT_MC4_DIR     CHEAT_ROOT "/mc4"
+#define CHEAT_PATCH_DIR   CHEAT_ROOT "/patches"
+#define CHEAT_INBOX_DIR   CHEAT_ROOT "/incoming"
 #define WEB_ROOT       SHOP_DATA_DIR "/web"
 #define INSTALL_LOG    SHOP_DATA_DIR "/install.log"
 #define APP_DB_PATH    "/system_data/priv/mms/app.db"
+/* WHAT THE CONSOLE'S CONTENT LOOKS LIKE RIGHT NOW, in one short string.
+ *
+ * app.db holds the installed titles and their APP_VER; addcont.db holds the add-ons. Between them
+ * they decide every "installed", "Update" and "DLC" the page draws. Two stats, so this is safe to
+ * answer on the health poll, and the companion only has to notice the string changing to know it
+ * should re-read the library - which is what makes the Updates section react to an install, an
+ * update, a delete or an add-on WITHOUT the page being reloaded by hand.
+ *
+ * Deliberately not a hash of the file: a hash means reading it, and the point of this is that it
+ * costs nothing. Size plus mtime moves for every write sqlite makes to either database. */
+#define ADDCONT_DB_PATH "/system_data/priv/mms/addcont.db"
+static void content_sig(char *out, size_t osz) {
+    struct stat a, b;
+    long long as = 0, am = 0, bs = 0, bm = 0;
+    if (stat(APP_DB_PATH, &a) == 0) { as = (long long)a.st_size; am = (long long)a.st_mtime; }
+    if (stat(ADDCONT_DB_PATH, &b) == 0) { bs = (long long)b.st_size; bm = (long long)b.st_mtime; }
+    snprintf(out, osz, "%lld-%lld-%lld-%lld", as, am, bs, bm);
+}
+
 #define APPMETA_ROOT   "/user/appmeta"
 /* The shop's own dashboard app. Same title id as the PS5 tile on purpose - one app, one identity,
    whichever console it is on - and it cannot collide with a game, which is CUSA or NPXS. */
@@ -870,6 +925,12 @@ static struct job_slot {
     long long job_id;
     long long started_ms;
     long long done, total;
+    /* LAST SEEN, as distinct from the start-of-job snapshot in base_size/base_mtime. The movement
+       test needs "has it changed since the previous poll"; `replaced` further down needs "has it
+       changed since the job began". One pair cannot answer both, and using base_* for movement made
+       that test fire either never or always. */
+    long long last_size, last_mtime;
+    int last_seen;
     long long expect;      /* the package size the companion told us, for the finished check */
     long long seen_total;  /* the widest total BGFT ever claimed for this job - see job_refresh */
     long long base_size;   /* app.pkg for this title BEFORE this install started, and whether     */
@@ -1000,6 +1061,17 @@ static long long job_claim(job_claim_kind kind, job_claim_out *out) {
     }
     /* FRESH and DIRECT start from nothing; HELD and RETRY keep the url they are about to reuse. */
     if (kind == JOB_CLAIM_FRESH || kind == JOB_CLAIM_DIRECT) memset(&g_job, 0, sizeof(g_job));
+    /* A RETRY IS A NEW ATTEMPT, NOT A CONTINUATION. done, total, rc and seen_total survived the claim
+       because only FRESH and DIRECT memset the slot - so a retry published the FAILED attempt's error
+       code and percentage until the first poll overwrote them, and if it failed again before that the
+       owner read the previous failure's code as if it were this one's. The url, name and want_* stay:
+       that is what a retry retries. */
+    if (kind == JOB_CLAIM_RETRY) {
+        g_job.done = g_job.total = g_job.seen_total = 0;
+        g_job.rc = 0;
+        g_job.base_had = 0; g_job.base_size = 0; g_job.base_mtime = 0;
+        g_job.last_seen = 0; g_job.last_size = 0; g_job.last_mtime = 0;
+    }
     g_job.active   = 1;
     g_job.held     = 0;
     g_job.released = 0;
@@ -1032,6 +1104,146 @@ static int job_claim_is_mine_locked(long long tok) {
     return tok && g_job_claim == tok;
 }
 
+/* ============================ MEMORY: CAN WE REACH A PROCESS? ============================
+ *
+ * Read the file header first - this is the one thing that stands between this console and the
+ * cheat engine, and everything below is measurement, not capability.
+ *
+ * THE STUB IS COPIED, NOT WRITTEN. This is ps4-payload-sdk's crt/syscall.h __syscall, verbatim
+ * (GPLv3, the same SDK whose crt this payload already links). It is here rather than included
+ * because crt/ is internal to the SDK build and is not on our include path. Do not "tidy" it: the
+ * clobber list and the carry-flag output are the error convention this kernel uses, and a syscall
+ * stub written from memory is exactly the class of guess this project has a scar from.
+ */
+static inline long pms_syscall(long n, ...) {
+    long a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0;
+    __builtin_va_list ap;
+    unsigned long ret;
+    char err;
+
+    __builtin_va_start(ap, n);
+    a1 = __builtin_va_arg(ap, long);
+    a2 = __builtin_va_arg(ap, long);
+    a3 = __builtin_va_arg(ap, long);
+    a4 = __builtin_va_arg(ap, long);
+    a5 = __builtin_va_arg(ap, long);
+    a6 = __builtin_va_arg(ap, long);
+    __builtin_va_end(ap);
+
+    register long r10 asm("r10") = a4;
+    register long r8  asm("r8")  = a5;
+    register long r9  asm("r9")  = a6;
+
+    asm("syscall"
+        : "=a"(ret), "=@ccc"(err), "+r"(r10), "+r"(r8), "+r"(r9)
+        : "a"(n), "D"(a1), "S"(a2), "d"(a3)
+        : "rcx", "r11", "memory");
+
+    return err ? -ret : ret;
+}
+
+/* All four numbers below are read from the SDK, not chosen. crt/syscall.h for 573; crt/mdbg.c for
+   the two memory operations and for the fact that cmd.type is 1. */
+#define PMS_SYS_MDBG_CALL 573
+#define PMS_MDBG_READ     0x12
+#define PMS_MDBG_WRITE    0x13
+
+typedef struct { unsigned long type, cmd; } pms_mdbg_cmd_t;
+typedef struct { int pid; unsigned long src, dst, len; } pms_mdbg_args_t;
+typedef struct { int status; unsigned long len; } pms_mdbg_res_t;
+
+/* ONE memory operation, with NO credential juggling.
+ * The SDK's mdbg_memop() elevates to SCE_AUTHID_COREDUMP through kexec before calling, and that is
+ * the only reason it cannot work here. This issues the same syscall with the same three structures
+ * and nothing else, so what comes back is the kernel's own answer about the credentials GoldHEN
+ * left us with. `res` is filled for the caller: a probe wants the status and length, not a verdict.
+ */
+static long pms_mdbg_op(int op, pms_mdbg_args_t *a, pms_mdbg_res_t *res) {
+    pms_mdbg_cmd_t cmd;
+    cmd.type = 1;
+    cmd.cmd  = (unsigned long)op;
+    res->status = 0;
+    res->len    = 0;
+    return pms_syscall(PMS_SYS_MDBG_CALL, (long)&cmd, (long)a, (long)res);
+}
+
+/* ============================================================================================
+ * THE JAILBREAK'S OWN KERNEL GATEWAY - read/write another process, the PS4 way.
+ *
+ * The PS5 reaches a running game's memory through kernel access its jailbreak hands our payload.
+ * On the PS4 the two direct doors to that (mdbg 573, ptrace 26) are shut for us - measured. The
+ * jailbreak on this console installs a gateway of its own instead: one indirect syscall, number
+ * 500, dispatched by a command word, and its own memory tooling goes through it. We use it the way
+ * we use the PS5's kernel access - it is what the jailbreak provides, not a second app running
+ * inside the game (that approach hung games and is gone).
+ *
+ * gh_orbis_syscall IS COPIED VERBATIM from the SDK's own source/Syscall.c - the INDIRECT form:
+ * rax = 0, the real number (500) travels in the first argument. Our existing pms_syscall uses the
+ * DIRECT form (number in rax) and that is a different calling convention which the binaries on
+ * this console are NOT observed to use for this gateway (they issue mov edi,500 - number in edi),
+ * so it must not be reused here. The structs and command numbers are the SDK header's, verbatim.
+ * ============================================================================================ */
+__asm__(
+    ".att_syntax prefix\n"
+    ".globl gh_orbis_syscall\n"
+    "gh_orbis_syscall:\n"
+    "  movq $0, %rax\n"
+    "  movq %rcx, %r10\n"
+    "  syscall\n"
+    "  jb 1f\n"
+    "  retq\n"
+    "1:\n"
+    "  pushq %rax\n"
+    "  callq __error\n"
+    "  popq %rcx\n"
+    "  movl %ecx, 0(%rax)\n"
+    "  movq $0xFFFFFFFFFFFFFFFF, %rax\n"
+    "  movq $0xFFFFFFFFFFFFFFFF, %rdx\n"
+    "  retq\n"
+);
+extern long gh_orbis_syscall(long num, ...);
+
+/* SDK header include/GoldHEN.h, verbatim. The command numbers and the two structs. */
+#define GH_SDK_CMD_VERSION       0
+#define GH_SDK_CMD_PROCESS_INFO  4
+#define GH_SDK_CMD_PROCESS_RW    5
+#define GH_SDK_VERSION_EXPECTED  0x00000100
+#define GH_SDK_SYSCALL           500
+
+typedef struct {
+    int pid;
+    char name[40];
+    char path[64];
+    char titleid[16];
+    char contentid[64];
+    char version[6];
+    unsigned long base_address;
+} __attribute__((packed)) gh_proc_info_t;
+
+typedef struct {
+    unsigned long address;
+    void *data;
+    unsigned long length;
+    unsigned long write_flags;
+} __attribute__((packed)) gh_proc_rw_t;
+
+/* jailbreak_backup, verbatim from the SDK header include/GoldHEN.h. Opaque to us: cmd 2 fills it,
+   cmd 3 restores from it, and we never modify a field between the two. */
+#define GH_SDK_CMD_JAILBREAK    2
+#define GH_SDK_CMD_UNJAILBREAK  3
+typedef struct {
+    unsigned int  cr_uid;
+    unsigned int  cr_ruid;
+    unsigned int  cr_rgid;
+    unsigned int  cr_groups;
+    unsigned long cr_paid;
+    unsigned long cr_caps[2];
+    void *cr_prison;
+    void *fd_cdir;
+    void *fd_jdir;
+    void *fd_rdir;
+} gh_jailbreak_backup_t;
+
 /* Handles from dlopen, kept so we can search them by name.
    RTLD_DEFAULT ALONE IS NOT ENOUGH: measured on 13.52, every BGFT symbol came back NULL from the
    default scope and resolved fine from the handle of the library we opened. The first build of
@@ -1047,12 +1259,1982 @@ static void *dlsym_any(const char *sym) {
     return p;
 }
 
+/* ---- WHICH GAME IS RUNNING -------------------------------------------------------------------
+ * Every number and every name here was read off this machine, and the one thing the two PS4
+ * toolchains disagreed about was settled by asking the console (see the file-level note on
+ * /api/engine/proclist).
+ *
+ *   sceSystemServiceGetAppIdOfBigApp()  - the PS4 name. The PS5 half of this repo calls
+ *     sceSystemServiceGetAppIdOfRunningBigApp, which does not exist on a PS4; copying the PS5's
+ *     name over is precisely the mistake this file's old comment warned about.
+ *   sceKernelGetAppInfo(pid, info)      - libkernel, and it needs libkernel to have been dlopen'd
+ *     (it is, now - it resolved from nowhere until it was added to bgft_bootstrap's list).
+ *   title id at info+16, 10 bytes       - MEASURED on 13.52. Offset 12 was empty on all 63.
+ */
+#define PMS_APPINFO_TID_OFF 16
+#define PMS_APPINFO_TID_LEN 10
+
+static pthread_mutex_t g_rt_lock = PTHREAD_MUTEX_INITIALIZER;
+static char      g_rt_id[16];
+static long long g_rt_at;
+#define RT_TTL_MS 2000
+
+/* The title id of the foreground game, or "" when no game is running.
+   Never fails loudly: an empty string is the honest answer to "I could not tell", and that is what
+   the page already treats as "no game to highlight". */
+/* THE ONLY THING /api/health CALLS. A copy out of the cache under the mutex - no syscalls, no
+   process walk, no way to block. Everything expensive happens in rt_thread() below.
+
+   This used to do the work inline, and when a game crashed mid-load the call never returned:
+   /api/health connected and hung for ever while GET / served the whole 1.2 MB page in 34 ms, so
+   the UI sat on "please wait" with nothing to fail on. Every poll from every device then started
+   another copy of the same walk. A stale title id is a harmless answer; a health route that does
+   not answer takes the entire app down on every device at once. */
+static void running_title_id(char *out, size_t n) {
+    if (!n) return;
+    pthread_mutex_lock(&g_rt_lock);
+    snprintf(out, n, "%s", g_rt_id);
+    pthread_mutex_unlock(&g_rt_lock);
+}
+
+/* The expensive half, on its own thread and nowhere near a request.
+   If THIS blocks on a dying process the only consequence is that the cached answer stops being
+   refreshed - the shop keeps serving, which is the entire reason for the split. */
+static void rt_refresh_once(void) {
+    char found[16];
+    found[0] = 0;
+
+    int (*bigapp)(void) = (int (*)(void))dlsym_any("sceSystemServiceGetAppIdOfBigApp");
+    int (*getappinfo)(pid_t, void *) = (int (*)(pid_t, void *))dlsym_any("sceKernelGetAppInfo");
+    int app_id = (bigapp && getappinfo) ? bigapp() : -1;
+
+    /* A game, and only a game. With nothing running this call answers with a non-positive id and
+       there is nothing to look up - the system processes all carry NPXS ids and must never be
+       reported as "the running game". */
+    if (app_id > 0) {
+        int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+        size_t need = 0;
+        if (!sysctl(mib, 4, NULL, &need, NULL, 0) && need) {
+            need += need / 8 + 8192;
+            char *buf = (char *)malloc(need);
+            if (buf) {
+                if (!sysctl(mib, 4, buf, &need, NULL, 0)) {
+                    for (char *p = buf; p < buf + need; ) {
+                        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+                        if (ki->ki_structsize <= 0 || p + ki->ki_structsize > buf + need) break;
+                        p += ki->ki_structsize;
+
+                        unsigned char info[0x100];
+                        memset(info, 0, sizeof(info));
+                        if (getappinfo(ki->ki_pid, info)) continue;
+                        if (*(unsigned int *)info != (unsigned int)app_id) continue;
+
+                        char tid[PMS_APPINFO_TID_LEN + 1];
+                        memcpy(tid, info + PMS_APPINFO_TID_OFF, PMS_APPINFO_TID_LEN);
+                        tid[PMS_APPINFO_TID_LEN] = 0;
+                        for (int i = 0; tid[i]; i++)
+                            if (tid[i] < 32 || tid[i] > 126) { tid[i] = 0; break; }
+                        /* A GAME, AND ONLY A GAME - which is what the comment at the top of
+                           this function has always said and what the PS5 does at the same point.
+                           This used to accept NPXS as well, and NPXS is precisely what it must
+                           not accept: those are the system processes, and the shell, the store and
+                           THE BROWSER are all of them. So the moment the owner opened this page on
+                           the console itself, the "running game" became a system app - matching no
+                           card in the library, floating nothing to the top, and naming a title
+                           with no cheats to /api/cheat/running. */
+                        if (!strncmp(tid, "CUSA", 4) || !strncmp(tid, "PPSA", 4)) {
+                            snprintf(found, sizeof(found), "%s", tid);
+                            break;
+                        }
+                    }
+                }
+                free(buf);
+            }
+        }
+    }
+
+    pthread_mutex_lock(&g_rt_lock);
+    snprintf(g_rt_id, sizeof(g_rt_id), "%s", found);
+    g_rt_at = now_ms();
+    pthread_mutex_unlock(&g_rt_lock);
+}
+
+/* Defined further down, beside the channel it reads. Declared here because the watcher below is the
+   cheapest place to notice that an agent has appeared. */
+static int agent_alive_fresh(void);
+
+/* Defined beside agent_info, far below. Declared here because BOTH the watcher and agent_purge sit
+   above it and both end a session whose cached status must not outlive it. */
+static void agent_info_forget(void);
+
+/* RAISED WHEN WHAT IS INSTALLED CHANGES, lowered by the watcher once it has re-decided who should be
+   armed. A flag rather than a direct call because the place that knows an install finished holds
+   g_job_lock, and re-deciding reads app.db and rewrites the owner's plugin list - neither belongs
+   under a lock that a progress poll is waiting on.
+
+   THE WAIT IS NOT WHAT MAKES THE DECISION FRESH - the watcher dropping the cache itself is. This
+   comment used to claim the two-second wait let the cache be rebuilt first; it cannot, because the
+   TTL is five seconds and the one fresh read the install branch's drop buys is taken by whoever
+   asks next (console_lists_title four lines later, or any poll of the library). So the watcher
+   drops it again immediately before reconciling, and the reconcile IS the read that goes to
+   app.db. */
+static volatile int g_autoarm_dirty;
+
+/* Both live far below, beside the rest of autoarm - declared here because the watcher above them is
+   the thread that acts on the flag. */
+static int autoarm_enabled(void);
+static int agent_autoarm_reconcile(void);
+
+/* THE HANDOVER FLAG, declared here so the watcher can test it - its definition is ~2,600 lines below,
+   which is exactly why the watcher never tested it and leaked on every reload. A tentative definition
+   at file scope is legal C and the one with the initialiser still owns the storage. */
+static volatile int g_quit;
+
+static void *rt_thread(void *arg) {
+    (void)arg;
+    /* WHICH GAME WE HAVE ALREADY ANNOUNCED. Not a boolean: the owner can close one game and open
+       another without the shop restarting, and each deserves its own message exactly once.
+       CLEARED BY THE AGENT'S HEARTBEAT GOING STALE - never by the running title going empty, which is
+       the bug this replaced. See the note beside the clear below. */
+    static char announced_for[16];
+    static int  no_agent_polls = 0;
+
+    /* NOT `for (;;)`, AND THAT IS THE WHOLE POINT. GoldHEN injects every payload into one shared host
+       process, so /api/quit cannot _exit() - it sets g_quit, stops the accept loop and closes the
+       listening socket so the new instance can bind. Its comment claimed "our threads end"; this one
+       did not, because it never tested the flag. Every reload therefore left another copy of this loop
+       walking the entire process list every two seconds, for ever, inside ScePartyDaemon.
+       The owner found it the hard way: the engine's own message arrived once per leaked watcher, so it
+       went 2, then 3, in step with the number of payload pushes. I had blamed a flicker in the running
+       title and been wrong - the count going UP after that "fix" was the proof. */
+    while (!g_quit) {
+        rt_refresh_once();
+
+        /* SOMETHING WAS INSTALLED (or re-installed) SINCE WE LAST DECIDED. Re-deciding is cheap when
+           the answer has not moved - agent_autoarm_apply compares the whole result with what is on
+           disk and writes nothing if they match - so this costs a directory read and a compare. */
+        /* DID THE CONSOLE'S CONTENT CHANGE, whoever changed it? content_sig is a stat of app.db and
+           addcont.db - the same string /api/health reports - so this notices an install, an update,
+           a DELETE from the console's own menu, or an add-on, for the price of two stats every two
+           seconds. It matters because the install-completion branch is the only other thing that
+           raises this flag, and it fires on install only: uninstalling a game used to leave the
+           in-game helper listed for a title that no longer exists until the next reboot.
+           The FIRST observation only remembers - startup_extras has already reconciled by then, and
+           a second pass for the same state would rewrite the owner's plugin list for nothing. */
+        {
+            static char last_sig[64];
+            static long long last_act_ms = 0;
+            static int sig_pending = 0;
+            char sig_now[64];
+            content_sig(sig_now, sizeof(sig_now));
+            if (!last_sig[0]) {
+                snprintf(last_sig, sizeof(last_sig), "%s", sig_now);
+            } else if (strcmp(last_sig, sig_now)) {
+                snprintf(last_sig, sizeof(last_sig), "%s", sig_now);
+                sig_pending = 1;
+            }
+            /* NOT ON EVERY TICK. Measured in the console's own log: a single tile install moved the
+               signature three times in four seconds, and each one re-read app.db and re-decided the
+               owner's plugin list. Re-deciding is idempotent (gh_ini_write_whole writes nothing when
+               the answer is unchanged), so this is waste rather than damage - but it is waste inside a
+               system daemon whose heap we do not own. Ten seconds collapses an install's worth of
+               writes into one pass, and `sig_pending` is why a change during the cooldown is not lost. */
+            if (sig_pending && now_ms() - last_act_ms > 10000) {
+                sig_pending = 0;
+                last_act_ms = now_ms();
+                titles_cache_drop();
+                g_autoarm_dirty = 1;
+                ilog("content: what is installed changed - re-reading and re-deciding the helper");
+            }
+        }
+
+        if (g_autoarm_dirty) {
+            g_autoarm_dirty = 0;
+            if (autoarm_enabled()) {
+                /* THE RECONCILE MUST BE THE READ THAT GOES TO app.db. The drop the install branch
+                   made two seconds ago has already been spent by whoever asked next, and the cache
+                   holds that answer for five seconds - so without this, the decision about which
+                   titles carry the helper is made from a snapshot taken at the instant the install
+                   finished, which is exactly when app.db may not carry the row yet. */
+                titles_cache_drop();
+                int armed = agent_autoarm_reconcile();
+                if (armed >= 0)
+                    ilog("autoarm: %d installed title(s) with cheats are armed", armed);
+            }
+        }
+
+        /* OUR OWN MESSAGE, INSTEAD OF GOLDHEN'S GOLD ONE.
+           Its loader draws "Loaded 1 plugin(s) 1. <name>" the instant the module is mapped, in its own
+           styling - and "mapped" is not the useful moment. The agent sleeps six seconds before it
+           touches anything, so for those six seconds that banner is telling the owner something is
+           ready when nothing is. This fires when alive.bin says the agent is actually serving, which is
+           the moment cheats will really work. Arming switches GoldHEN's banner off (see
+           gh_set_load_notification) so this is the only message. One stat, no round trip - the watcher
+           already runs every two seconds and this costs it nothing. */
+        char cur[16] = {0};
+        pthread_mutex_lock(&g_rt_lock);
+        snprintf(cur, sizeof(cur), "%s", g_rt_id);
+        pthread_mutex_unlock(&g_rt_lock);
+
+        /* ONE MESSAGE PER GAME.
+           A SCAR ABOUT DIAGNOSIS, not about this code. The owner saw this message twice and I blamed a
+           flicker in the running title during a game load - having sampled the title and observed ZERO
+           flicker, and asserted the cause anyway. The real cause was that every payload reload leaked
+           this whole thread (see the while (!g_quit) above), so the message arrived once per leaked
+           watcher. The count went 2, then 3, in step with the pushes - and my "fix" made it worse,
+           which should have ended the theory on the spot.
+           The keying on alive.bin is kept because it IS the better signal: the agent rewrites it every
+           two seconds and it is stale only when there is no agent, which is exactly when another
+           announcement is warranted - whereas the running title also moves for reasons that have
+           nothing to do with our helper. Two consecutive misses are required so one slow beat cannot
+           produce a repeat. But it was never the bug. */
+        if (!agent_alive_fresh()) {
+            /* No agent: whatever the cached status describes is a session that has ended. */
+            agent_info_forget();
+            if (++no_agent_polls >= 2) announced_for[0] = 0;
+        } else {
+            no_agent_polls = 0;
+            if (cur[0] && strcmp(announced_for, cur) != 0) {
+                notify("PKG MUTANT SHOP: the cheat engine is on for this game. "
+                       "Switch cheats on and off from the app.");
+                snprintf(announced_for, sizeof(announced_for), "%s", cur);
+            }
+        }
+
+        usleep(RT_TTL_MS * 1000);
+    }
+    ilog("watcher: standing down for the new instance");
+    return NULL;
+}
+
+/* ---- THIS CONSOLE'S DURABLE ID -----------------------------------------------------------------
+ * Sixteen hex characters in a file beside the shop's own data, generated once and kept for ever.
+ * It exists so a PC can recognise this console after its ADDRESS changes - which happens on any
+ * network with DHCP, and which used to leave the app showing a healthy console as offline because
+ * the only name it had for it was the address that moved.
+ *
+ * Random and local. Not a serial number, not a MAC, not an account. Delete the file and the console
+ * gets a new one; a PC then treats it as a console it has never met, which is the honest reading.
+ */
+#define CONSOLE_ID_PATH SHOP_DATA_DIR "/console-id"
+
+static char g_console_id[20];
+
+static const char *console_id(void) {
+    if (g_console_id[0]) return g_console_id;
+
+    long n = 0;
+    char *have = slurp(CONSOLE_ID_PATH, &n);
+    if (have) {
+        int k = 0;
+        for (long i = 0; i < n && k < 16; i++) {
+            char c = have[i];
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) g_console_id[k++] = c;
+            else if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+            else { k = 0; break; }          /* not ours - regenerate rather than trust it */
+        }
+        free(have);
+        if (k == 16) { g_console_id[16] = 0; return g_console_id; }
+        g_console_id[0] = 0;
+    }
+
+    /* Enough for a name that only has to be unique across the consoles in one house: the clock,
+       our pid, and two addresses that move with ASLR from run to run. */
+    unsigned long long seed = (unsigned long long)now_ms();
+    seed ^= ((unsigned long long)getpid() << 32);
+    seed ^= (unsigned long long)(uintptr_t)&seed;
+    seed ^= ((unsigned long long)(uintptr_t)g_console_id) << 13;
+    static const char HEX[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        g_console_id[i] = HEX[(seed >> 33) & 0xF];
+    }
+    g_console_id[16] = 0;
+
+    mkdir(SHOP_DATA_DIR, 0777);
+    int f = open(CONSOLE_ID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f >= 0) { ssize_t w = write(f, g_console_id, 16); (void)w; close(f); }
+    return g_console_id;
+}
+
+/* ---- THE IN-GAME HELPER'S OWN SWITCH ---------------------------------------------------------
+ * GoldHEN's loader reads /data/GoldHEN/plugins/plugins.ini when a game starts: a line naming a
+ * .prx loads it, the same line behind a ';' does not. That is the whole mechanism, and it is what
+ * these two functions edit - one line, ours, leaving every other line exactly as it was.
+ */
+/* /data/GoldHEN/plugins.ini - NOT inside the plugins/ folder, which is where this file put
+   it at first. The plugin loader names the path in its own log when it cannot read it:
+     [GoldHEN] <Plugins Loader> Config parser failed to parse config: /data/GoldHEN/plugins.ini
+   The folder holds the .prx files; the list of which ones to load sits beside it. Measured
+   on a real game launch - our plugin was installed, listed, enabled and never loaded, and
+   the only sign was that one line. */
+#define GH_PLUGINS_INI  "/data/GoldHEN/plugins.ini"
+#define PMS_AGENT_PRX   "/data/GoldHEN/plugins/pms-agent.prx"
+/* Written once, the first time this console lists the plugin for itself. See agent_deploy(). */
+#define AGENT_SETUP_MARK SHOP_DATA_DIR "/agent-listed-once"
+
+/* IS THIS LINE A LISTING OF OUR PLUGIN - not "does this line mention it". It was strstr() of the
+   bare name, which is true of any comment that talks about the file, including the prose header
+   agent_set_enabled itself writes ("PKG MUTANT SHOP in-game helper ... pms-agent.prx" never appears
+   there today, but the next edit to that text is one word away from arming the reporting).
+
+   What counts: optional leading whitespace, then optionally our own "off" spelling of ';' plus
+   whitespace, then the FIRST token - ending at space, tab, CR, or a ';' that begins a trailing note,
+   none of which can occur inside a path. That token is a listing when it is exactly the bare name
+   or ends in "/pms-agent.prx".
+
+   Accepts: the absolute path; "; " + the path; a CRLF line (the callers' line buffers keep the
+   trailing CR, and agent_enable_for_title already special-cases it); a trailing inline comment; the
+   file under any other directory; the bare name. Rejects prose that merely names the file. */
+static int agent_line_is_ours(const char *line) {
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == ';') { p++; while (*p == ' ' || *p == '\t') p++; }
+    const char *start = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != ';') p++;
+    size_t tl = (size_t)(p - start);
+    static const char NAME[] = "pms-agent.prx";
+    const size_t nl = sizeof(NAME) - 1;
+    if (tl < nl) return 0;
+    if (memcmp(start + tl - nl, NAME, nl) != 0) return 0;
+    return tl == nl || start[tl - nl - 1] == '/';
+}
+
+/* ONE WHOLE-FILE WRITER FOR THE OWNER'S PLUGIN LIST, used by every site that rewrites it.
+   Written to a .part and renamed, so an interrupted write can never leave GoldHEN's loader a half
+   file. Deliberately NOT modelled on fs_recv_write's unlink-then-rename: there is no need to remove
+   the target first here, and doing so would open a window in which the console has no plugin list
+   at all. open()/write(), not stdio, for the same measured reason as everywhere else in this
+   payload - fopen() does not work from here. Returns 0 on success. */
+/* THE OWNER'S PLUGIN LIST HAS ONE WRITER AT A TIME.
+ *
+ * Five functions mutate plugins.ini, each read-modify-write, and gh_ini_write_whole writes one fixed
+ * "<path>.part" before renaming it. Two of them at once shared that scratch file: one's bytes landed in
+ * the other's .part and whichever renamed last published a mixture. Three independent things trigger
+ * those writes on a threaded server - the watcher when the console's content changes, the
+ * /api/engine/agent route when the owner presses the control, and /api/cheat/rescan after filing new
+ * files - and this is not our file: every other plugin the owner runs is listed in it, and it survives
+ * a reboot and a re-jailbreak.
+ *
+ * Held across the whole read-modify-write, not just the write, because the read is where the decision
+ * comes from. GH_INI_LOCK/UNLOCK rather than bare calls so the pairing is visible at every site. */
+static pthread_mutex_t g_gh_ini_lock = PTHREAD_MUTEX_INITIALIZER;
+#define GH_INI_LOCK()   pthread_mutex_lock(&g_gh_ini_lock)
+#define GH_INI_UNLOCK() pthread_mutex_unlock(&g_gh_ini_lock)
+
+static int gh_ini_write_whole(const char *buf, size_t len) {
+    char part[sizeof(GH_PLUGINS_INI) + 8];
+    snprintf(part, sizeof(part), "%s.part", GH_PLUGINS_INI);
+    int f = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) return -1;
+    int ok = (write(f, buf, len) == (ssize_t)len);
+    close(f);
+    if (!ok) { unlink(part); return -1; }
+
+    /* TRY THE REPLACE FIRST, and only clear the way if it is refused. rename() onto an existing file
+       is NOT dependable here - this repo already records that, in the in-game agent's own
+       write_atomic - and a host harness running the real function proved it: every toggle returned
+       "could not be written" while the file itself was perfectly writable.
+       The order matters and is not cosmetic. Unlinking first (which is what fs_recv_write does) would
+       leave the console with NO plugin list for the width of that window, and a game launched inside
+       it loads none of the owner's plugins. So the window is only ever opened when the platform has
+       already refused to do it without one. */
+    if (rename(part, GH_PLUGINS_INI) == 0) return 0;
+    unlink(GH_PLUGINS_INI);
+    if (rename(part, GH_PLUGINS_INI) == 0) return 0;
+    unlink(part);
+    return -1;
+}
+
+/* TURN GOLDHEN'S OWN LOAD BANNER OFF (and back on).
+ *
+ * With show_load_notification=true its loader draws "Loaded 1 plugin(s) 1. <name>" in its own gold
+ * styling every time a game starts. That is GoldHEN telling the owner about OUR helper, in GoldHEN's
+ * voice, and the shop says it better and at a more useful moment - when the agent is actually ready
+ * rather than merely mapped. So the setting goes off while we are armed.
+ *
+ * IT IS RESTORED ON PURGE, because it is the OWNER'S setting and it governs every plugin they run,
+ * not just ours. Measured on this console: plugins.ini lists no plugin but ours, so nothing else
+ * loses a banner today - but that is a fact about today, not a licence.
+ *
+ * Only that one key is touched. Every other line, including any line longer than our buffers, is
+ * copied through byte for byte, and the file is replaced whole through gh_ini_write_whole.
+ * Returns 0 when the file now says what was asked, including when it already did.
+ */
+static int gh_set_load_notification_locked(int on) {
+    long n = 0;
+    char *doc = slurp(GH_PLUGINS_INI, &n);
+    if (!doc) return -1;                        /* no file: nothing of ours is listed either */
+
+    const char *KEY = "show_load_notification";
+    const size_t KEYL = 22;                     /* strlen(KEY) */
+    size_t cap = (size_t)n + 256;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(doc); return -1; }
+    size_t w = 0;
+    int wrote = 0;
+
+    char *p = doc;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        const char *t = p;
+        size_t skip = 0;
+        while (skip < len && (*t == ' ' || *t == '\t')) { t++; skip++; }
+
+        int is_key = (len - skip > KEYL) && !strncmp(t, KEY, KEYL);
+        if (is_key) {
+            /* Only the assignment, never a comment that happens to mention the key. */
+            const char *q = t + KEYL;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '=') is_key = 0;
+        }
+        if (w + len + 64 > cap) { free(out); free(doc); return -1; }
+        if (is_key && !wrote) {
+            /* KEEP THE LINE'S OWN ENDING. plugins.ini belongs to the owner and they may have edited
+               it on a PC, so a CRLF file must not come back with one LF line in the middle of it. */
+            int cr = (len > 0 && p[len - 1] == '\r');
+            int k = snprintf(out + w, cap - w, "%s=%s%s\n",
+                             KEY, on ? "true" : "false", cr ? "\r" : "");
+            if (k > 0) w += (size_t)k;
+            wrote = 1;
+        } else if (!is_key) {
+            memcpy(out + w, p, len);
+            w += len;
+            out[w++] = '\n';
+        }
+        /* A SECOND assignment of the same key is dropped: one key, one value. */
+        p = e ? e + 1 : NULL;
+    }
+    if (!wrote) {
+        /* No such key anywhere. Adding it needs a section to put it in. */
+        int k = snprintf(out + w, cap - w, "\n[settings]\n%s=%s\n", KEY, on ? "true" : "false");
+        if (k > 0) w += (size_t)k;
+    }
+
+    /* WRITE ONLY IF SOMETHING ACTUALLY CHANGED, decided by comparing the whole result with what was
+       read - not by guessing from a line's length, which is what the first version did and why it
+       silently wrote nothing: with a trailing CR, "=true" and "=false" are the same number of bytes. */
+    int rc = 0;
+    if (w != (size_t)n || memcmp(out, doc, w) != 0) rc = gh_ini_write_whole(out, w);
+    free(out);
+    free(doc);
+    return rc;
+}
+
+/* WHAT THE PLUGIN LIST ACTUALLY SAYS. There can be more than one mention of our line, and the old
+   version of this function did not believe that: it stopped at the first one, with the comment "the
+   first mention decides; we only ever write one". agent_enable_for_title falsifies that - it appends
+   a SECOND mention inside a [TID] section and leaves the one under [default] commented out - so a
+   per-title arm was invisible to the only instrument this project has for "is the helper wired into
+   a game", and /api/engine/agent reported it as off. */
+typedef struct {
+    int  listed;            /* our line appears at all, commented or not */
+    int  armed_default;     /* an uncommented mention in [default] (or before any section) */
+    int  armed_titles;      /* how many title sections carry an uncommented mention */
+    char titles[160];       /* those title ids, comma separated, truncated if there are many */
+} agent_arm_t;
+
+static void agent_scan_arm(agent_arm_t *a) {
+    memset(a, 0, sizeof(*a));
+    long n = 0;
+    char *doc = slurp(GH_PLUGINS_INI, &n);
+    if (!doc) return;
+
+    char sec[40] = {0};                  /* the section we are inside; empty means none yet */
+    char *p = doc;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[512];
+        size_t cl = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+        memcpy(line, p, cl);
+        line[cl] = 0;
+
+        const char *t = line;
+        while (*t == ' ' || *t == '\t') t++;
+        if (*t == '[') {
+            size_t k = 0;
+            const char *q = t + 1;
+            while (*q && *q != ']' && k < sizeof(sec) - 1) sec[k++] = *q++;
+            sec[k] = 0;
+        } else if (agent_line_is_ours(line)) {
+            a->listed = 1;
+            if (*t != ';') {
+                if (!sec[0] || !strcmp(sec, "default")) {
+                    a->armed_default = 1;
+                } else {
+                    a->armed_titles++;
+                    size_t have = strlen(a->titles);
+                    /* + 2 for the separator, + 1 for the terminator */
+                    if (have + strlen(sec) + 3 < sizeof(a->titles))
+                        snprintf(a->titles + have, sizeof(a->titles) - have,
+                                 "%s%s", have ? "," : "", sec);
+                }
+            }
+        }
+        p = e ? e + 1 : NULL;
+    }
+    free(doc);
+}
+
+/* 1 listed and active anywhere, 0 listed but every mention commented out, -1 not listed at all.
+   Derived from the full scan so a per-title arm counts. */
+static int agent_enabled_state(void) {
+    agent_arm_t a;
+    agent_scan_arm(&a);
+    if (a.armed_default || a.armed_titles) return 1;
+    return a.listed ? 0 : -1;
+}
+
+/* Returns 0 on success. Writes the file back with our line commented or uncommented, adding it
+   under [default] when it was not there at all. */
+static int agent_set_enabled_locked(int want_on) {
+    long n = 0;
+    char *doc = slurp(GH_PLUGINS_INI, &n);
+
+    /* No file yet: write a minimal one that says what it is. GoldHEN creates its own when it
+       first runs, and this is the same shape - its loader logs the section names it reads. */
+    if (!doc) {
+        /* open()/write(), not stdio. Every other writer in this file does the same, and that is
+           not a style preference: fopen() does not work from this payload. Measured - the first
+           version of this function refused every toggle with "could not be written", on a file
+           that /api/fs/write had created a minute earlier without trouble. */
+        char first[700];
+        int fl = snprintf(first, sizeof(first),
+            "; GoldHEN plugin loader configuration.\n"
+            "; [default] loads a plugin into every game; [CUSAxxxxx] loads it into one title.\n"
+            "; Lines starting with ; are comments.\n\n"
+            "[settings]\nshow_load_notification=true\n\n"
+            "[default]\n"
+            "; PKG MUTANT SHOP in-game helper - what lets cheats be switched on while a PS4 game\n"
+            "; is running. It does nothing until the shop asks it to.\n"
+            "%s%s\n", want_on ? "" : "; ", PMS_AGENT_PRX);
+        if (fl <= 0 || fl >= (int)sizeof(first)) return -1;
+        return gh_ini_write_whole(first, (size_t)fl);
+    }
+
+    /* HEADROOM, AND ENOUGH OF IT. This was n + 512 while the loop below refused to continue once
+       within 600 bytes of the end - so every file larger than about 570 bytes declared itself
+       truncated and the toggle refused, on a 660-byte config. The margin has to exceed the guard,
+       not sit under it. 8 KB is far more than the one line this ever adds. */
+    size_t cap = (size_t)n + 8192;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(doc); return -1; }
+    size_t w = 0;
+    int seen = 0, truncated = 0;
+
+    /* PASS ONE: does a [default] section exist, and where does it END? The previous version tried to
+       do this inline with one variable and could not: it recomputed in_default from the CURRENT line
+       and then tested `in_default && *t == '['` - i.e. !X && X - so the branch that inserts our line
+       inside an existing [default] was unreachable, `wrote_in_default` was dead, and control always
+       reached the "if (!seen)" tail, which appends a SECOND "[default]" at the end of the file.
+       default_end is the offset of the line that ends the section: the next section header, or the
+       end of the document. */
+    size_t default_end = 0;
+    int    has_default = 0;
+    {
+        char *p = doc;
+        int in_default = 0;
+        while (p && *p) {
+            char *e = strchr(p, '\n');
+            size_t len = e ? (size_t)(e - p) : strlen(p);
+            const char *t = p;
+            size_t skip = 0;
+            while (skip < len && (*t == ' ' || *t == '\t')) { t++; skip++; }
+            if (skip < len && *t == '[') {
+                int is_default = (len - skip >= 9) && !strncmp(t, "[default]", 9);
+                if (in_default && !is_default) {          /* the section ends at THIS line */
+                    default_end = (size_t)(p - doc);
+                    break;
+                }
+                in_default = is_default;
+                if (is_default) has_default = 1;
+            }
+            p = e ? e + 1 : NULL;
+            if (!p || !*p) { if (in_default) default_end = (size_t)n; }
+        }
+        if (has_default && !default_end) default_end = (size_t)n;
+    }
+
+    /* PASS TWO: copy the document through verbatim, replace our own line with the wanted spelling,
+       and insert our line at default_end when it was not already there.
+       THE ORIGINAL SPAN IS WHAT GETS EMITTED, not the bounded copy. Both writers used to clamp every
+       line into char[512] and then write the CLAMPED text, so any line of 512 bytes or more in the
+       owner's config permanently lost its tail. The bounded copy survives for the TESTS only
+       (whitespace skip, agent_line_is_ours), which need a terminated string. Because memcpy is not
+       self-bounding the way snprintf was, the headroom guard now runs BEFORE the copy and accounts
+       for the line's real length. */
+    char *p = doc;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[512];
+        size_t cl = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+        memcpy(line, p, cl);
+        line[cl] = 0;
+
+        if (w + len + 1 + 1024 > cap) { truncated = 1; break; }   /* refuse to truncate - see below */
+
+        if (!seen && has_default && (size_t)(p - doc) == default_end) {
+            w += (size_t)snprintf(out + w, cap - w, "%s%s\n", want_on ? "" : "; ", PMS_AGENT_PRX);
+            seen = 1;
+        }
+
+        if (agent_line_is_ours(line)) {
+            seen = 1;
+            w += (size_t)snprintf(out + w, cap - w, "%s%s\n", want_on ? "" : "; ", PMS_AGENT_PRX);
+        } else {
+            memcpy(out + w, p, len);
+            w += len;
+            out[w++] = '\n';
+        }
+        p = e ? e + 1 : NULL;
+    }
+    if (!seen && !truncated) {
+        /* Either [default] runs to the end of the file, or there is no [default] at all. */
+        if (!has_default)
+            w += (size_t)snprintf(out + w, cap - w, "\n[default]\n");
+        w += (size_t)snprintf(out + w, cap - w, "%s%s\n", want_on ? "" : "; ", PMS_AGENT_PRX);
+    }
+
+    /* WRITE ONLY A WHOLE FILE. `truncated` is set by the one break that can leave the copy
+       incomplete; anything else means the walk finished. Testing `p == NULL` instead - which is
+       what this did first - is wrong for the ordinary case of a file ending in a newline, because
+       the loop then exits on *p == 0 with p still pointing at the terminator. The symptom was a
+       toggle that refused every time and said the file could not be written, on a file that was
+       perfectly writable. It failed safe, which is why the config survived it. */
+    int rc = -1;
+    if (!truncated) rc = gh_ini_write_whole(out, w);
+    free(out);
+    free(doc);
+    /* The [default] path gets the same treatment as the per-title one: while our helper is armed our
+       own message is the only one the owner sees. Switching OFF does not touch the setting here -
+       agent_purge restores it, and that is the single place responsible for giving it back. */
+    if (rc == 0 && want_on) (void)gh_set_load_notification_locked(0);  /* we hold the ini lock */
+    return rc;
+}
+
+/* Put the load-safe agent on the console, byte for byte, WITHOUT listing it.
+ *
+ * Writing the file is safe on its own: nothing loads a plugin that is not named in plugins.ini, so
+ * a console that merely carries the .prx behaves exactly as one that does not. Listing is a
+ * separate, explicit step (agent_enable_for_title / agent_set_enabled). Content-compared so a
+ * rebuilt shop refreshes a rebuilt agent, and written .part-then-rename so GoldHEN's loader can
+ * never read a half-written file. Returns 0 if the file is present and current afterwards. */
+/* Is something listening on one of OUR OWN ports? Used only to colour a tile.
+
+   :9090 IS NEVER PASSED TO THIS. GoldHEN's payload loader stops listening when a connection is
+   opened and closed without an ELF being posted, so the POST is the probe and there is no other
+   way to ask. Every caller here asks about a service port (2121 and the like), never the loader. */
+/* Declared here because cheat_core.h, which defines it, is included further down than the scan
+   below needs it - the same forward-declaration the PS5 build keeps at the top of its file. */
+static int path_ext_is(const char *path, const char *ext);
+
+static const char *APPMETA_ROOTS[] = { "/user/appmeta", "/user/app", NULL };
+
+/* The title ids this console already has, so the panel can say "Installed" without a PC.
+
+   Read from the folder the console itself keeps per installed title - appmeta on the PS5, the app
+   directory on the PS4 - because that is the same evidence the library trusts. The page matches
+   these against the catalogue's title_id; nothing here needs to know what a homebrew is. */
+static int app_ids_json(char *out, size_t outsz) {
+    int n = 0;
+    out[0] = 0;
+    for (int r = 0; APPMETA_ROOTS[r] && n < (int)outsz - 40; r++) {
+        DIR *d = opendir(APPMETA_ROOTS[r]);
+        if (!d) continue;
+        struct dirent *de;
+        while ((de = readdir(d)) && n < (int)outsz - 40) {
+            if (de->d_name[0] == '.') continue;
+            size_t L = strlen(de->d_name);
+            if (L < 6 || L > 12) continue;
+            n += snprintf(out + n, outsz - (size_t)n, "%s\"%s\"", n ? "," : "", de->d_name);
+        }
+        closedir(d);
+    }
+    return n;
+}
+
+static const char *HB_ROOTS[] = {
+    HB_DIR,
+    "/mnt/usb0/homebrews", "/mnt/usb1/homebrews", "/mnt/usb2/homebrews", "/mnt/usb3/homebrews",
+    "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3",
+    NULL
+};
+
+/* Every homebrew package this console can reach BY ITSELF, as {"n":name,"s":bytes,"p":path}.
+
+   THIS IS WHAT "NO PC AT ALL" ACTUALLY NEEDS. The owner installs this app from a USB stick or over
+   FTP with no companion running, so the packages have to be findable the same way: drop them on a
+   stick, or in our data folder, and the panel lists them.
+
+   MATCHED BY SIZE, NOT BY NAME. The page pairs these with the catalogue on the exact byte count,
+   because the owner renames files and a length is a fact about the contents rather than the label.
+   Two homebrews would have to be byte-for-byte the same size to be confused, and the catalogue
+   carries a sha256 for anything that ever has to be certain.
+
+   Only the top level of each root is read. A full walk of a 2 TB drive, on an accept loop, for a
+   panel that redraws every six seconds, is not a trade worth making. */
+static int hb_list_json(char *out, size_t outsz) {
+    int n = 0;
+    out[0] = 0;
+    for (int r = 0; HB_ROOTS[r] && n < (int)outsz - 200; r++) {
+        DIR *d = opendir(HB_ROOTS[r]);
+        if (!d) continue;
+        struct dirent *de;
+        while ((de = readdir(d)) && n < (int)outsz - 200) {
+            if (de->d_name[0] == '.' || !path_ext_is(de->d_name, ".pkg")) continue;
+            char full[700];
+            snprintf(full, sizeof(full), "%s/%s", HB_ROOTS[r], de->d_name);
+            struct stat st;
+            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) continue;
+            n += snprintf(out + n, outsz - (size_t)n,
+                          "%s{\"n\":\"%s\",\"s\":%lld,\"p\":\"%s\"}",
+                          n ? "," : "", de->d_name, (long long)st.st_size, full);
+        }
+        closedir(d);
+    }
+    return n;
+}
+
+/* The comparable stem of a payload filename: lowercase, no extension, no -ps4/-ps5, no _v1.2.3.
+
+   The page asks for a payload using the name the OWNER sees, and this ELF carries it under the
+   stable catalogue id - a versioned path in an .incbin breaks the build the first time an upstream
+   release lands. This is what makes the two names meet. */
+static void p4_stem(const char *name, char *out, size_t outsz) {
+    size_t n = 0;
+    for (const char *p = name; *p && n + 1 < outsz; p++)
+        out[n++] = (char)((*p >= 'A' && *p <= 'Z') ? *p - 'A' + 'a' : *p);
+    out[n] = 0;
+    if (n > 4 && !strcmp(out + n - 4, ".elf")) { n -= 4; out[n] = 0; }
+    if (n > 4 && (out[n - 4] == '-' || out[n - 4] == '_') && out[n - 3] == 'p' && out[n - 2] == 's'
+        && (out[n - 1] == '4' || out[n - 1] == '5')) { n -= 4; out[n] = 0; }
+    for (size_t i = n; i-- > 0;) {
+        char c = out[i];
+        if ((c >= '0' && c <= '9') || c == '.') continue;
+        if ((c == '_' || c == '-') && i + 1 < n) {
+            size_t j = i + 1;
+            if (out[j] == 'v') j++;
+            if (j < n && out[j] >= '0' && out[j] <= '9') out[i] = 0;
+        }
+        break;
+    }
+}
+
+/* Is a UDP port already taken? That is the only honest test for a service that listens on UDP and
+   replies to nobody.
+
+   nanodns is exactly that. A TCP connect to :53 proves nothing, and a DNS query sent to the console
+   from the LAN gets no answer even when nanodns IS running - measured on both consoles, against its
+   own spoofing domains as well as ordinary ones. What CAN be observed is that the port is occupied:
+   bind it, and if the bind is refused because the address is in use, something else holds it.
+
+   NO SO_REUSEADDR, deliberately: with it the bind would succeed alongside the running server and
+   the test would report "free" for ever, which is the same shape of permanently-wrong answer the
+   9021-vs-10101 mix-up gave. The socket is closed immediately either way, so a port that really was
+   free is left exactly as it was found.
+
+   Both 127.0.0.1 and 0.0.0.0 are tried, because a server bound to one does not always conflict with
+   the other, and either conflict is proof. */
+static int udp_port_taken(int port) {
+    if (port <= 0) return 0;
+    const char *addrs[2] = { "127.0.0.1", "0.0.0.0" };
+    for (int i = 0; i < 2; i++) {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s < 0) continue;
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons((unsigned short)port);
+        a.sin_addr.s_addr = inet_addr(addrs[i]);
+        int rc = bind(s, (struct sockaddr *)&a, sizeof(a));
+        int err = errno;
+        close(s);
+        if (rc != 0 && (err == EADDRINUSE || err == EACCES)) return 1;
+    }
+    return 0;
+}
+
+static int p4_port_open(int port) {
+    if (port <= 0) return 0;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+    struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    int rc = connect(s, (struct sockaddr *)&a, sizeof(a));
+    close(s);
+    return rc == 0;
+}
+
+/* Write the payloads this ELF carries into PB_DIR.
+
+   Content-compared before writing, exactly like agent_deploy below: a rebuilt shop refreshes a
+   rebuilt payload and an unchanged one costs one read. Written through <path>.part and renamed,
+   because a half-written ELF that GoldHEN then loads is a crash with no explanation. */
+/* A copy of one bundled payload in /data/payloads, where everyone else keeps them.
+
+   Best effort on purpose: a full disk, a read-only mount or a folder somebody deleted must never
+   stop the shop from starting, and nothing in this app ever reads from here - PB_DIR is ours and
+   stays authoritative. This exists so that somebody installing from a USB stick or over FTP, with
+   no PC anywhere, finds the folder already there with the right name and something in it. */
+static void pb_mirror(const p4pb_entry_t *e, size_t len) {
+    char mir[600], mpart[640];
+    snprintf(mir, sizeof(mir), "%s/%s", GH_PAYLOAD_DIR, e->filename);
+    struct stat ms;
+    if (stat(mir, &ms) == 0 && (size_t)ms.st_size == len) return;
+    snprintf(mpart, sizeof(mpart), "%s.part", mir);
+    int mf = open(mpart, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (mf < 0) return;
+    size_t ml = len;
+    const unsigned char *mp = e->data;
+    while (ml) {
+        int w = (int)write(mf, mp, ml);
+        if (w <= 0) break;
+        mp += w; ml -= (size_t)w;
+    }
+    close(mf);
+    if (ml) { unlink(mpart); return; }
+    if (rename(mpart, mir) != 0) { unlink(mir); if (rename(mpart, mir) != 0) unlink(mpart); }
+}
+
+static int pb_deploy_all(void) {
+    mkdir("/data", 0777);
+    mkdir(SHOP_DATA_DIR, 0777);
+    mkdir(PB_DIR, 0777);
+    mkdir(HB_DIR, 0777);
+    /* /data/payloads IS WHERE EVERYONE ELSE PUTS THEM, so it is made whether or not we are the
+       ones filling it. Somebody installing this app from a USB stick or over FTP - no PC companion
+       anywhere - drops an ELF into that folder with a file manager, and a folder that already
+       exists with the right name is the difference between that working first time and them
+       guessing. We mirror our own bundled payloads into it as well, so the folder is useful the
+       moment it appears. It is NOT where we load from: PB_DIR is ours and stays authoritative. */
+    mkdir(GH_PAYLOAD_DIR, 0777);
+    int bad = 0;
+    for (int i = 0; i < PS4_PAYLOAD_BUNDLE_COUNT; i++) {
+        const p4pb_entry_t *e = &PS4_PAYLOAD_BUNDLE[i];
+        size_t len = (size_t)(e->end - e->data);
+        char full[512], part[544];
+        snprintf(full, sizeof(full), "%s/%s", PB_DIR, e->filename);
+        /* THE MIRROR IS ITS OWN QUESTION. This used to sit after the early `continue` below, so on
+           every boot where our own copy was already correct - which is every boot after the first -
+           the mirror was never written at all, and /data/payloads stayed empty. Measured on this
+           console: PB_DIR had both payloads and /data/payloads did not exist. Do it first, and do
+           it whether or not the primary needed touching. */
+        pb_mirror(e, len);
+
+        long have_n = 0;
+        char *have = slurp(full, &have_n);
+        if (have && (size_t)have_n == len && !memcmp(have, e->data, len)) { free(have); continue; }
+        free(have);
+        snprintf(part, sizeof(part), "%s.part", full);
+        int fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+        if (fd < 0) { bad++; continue; }
+        size_t left = len;
+        const unsigned char *p = e->data;
+        while (left) {
+            int w = (int)write(fd, p, left);
+            if (w <= 0) break;
+            p += w; left -= (size_t)w;
+        }
+        close(fd);
+        if (left) { unlink(part); bad++; continue; }
+        /* rename onto an existing file does not work on these consoles - try, then unlink+rename */
+        if (rename(part, full) != 0) { unlink(full); if (rename(part, full) != 0) { unlink(part); bad++; } }
+
+    }
+    return bad ? -1 : 0;
+}
+
+/* Hand a payload to GoldHEN's loader on this console.
+
+   THE POST IS THE PROBE. There is deliberately no connect-first check: opening :9090 and closing
+   it again stops the loader listening, which is the standing rule everywhere else in this project
+   that touches that port. */
+static int gh_send_payload(const char *path, char *why, size_t wsz) {
+    long n = 0;
+    char *b = slurp(path, &n);
+    if (!b || n <= 0) { free(b); snprintf(why, wsz, "that payload is not on this console"); return -1; }
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { free(b); snprintf(why, wsz, "no socket"); return -1; }
+    struct timeval tv; tv.tv_sec = 20; tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(9090);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        close(s); free(b);
+        snprintf(why, wsz, "the payload loader is not listening");
+        return -1;
+    }
+    int ok = (write_all(s, b, (size_t)n) == 0);
+    close(s);
+    free(b);
+    if (!ok) { snprintf(why, wsz, "the payload loader did not take all of it"); return -1; }
+    snprintf(why, wsz, "sent it to the payload loader");
+    return 0;
+}
+
+static int agent_deploy(void) {
+    size_t len = (size_t)(ab_pms_agent_prx_end - ab_pms_agent_prx);
+    if (!len) return -1;
+
+    long have_n = 0;
+    char *have = slurp(PMS_AGENT_PRX, &have_n);
+    if (have && (size_t)have_n == len && !memcmp(have, ab_pms_agent_prx, len)) {
+        free(have);
+        return 0;                                  /* already exactly this build */
+    }
+    free(have);
+
+    mkdir("/data/GoldHEN", 0777);
+    mkdir("/data/GoldHEN/plugins", 0777);
+    char part[300];
+    snprintf(part, sizeof(part), "%s.part", PMS_AGENT_PRX);
+    int f = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) return -1;
+    int ok = (write(f, ab_pms_agent_prx, len) == (ssize_t)len);
+    close(f);
+    if (!ok) { unlink(part); return -1; }
+    if (rename(part, PMS_AGENT_PRX) != 0) { unlink(part); return -1; }
+    klog_puts("pms: load-safe in-game agent written (unlisted) to /data/GoldHEN/plugins\n");
+    return 0;
+}
+
+/* List the agent for ONE TITLE only, by appending a [TID] section. This is the safe way to switch
+ * the helper on: it modifies no existing line, so every other GoldHEN plugin the owner runs is left
+ * exactly as it was, and only the named game loads our agent. Idempotent - if the title already has
+ * our line (commented or not), it is set to on and nothing is duplicated. Returns 0 on success. */
+static int agent_enable_for_title_locked(const char *tid) {
+    if (!tid || !tid[0]) return -1;
+    /* sanitise: a title id is CUSA/PPSA + digits, nothing that could inject a line */
+    for (const char *c = tid; *c; c++)
+        if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+              (*c >= '0' && *c <= '9'))) return -1;
+
+    if (agent_deploy() != 0) return -1;            /* the file must exist before it is listed */
+
+    long n = 0;
+    char *doc = slurp(GH_PLUGINS_INI, &n);
+    size_t cap = (size_t)(doc ? n : 0) + 1024;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(doc); return -1; }
+    size_t w = 0;
+    char want_sec[24];
+    snprintf(want_sec, sizeof(want_sec), "[%s]", tid);
+
+    /* Copy the whole file through, and inside an existing [TID] section make sure our line is
+       present and uncommented. Track whether we saw the section at all. */
+    int in_sec = 0, wrote_line = 0, saw_sec = 0;
+    char *p = doc;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[512];
+        size_t cl = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+        memcpy(line, p, cl); line[cl] = 0;
+        const char *t = line; while (*t == ' ' || *t == '\t') t++;
+
+        if (*t == '[') {
+            /* leaving a section: if it was ours and we never wrote the line, add it now */
+            if (in_sec && !wrote_line) {
+                w += (size_t)snprintf(out + w, cap - w, "%s\n", PMS_AGENT_PRX);
+                wrote_line = 1;
+            }
+            in_sec = !strncmp(t, want_sec, strlen(want_sec)) &&
+                     (t[strlen(want_sec)] == 0 || t[strlen(want_sec)] == '\r');
+            if (in_sec) saw_sec = 1;
+        }
+        /* Guard BEFORE the copy and for the line's real length: the pass-through is the original
+           span, not the bounded copy, so it is not self-bounding the way snprintf was. */
+        if (w + len + 1 + 256 > cap) { free(out); free(doc); return -1; }   /* refuse to truncate */
+
+        if (in_sec && agent_line_is_ours(line)) {
+            /* our line, possibly commented - write it uncommented, once */
+            if (!wrote_line) { w += (size_t)snprintf(out + w, cap - w, "%s\n", PMS_AGENT_PRX); wrote_line = 1; }
+        } else {
+            memcpy(out + w, p, len);
+            w += len;
+            out[w++] = '\n';
+        }
+        p = e ? e + 1 : NULL;
+    }
+    if (in_sec && !wrote_line)      /* file ended still inside our section */
+        w += (size_t)snprintf(out + w, cap - w, "%s\n", PMS_AGENT_PRX);
+    if (!saw_sec)                   /* the title had no section at all - append one */
+        w += (size_t)snprintf(out + w, cap - w, "\n%s\n%s\n", want_sec, PMS_AGENT_PRX);
+
+    int rc = gh_ini_write_whole(out, w);
+    free(out); free(doc);
+    /* Our own message replaces GoldHEN's gold one while the helper is armed. Best-effort: a helper
+       that is listed but whose banner could not be switched off is still a working helper. */
+    if (rc == 0) (void)gh_set_load_notification_locked(0);             /* we hold the ini lock */
+    return rc;
+}
+
+/* ---- AUTO-ARM ---------------------------------------------------------------------------------
+ * Which installed titles should carry the helper, decided from facts we already have, and written
+ * into GoldHEN's plugin list before any game starts - because its loader reads that file only when a
+ * game launches, so a decision made after the launch is a decision made too late.
+ */
+#define AUTOARM_OFF_PATH  SHOP_DATA_DIR "/autoarm-off"
+#define AUTOARM_SKIP_PATH SHOP_DATA_DIR "/autoarm-skip"
+#define AUTOARM_MAX 64
+
+static int autoarm_enabled(void) {
+    struct stat st;
+    return stat(AUTOARM_OFF_PATH, &st) != 0;      /* the file's presence is the "off" switch */
+}
+
+/* Titles autoarm must never touch. One id per line, '#' comments. Seeded once with the one title the
+   owner has told us to leave alone; after that the file is theirs. */
+static void autoarm_seed_skip(void) {
+    struct stat st;
+    if (stat(AUTOARM_SKIP_PATH, &st) == 0) return;
+    static const char seed[] =
+        "# Titles PKG MUTANT SHOP will NEVER switch the in-game helper on for by itself.\n"
+        "# One title id per line. Lines starting with # are ignored. Delete a line to allow it.\n"
+        "#\n"
+        "# CUSA23827 is here because the owner said they do not run it, to avoid a ban - putting our\n"
+        "# code inside an online game is the risk they are avoiding. Their call, not ours.\n"
+        "CUSA23827\n";
+    int f = open(AUTOARM_SKIP_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) return;
+    (void)!write(f, seed, sizeof(seed) - 1);
+    close(f);
+}
+
+static int autoarm_skipped(const char *tid) {
+    long n = 0;
+    char *doc = slurp(AUTOARM_SKIP_PATH, &n);
+    if (!doc) return 0;
+    int hit = 0;
+    char *p = doc;
+    while (p && *p && !hit) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        const char *t = p;
+        size_t skip = 0;
+        while (skip < len && (*t == ' ' || *t == '\t')) { t++; skip++; }
+        if (skip < len && *t != '#') {
+            size_t k = 0;
+            while (skip + k < len && t[k] > 32 && t[k] != '#') k++;
+            if (k && k == strlen(tid) && !strncmp(t, tid, k)) hit = 1;
+        }
+        p = e ? e + 1 : NULL;
+    }
+    free(doc);
+    return hit;
+}
+
+/* Rewrite GoldHEN's plugin list so our line is present and uncommented in EXACTLY the wanted [TID]
+   sections, and nowhere else among the title sections.
+ *
+ * [default] IS PASSED THROUGH UNTOUCHED. The blanket form is a deliberate, separate decision (Settings)
+ * and this must never reach for it - autoarm's whole argument is that a game with nothing should not
+ * load our module at all.
+ * Every other line in the file is copied byte for byte, including one longer than our buffers. The file
+ * is written only if the result differs from what was read. */
+static int agent_autoarm_apply_locked(const char wanted[][16], int nwanted, int *out_armed) {
+    if (out_armed) *out_armed = 0;
+    long n = 0;
+    char *doc = slurp(GH_PLUGINS_INI, &n);
+    if (!doc) return -1;
+
+    size_t cap = (size_t)n + (size_t)AUTOARM_MAX * 80 + 1024;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(doc); return -1; }
+    size_t w = 0;
+
+    /* DOES THIS FILE USE CRLF? Decided once, from its first line ending, and applied to every line we
+       emit ourselves. Without this our inserted line would be the one odd line out in a config the
+       owner edited on a PC - and it would compare unequal on every boot and be rewritten for ever,
+       which is the same pointless churn the purge gate was fixed to avoid. */
+    const char *NL = "\n";
+    {
+        const char *nl = strchr(doc, '\n');
+        if (nl && nl > doc && nl[-1] == '\r') NL = "\r\n";
+    }
+
+    char written[AUTOARM_MAX];      /* our line emitted inside that title's section */
+    char seen[AUTOARM_MAX];         /* the title has a section at all */
+    memset(written, 0, sizeof(written));
+    memset(seen, 0, sizeof(seen));
+
+    int cur = -1;                   /* index into wanted[] of the section we are inside, or -1 */
+    int in_default = 0;
+
+    char *p = doc;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[512];
+        size_t cl = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+        memcpy(line, p, cl);
+        line[cl] = 0;
+        const char *t = line;
+        while (*t == ' ' || *t == '\t') t++;
+
+        if (w + len + 128 > cap) { free(out); free(doc); return -1; }
+
+        if (*t == '[') {
+            /* Leaving a wanted section without having written our line: write it now. */
+            if (cur >= 0 && !written[cur]) {
+                w += (size_t)snprintf(out + w, cap - w, "%s%s", PMS_AGENT_PRX, NL);
+                written[cur] = 1;
+            }
+            in_default = !strncmp(t, "[default]", 9);
+            cur = -1;
+            for (int i = 0; i < nwanted; i++) {
+                size_t wl = strlen(wanted[i]);
+                if (!strncmp(t + 1, wanted[i], wl) && t[1 + wl] == ']') { cur = i; seen[i] = 1; break; }
+            }
+            memcpy(out + w, p, len); w += len; out[w++] = '\n';
+        } else if (in_default) {
+            /* Untouched, whatever it says. */
+            memcpy(out + w, p, len); w += len; out[w++] = '\n';
+        } else if (agent_line_is_ours(line)) {
+            if (cur >= 0 && !written[cur]) {
+                w += (size_t)snprintf(out + w, cap - w, "%s%s", PMS_AGENT_PRX, NL);
+                written[cur] = 1;
+            }
+            /* else: dropped - a stale arm in a title we no longer want, or a duplicate. */
+        } else {
+            /* The original span including any trailing '\r', then the newline that terminated it:
+               a CRLF line comes back out as CRLF without this needing to know. */
+            memcpy(out + w, p, len); w += len; out[w++] = '\n';
+        }
+        p = e ? e + 1 : NULL;
+    }
+    if (cur >= 0 && !written[cur]) {
+        w += (size_t)snprintf(out + w, cap - w, "%s%s", PMS_AGENT_PRX, NL);
+        written[cur] = 1;
+    }
+    for (int i = 0; i < nwanted; i++) {
+        if (seen[i]) continue;
+        w += (size_t)snprintf(out + w, cap - w, "%s[%s]%s%s%s",
+                              NL, wanted[i], NL, PMS_AGENT_PRX, NL);
+        written[i] = 1;
+    }
+
+    int armed = 0;
+    for (int i = 0; i < nwanted; i++) if (written[i]) armed++;
+    if (out_armed) *out_armed = armed;
+
+    int rc = 0;
+    if (w != (size_t)n || memcmp(out, doc, w) != 0) rc = gh_ini_write_whole(out, w);
+    free(out);
+    free(doc);
+    return rc;
+}
+
+/* ---- THE FOUR WRAPPERS -----------------------------------------------------------------------
+ * Every write of the owner's plugin list goes through one of these, and the lock is held across the
+ * whole read-modify-write because the read is where the decision comes from. The _locked forms exist
+ * for the calls BETWEEN writers - agent_set_enabled and agent_enable_for_title both set the loader
+ * notification from inside their own update - which would otherwise lock a non-recursive mutex twice.
+ */
+static int gh_set_load_notification(int on) {
+    GH_INI_LOCK();
+    int rc = gh_set_load_notification_locked(on);
+    GH_INI_UNLOCK();
+    return rc;
+}
+
+static int agent_set_enabled(int want_on) {
+    GH_INI_LOCK();
+    int rc = agent_set_enabled_locked(want_on);
+    GH_INI_UNLOCK();
+    return rc;
+}
+
+static int agent_enable_for_title(const char *tid) {
+    GH_INI_LOCK();
+    int rc = agent_enable_for_title_locked(tid);
+    GH_INI_UNLOCK();
+    return rc;
+}
+
+static int agent_autoarm_apply(const char wanted[][16], int nwanted, int *out_armed) {
+    GH_INI_LOCK();
+    int rc = agent_autoarm_apply_locked(wanted, nwanted, out_armed);
+    GH_INI_UNLOCK();
+    return rc;
+}
+
+
+/* TAKE THE IN-GAME PLUGIN BACK OFF THE CONSOLE.
+ *
+ * We used to write pms-agent.prx into /data/GoldHEN/plugins and list it under [default], so that
+ * GoldHEN's loader put it inside every game and the shop could reach that game's memory through
+ * it. IT HANGS GAMES: with it listed, Dark Souls II sticks for ever on the PS4's "Please wait..."
+ * screen - measured twice on the owner's console - and the plugin's own socket never comes up, so
+ * it is hanging at or before plugin_load rather than misbehaving afterwards.
+ *
+ * The architecture was the mistake and not the detail. Our PS5 payload reaches a running game's
+ * memory from OUTSIDE it and has never destabilised one; code of ours INSIDE somebody's game can
+ * hang it, crash it or corrupt it, and all three look like a broken app to the person holding the
+ * controller.
+ *
+ * WHY THIS IS AN ACTIVE REMOVAL AND NOT JUST "WE STOPPED WRITING IT". Both the .prx and the line
+ * in plugins.ini survive a reboot AND a re-jailbreak. A console left with the helper listed would
+ * hang on the next game launch with nothing of ours running at all, and there would be nothing to
+ * press to fix it. Undoing our own change has to be something this payload does on its own.
+ *
+ * Returns the number of things it removed, or 0 when there was nothing of ours left.
+ */
+static int agent_purge(void) {
+    int did = 0;
+    agent_info_forget();          /* nothing cached about a helper we are taking away is still true */
+
+    /* Take our line out of GoldHEN's plugin list first. If anything below fails, the console is
+       still safe: an unlisted plugin is never loaded, whether or not its file is still there. */
+    /* == 1, NOT >= 0. A line we already commented out on an earlier boot is harmless - an unlisted
+       plugin is never loaded - so re-entering here bought nothing and cost something: it rewrote the
+       owner's plugin list to byte-identical content on EVERY payload load, while klog announced
+       "unlisted the in-game plugin" and startup_extras reported "purge removed 1 item(s)" for ever.
+       Measured in a host harness carved from these same functions: boot 1 state=1, 213 -> 215 bytes,
+       did=1; boots 2 to 5 state=0, and with the old gate the file went 215 -> 215 BYTE-IDENTICAL
+       with did=1 every time. Reporting a removal that did not happen is how a real failure hides. */
+    if (agent_enabled_state() == 1) {
+        if (agent_set_enabled(0) == 0) {
+            klog_puts("pms: unlisted the in-game plugin in GoldHEN's plugins.ini\n");
+            did++;
+        }
+    }
+    /* GIVE THE OWNER THEIR BANNER BACK. Arming switches GoldHEN's load notification off so our own
+       message is the only one; nothing of ours is listed any more, so the setting is not ours to keep
+       holding down. Unconditional and best-effort: it is one key, and it is theirs. */
+    (void)gh_set_load_notification(1);
+
+    struct stat st;
+    if (stat(PMS_AGENT_PRX, &st) == 0) {
+        if (unlink(PMS_AGENT_PRX) == 0) {
+            klog_puts("pms: removed /data/GoldHEN/plugins/pms-agent.prx\n");
+            did++;
+        }
+    }
+    /* A .part left behind by an interrupted write of an earlier build. */
+    char part[300];
+    snprintf(part, sizeof(part), "%s.part", PMS_AGENT_PRX);
+    if (stat(part, &st) == 0 && unlink(part) == 0) did++;
+
+    /* The marker that used to record "this console has been set up once". Nothing reads it any
+       more, and leaving it would quietly change the meaning of a future first install. */
+    if (stat(AGENT_SETUP_MARK, &st) == 0 && unlink(AGENT_SETUP_MARK) == 0) did++;
+
+    return did;
+}
+
+/* ================= THE FILE CHANNEL TO THE IN-GAME AGENT =================
+ *
+ * The agent used to serve memory over a loopback socket. It does not any more, and that is the
+ * whole point: opening a listening socket inside a game process is the ONE thing our plugin did
+ * that no plugin known to load cleanly on this console does, and every edition that did it broke
+ * games - ending with a console that needed a reboot and a re-jailbreak. Files are a mechanism the
+ * console's own plugins demonstrate is safe in exactly this context.
+ *
+ * One request at a time, written to a ".tmp" and renamed into place so neither side can read a
+ * half-written file:
+ *     cmd.bin   WE write it, the agent reads and deletes it
+ *     res.bin   the AGENT writes it, we read and delete it
+ *
+ *     request   "PMSC" seq:u32 op:u8 pad:u8[3] addr:u64 len:u32   (24 bytes) [+len for WRITE]
+ *     response  "PMSR" seq:u32 st:u8 pad:u8[3] len:u32            (16 bytes) [+len for READ]
+ *
+ * `seq` is echoed so a reply can never be taken for the answer to a different question. `len` is
+ * the length the request is ABOUT - for a read nothing follows the header. The agent polls twice a
+ * second, so a round trip settles well inside the timeout below.
+ * ======================================================================================= */
+#define AGENT_OP_PING   1
+#define AGENT_OP_STATUS 2
+#define AGENT_OP_READ   3
+#define AGENT_OP_WRITE  4
+/* ONE WIRE CONSTANT, THREE COPIES - they move together or the channel mismatches. The others are
+   PMS_MAX_CHUNK (ps4-app/plugin/source/main.c) and CHUNK (ps4-app/plugin/test/harness.c), and the
+   PC test compares a real exchange against the real agent, so a drift shows up as a red suite.
+   4 KiB, not the 64 KiB this used to be: the agent sizes two static buffers from it and so reserved
+   128 KiB inside somebody's game for a path that never moves more than 256 bytes. */
+#define AGENT_CHUNK   (4 * 1024)
+_Static_assert(AGENT_CHUNK >= 420, "the agent's OP_STATUS answer can be 420 bytes");
+#define AGENT_REQ_HDR 24
+#define AGENT_RES_HDR 16
+#define AGENT_REQ_MAGIC "PMSC"
+#define AGENT_RES_MAGIC "PMSR"
+/* Generous next to the agent's half-second poll, short enough that a panel never feels hung: the
+   answer either arrives within a couple of polls or the agent is not in the game. */
+#define AGENT_WAIT_MS 2500
+#define AGENT_PORT    0          /* kept so /api/engine/agent's reply shape does not change */
+
+/* The same two candidates the agent tries, in the same order. Whichever it could write in is the
+   one its files appear in, so we simply look in both. */
+#define AGENT_DIR "/data/pkg-mutant-shop/agent"
+static const char *const AGENT_DIRS[] = {
+    AGENT_DIR,
+    "/data/GoldHEN/pms-agent",
+    NULL
+};
+
+/* HOW STALE IS TOO STALE, in one place. The agent rewrites alive.bin every couple of seconds while
+   it is inside a running game, so its mtime answers "is anyone home" without asking anything. Both
+   readers - agent_req before every exchange, and the watcher once every two seconds - use this
+   number, because two copies of it would drift and the symptom would be a panel that disagrees with
+   a toast. */
+#define AGENT_ALIVE_MAX_AGE 8
+
+/* IS AN AGENT ALIVE IN A GAME RIGHT NOW - one stat per candidate directory, no round trip at all.
+   This is what makes "no agent" cost a tenth of a second instead of waiting out the full timeout on
+   a route the panel polls. */
+static int agent_alive_fresh(void) {
+    for (int d = 0; AGENT_DIRS[d]; d++) {
+        char alive[160];
+        snprintf(alive, sizeof(alive), "%s/alive.bin", AGENT_DIRS[d]);
+        struct stat st;
+        if (stat(alive, &st) != 0) continue;
+        long long age = (long long)time(NULL) - (long long)st.st_mtime;
+        if (age < 0) age = 0;
+        if (age <= AGENT_ALIVE_MAX_AGE) return 1;
+    }
+    return 0;
+}
+
+static int agent_write_atomic(const char *path, const char *tmp,
+                              const unsigned char *buf, size_t n) {
+    int f = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    if (f < 0) return -1;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t w = write(f, buf + done, n - done);
+        if (w <= 0) { close(f); unlink(tmp); return -1; }
+        done += (size_t)w;
+    }
+    close(f);
+    /* UNLINK FIRST, and only here. The agent empties cmd.bin with O_TRUNC rather than deleting it -
+       sceKernelUnlink has no precedent among the plugins this console loads cleanly - so this is now
+       a rename onto an EXISTING file, which is not dependable on this platform (it failed every
+       single plugins.ini write until gh_ini_write_whole stopped relying on it).
+       Safe here for a reason that does NOT apply to plugins.ini: the only reader of cmd.bin is our
+       own agent, and a momentarily absent cmd.bin means "no request pending", which is the state it
+       held a moment ago. plugins.ini is read by GoldHEN's loader when a GAME starts, so a window with
+       no file there costs the owner their plugins. */
+    unlink(path);
+    if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+static int agent_read_whole(const char *path, unsigned char *buf, size_t cap, size_t *out_n) {
+    int f = open(path, O_RDONLY);
+    if (f < 0) return -1;
+    size_t n = 0;
+    for (;;) {
+        ssize_t r = read(f, buf + n, cap - n);
+        if (r <= 0) break;
+        n += (size_t)r;
+        if (n >= cap) break;
+    }
+    close(f);
+    *out_n = n;
+    return 0;
+}
+
+/* ONE request, ONE answer. Returns 0, or negative: -1 nowhere to talk, -2 could not post the
+   request, -3 no answer in time (no agent in the game), -4 malformed answer, -5 answer too big,
+   and -(100+status) when the AGENT ITSELF refused - which is a different thing from not being
+   there, and the panel says so. `wirelen` is the length the request is about; `inlen` is how many
+   bytes actually follow it. They differ for a read, where nothing follows at all. */
+/* ONE EXCHANGE AT A TIME. main() spawns a thread per connection and conn_thread takes no global
+   request lock, so two agent-touching requests genuinely do run at once - and this function shares
+   four things with no protection at all: the static seq counter (incremented non-atomically), the
+   static req buffer, the static rsp buffer, and the single pair of cmd.bin/res.bin files on disk.
+   Two callers interleaving there do not merely confuse each other's answers; one can read the other's
+   reply and act on it, and acting on it means writing bytes into a running game.
+   Implemented as a wrapper rather than by hand-placing unlocks: the body below has six returns and
+   two continues, and six hand-placed unlocks is how a deadlock ships. */
+static pthread_mutex_t g_agent_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int agent_req_locked(int op, unsigned long long addr,
+                            const void *in, unsigned int inlen, unsigned int wirelen,
+                            void *out, unsigned int outcap, unsigned int *outlen) {
+    if (outlen) *outlen = 0;
+    /* THE WHOLE GUARD, not a third of it. wirelen was checked and inlen was not, while the memcpy
+       below copies inlen bytes into a buffer sized for AGENT_CHUNK and agent_write_atomic then
+       over-READS the same buffer by the same margin. inlen > wirelen is strictly stronger than
+       inlen > AGENT_CHUNK here (wirelen is bounded on the line above) and it additionally rejects a
+       header that declares more bytes than actually follow - which would make the agent write
+       whatever happens to sit after our data into the game. */
+    if (wirelen > AGENT_CHUNK || inlen > wirelen) return -5;
+    if (op == AGENT_OP_WRITE && inlen != wirelen) return -5;
+
+    static unsigned int g_seq = 0;
+    unsigned int seq = ++g_seq;
+
+    static unsigned char req[AGENT_CHUNK + AGENT_REQ_HDR];
+    memcpy(req, AGENT_REQ_MAGIC, 4);
+    memcpy(req + 4, &seq, 4);
+    req[8] = (unsigned char)op;
+    req[9] = req[10] = req[11] = 0;
+    memcpy(req + 12, &addr, 8);
+    memcpy(req + 20, &wirelen, 4);
+    if (inlen) memcpy(req + AGENT_REQ_HDR, in, inlen);
+
+    for (int d = 0; AGENT_DIRS[d]; d++) {
+        char cmd[160], cmdt[176], res[160], alive[160];
+        snprintf(cmd,  sizeof(cmd),  "%s/cmd.bin", AGENT_DIRS[d]);
+        snprintf(cmdt, sizeof(cmdt), "%s/cmd.tmp", AGENT_DIRS[d]);
+        snprintf(res,  sizeof(res),  "%s/res.bin", AGENT_DIRS[d]);
+        snprintf(alive, sizeof(alive), "%s/alive.bin", AGENT_DIRS[d]);
+
+        /* IS ANYONE HOME? The agent rewrites alive.bin every few seconds while it is inside a
+           running game. No file, or a stale one, means there is nothing to ask - and answering
+           that in one stat() is the difference between a panel that refreshes instantly and one
+           that waits out the full timeout on every poll. Both sides read the same filesystem
+           clock, so comparing its mtime to now needs nothing shared but the disk. */
+        struct stat ast;
+        if (stat(alive, &ast) != 0) continue;
+        long long age = (long long)time(NULL) - (long long)ast.st_mtime;
+        if (age < 0) age = 0;
+        if (age > AGENT_ALIVE_MAX_AGE) continue;   /* the game it was in is gone */
+
+        /* A stale answer from a previous round must never be read as this one's. */
+        unlink(res);
+        if (agent_write_atomic(cmd, cmdt, req, (size_t)AGENT_REQ_HDR + inlen) != 0) continue;
+
+        static unsigned char rsp[AGENT_CHUNK + AGENT_RES_HDR];
+        int waited = 0, stale = 0;
+        while (waited < AGENT_WAIT_MS) {
+            struct stat st;
+            if (stat(res, &st) == 0 && st.st_size >= AGENT_RES_HDR) {
+                size_t n = 0;
+                if (agent_read_whole(res, rsp, sizeof(rsp), &n) == 0 && n >= AGENT_RES_HDR) {
+                    /* NOTHING IS UNLINKED UNTIL THE ANSWER PARSES. The agent writes res.bin straight
+                       into place now (no .tmp, no rename - see write_whole in the plugin), so this
+                       can catch it mid-write. Unlinking first, which is what this used to do,
+                       DELETED the agent's in-progress file: the request could then never be answered
+                       and the agent's next write recreated a file nobody was waiting for. */
+                    if (memcmp(rsp, AGENT_RES_MAGIC, 4) != 0) { unlink(res); return -4; }
+                    unsigned int rseq = 0, rlen = 0;
+                    memcpy(&rseq, rsp + 4, 4);
+                    memcpy(&rlen, rsp + 12, 4);
+                    if (rseq != seq) {
+                        /* A LATE ANSWER IS NOT A MALFORMED ONE. The agent empties cmd.bin the moment
+                           it reads it and writes res.bin only when it finishes, so after one timeout
+                           its reply carries the PREVIOUS seq and lands somewhere inside the next
+                           request's wait - where treating it as a protocol error charged a healthy
+                           agent two failures for one slow beat. Drop that answer and keep waiting for
+                           ours; bounded, because an agent that only ever answers the wrong question
+                           must still end up as a timeout rather than a loop. The clock is advanced
+                           explicitly - a bare continue would skip the usleep below. */
+                        unlink(res);
+                        if (++stale > 2) break;
+                        usleep(10 * 1000);
+                        waited += 10;
+                        continue;
+                    }
+                    if (rlen > AGENT_CHUNK) { unlink(res); return -4; }
+                    if ((size_t)AGENT_RES_HDR + rlen > n) {
+                        /* STILL BEING WRITTEN. The header is there and it is ours, but the payload it
+                           declares has not all landed - a 200 KB write spans several sceKernelWrite
+                           calls. This is the ordinary case for a large read, not an error: leave the
+                           file alone and look again. Measured - the PC harness turned red on exactly
+                           two checks, both large payloads, when this returned -4. */
+                        usleep(10 * 1000);
+                        waited += 10;
+                        continue;
+                    }
+                    int st8 = rsp[8];
+                    unlink(res);
+                    if (rlen) {
+                        if (rlen > outcap) return -5;
+                        memcpy(out, rsp + AGENT_RES_HDR, rlen);
+                    }
+                    if (outlen) *outlen = rlen;
+                    return st8 ? -(100 + st8) : 0;
+                }
+            }
+            /* 10 ms, NOT 50. With the agent now looking every 25 ms while a session is in
+               progress, a 50 ms poll on this side would be the new floor - it would have thrown away
+               half of what the other change just won. This runs only while a request is actually
+               outstanding, never at rest. */
+            usleep(10 * 1000);
+            waited += 10;
+        }
+        /* No answer: take our request back so it cannot be executed later, out of order, by an
+           agent that loads into the NEXT game. */
+        unlink(cmd);
+    }
+    return -3;
+}
+
+/* The gate. TRYLOCK, not lock: /api/cheat/running and /api/mods are polled by the panel, and a
+   queue on a polled route is a stall the owner reads as a hung app. Somebody else mid-exchange is a
+   fact worth reporting, not worth waiting for - the next poll is half a second away. */
+static int agent_req(int op, unsigned long long addr,
+                     const void *in, unsigned int inlen, unsigned int wirelen,
+                     void *out, unsigned int outcap, unsigned int *outlen) {
+    /* A SHORT WAIT, THEN BUSY - never an open-ended queue. A bare trylock would have been wrong in
+       the other direction: /api/cheat/running is polled about once a second and an exchange can take
+       longer than that, so two overlapping polls would report "no helper" and the panel would gray
+       the toggle out mid-session. 300 ms covers an overlap without ever holding a polled route long
+       enough to read as a stall. */
+    int got = 0;
+    for (int t = 0; t < 6; t++) {
+        if (pthread_mutex_trylock(&g_agent_lock) == 0) { got = 1; break; }
+        usleep(50 * 1000);
+    }
+    if (!got) {
+        if (outlen) *outlen = 0;
+        return -6;                      /* busy: another request owns the channel right now */
+    }
+    int rc = agent_req_locked(op, addr, in, inlen, wirelen, out, outcap, outlen);
+    pthread_mutex_unlock(&g_agent_lock);
+    return rc;
+}
+
+/* THE TWO FUNCTIONS THE WHOLE CHEAT STACK IS BUILT ON. Same signatures as the PS5's, same return
+   convention (0 good, negative bad), so every function above them ports across untouched. */
+static int mem_read(pid_t pid, intptr_t addr, void *buf, size_t len) {
+    (void)pid;                                 /* the agent IS the process - see the note above */
+    unsigned char *p = (unsigned char *)buf;
+    while (len) {
+        unsigned int take = len > AGENT_CHUNK ? AGENT_CHUNK : (unsigned int)len;
+        unsigned int got = 0;
+        int rc = agent_req(AGENT_OP_READ, (unsigned long long)addr, NULL, 0, take, p, take, &got);
+        if (rc != 0) return rc;
+        if (got != take) return -7;
+        p += take;
+        addr += take;
+        len -= take;
+    }
+    return 0;
+}
+
+static int mem_write(pid_t pid, intptr_t addr, const void *buf, size_t len) {
+    (void)pid;
+    const unsigned char *p = (const unsigned char *)buf;
+    while (len) {
+        unsigned int take = len > AGENT_CHUNK ? AGENT_CHUNK : (unsigned int)len;
+        int rc = agent_req(AGENT_OP_WRITE, (unsigned long long)addr, p, take, take, NULL, 0, NULL);
+        if (rc != 0) return rc;
+        p += take;
+        addr += take;
+        len -= take;
+    }
+    return 0;
+}
+
+/* Is the agent in the game that is running, and what is its image base?
+   Returns 0 and fills `json` with the agent's own status document, or negative when there is no
+   agent to ask. The shop never invents a base: the agent reports what the module actually says. */
+/* THE AGENT'S STATUS, CACHED - because every poller asks for it and they were fighting each other.
+ *
+ * MEASURED on a live session: seven concurrent readers, which is what an open Cheats panel plus the
+ * library page produce, and 71 of 289 reads returned can_cheat=false with NO writes involved. They
+ * were all queueing on the channel mutex, and a reader that cannot get it within its budget returns
+ * -6, which /api/cheat/running reports as "no helper in this game" - tiles greyed, the game dropped
+ * off the top of the library, the whole thing looking like a disconnect.
+ *
+ * A bigger timeout would only move the stall onto a polled route. The real observation is that they
+ * are all asking the same question, and its answer CANNOT CHANGE while a game runs: pid, image base,
+ * module name and title id are fixed from the moment the agent starts serving. So one exchange
+ * answers every caller for a second.
+ *
+ * THE CACHE IS DELIBERATELY ONLY THE STATUS DOCUMENT. Reads and writes of game memory are never
+ * cached - they are the live state a cheat is gated on, and serving a stale one would apply a cheat
+ * against bytes that are no longer there.
+ */
+#define AGENT_INFO_TTL_MS   1000        /* one exchange serves every poller in this window */
+#define AGENT_INFO_STALE_MS 8000        /* ...and a busy channel may reuse it this far back */
+
+static pthread_mutex_t g_info_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_info_doc[512];
+static long long       g_info_at;       /* now_ms() when g_info_doc was last refreshed */
+
+static int agent_info(char *json, size_t jsz) {
+    if (jsz) json[0] = 0;
+
+    long long now = now_ms();
+    pthread_mutex_lock(&g_info_lock);
+    if (g_info_doc[0] && (now - g_info_at) < AGENT_INFO_TTL_MS) {
+        snprintf(json, jsz, "%s", g_info_doc);
+        pthread_mutex_unlock(&g_info_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_info_lock);
+
+    unsigned int n = 0;
+    char tmp[512];
+    int rc = agent_req(AGENT_OP_STATUS, 0, NULL, 0, 0, tmp, sizeof(tmp) - 1, &n);
+    if (rc != 0) {
+        /* BUSY IS NOT GONE. Another caller holds the channel; if we had a good answer moments ago it
+           is still true, because none of what this document says can change while the game runs.
+           Anything older than the heartbeat's own staleness window is not reused - "the agent is
+           gone" has to remain reportable when it is actually true. */
+        if (rc == -6) {
+            pthread_mutex_lock(&g_info_lock);
+            int fresh = (g_info_doc[0] && (now - g_info_at) < AGENT_INFO_STALE_MS);
+            if (fresh) snprintf(json, jsz, "%s", g_info_doc);
+            pthread_mutex_unlock(&g_info_lock);
+            if (fresh) return 0;
+        }
+        return rc;
+    }
+    if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+    tmp[n] = 0;
+
+    pthread_mutex_lock(&g_info_lock);
+    snprintf(g_info_doc, sizeof(g_info_doc), "%s", tmp);
+    g_info_at = now_ms();
+    pthread_mutex_unlock(&g_info_lock);
+
+    snprintf(json, jsz, "%s", tmp);
+    return 0;
+}
+
+/* Forget it. Called where the agent may have changed under us - a new game, or the helper being
+   purged - so the next question is asked for real instead of answered from a session that is over. */
+static void agent_info_forget(void) {
+    pthread_mutex_lock(&g_info_lock);
+    g_info_doc[0] = 0;
+    g_info_at = 0;
+    pthread_mutex_unlock(&g_info_lock);
+}
+
+/* The game the agent is sitting in, as pid + base, in the shape the PS5's running_game() returns.
+   Named the same for the same reason mem_read is: the ported cheat code calls it. */
+/* DOES THE AGENT AGREE WITH THE CONSOLE ABOUT WHICH GAME THIS IS?
+   1 they agree, 0 they disagree, -1 the agent reported no title of its own.
+
+   Written once because it has to hold at TWO places and only held at one. The pid and base describe
+   the process the agent is sitting in; the title comes from the console's foreground app. They are
+   normally the same game and can come apart - the owner closes one game and opens another, and for a
+   moment an agent still answering from the old process hands out a live pid and base belonging to a
+   title that is no longer running. Writing a cheat then writes it into the wrong game, which is the
+   exact class of fault this project has already shipped once (a PS4 game's toggles reaching the PS5).
+   Refusing is the right answer rather than preferring one source: whichever is stale, we cannot tell
+   which, and "the game is not ready" is a true thing to say until they agree again. */
+static int agent_title_agrees(const char *info, const char *console_tid,
+                              char *seen_out, size_t seen_sz) {
+    if (seen_sz) seen_out[0] = 0;
+    const char *at = info ? strstr(info, "\"title_id\":\"") : NULL;
+    if (!at) return -1;
+    char seen[16] = {0};
+    const char *q = at + 12;
+    size_t k = 0;
+    while (q[k] && q[k] != '"' && k < sizeof(seen) - 1) { seen[k] = q[k]; k++; }
+    if (!seen[0]) return -1;
+    if (seen_sz) snprintf(seen_out, seen_sz, "%s", seen);
+    return (console_tid && !strcmp(seen, console_tid)) ? 1 : 0;
+}
+
+/* THE IMAGE BASE IS A FACT SOMEBODY CAN BE ASKED FOR, not a default to fall back on first. Two
+   routes used to reach straight for the PS4's no-ASLR load address whenever the caller left `base`
+   out, so a game that did NOT load there had every cheat offset computed from the wrong place - and
+   nothing downstream could tell a guessed base from a measured one. The agent measures it for
+   itself and reports it, so the order is: what the caller said, then what the agent says, and only
+   then the no-ASLR address - the same order ps4_patch_action_json already uses. */
+static intptr_t agent_image_base(void) {
+    char info[512];
+    if (agent_info(info, sizeof(info)) != 0) return 0;
+    const char *b = strstr(info, "\"base\":\"0x");
+    if (!b) return 0;
+    return (intptr_t)strtoull(b + 10, NULL, 16);
+}
+
+/* The module's size, straight out of the same reply agent_image_base() reads. Needed so "search the
+   whole module" is a measured span rather than a guessed one. 0 when the agent cannot say. */
+static long long agent_image_size(void) {
+    char info[512];
+    if (agent_info(info, sizeof(info)) != 0) return 0;
+    const char *z = strstr(info, "\"size\":");
+    if (!z) return 0;
+    return strtoll(z + 7, NULL, 10);
+}
+
+static int running_game(char *title, size_t tsz, pid_t *out_pid, intptr_t *out_base) {
+    if (tsz) title[0] = 0;
+    if (out_pid) *out_pid = 0;
+    if (out_base) *out_base = 0;
+
+    char info[512];
+    if (agent_info(info, sizeof(info)) != 0) return -1;      /* no agent -> no live game for us */
+
+    const char *b = strstr(info, "\"base\":\"0x");
+    const char *p = strstr(info, "\"pid\":");
+    if (!b || !p) return -1;
+    if (out_base) *out_base = (intptr_t)strtoull(b + 10, NULL, 16);
+    if (out_pid)  *out_pid  = (pid_t)strtol(p + 6, NULL, 10);
+
+    /* The TITLE comes from the console, not from the agent: the agent knows which module it is in,
+       and app.db plus sceKernelGetAppInfo know which game that is. One fact, one source. */
+    running_title_id(title, tsz);
+    if (!title[0]) return -1;
+
+    /* AND THE TWO SOURCES MUST AGREE - see agent_title_agrees above for why this is a refusal. */
+    char seen[16] = {0};
+    if (agent_title_agrees(info, title, seen, sizeof(seen)) == 0) {
+        ilog("running_game: the agent is in %s but the console says %s - refusing", seen, title);
+        if (out_pid) *out_pid = 0;
+        if (out_base) *out_base = 0;
+        if (tsz) title[0] = 0;
+        return -1;
+    }
+    return 0;
+}
+
+/* THE CHEAT ENGINE ITSELF - the PS5's, copied by tools/ps4_sync_cheat_core.py and checked by both
+   builds. It is included HERE and not at the top of the file because everything in it is written
+   against mem_read, mem_write and running_game, which are defined immediately above. */
+#include "cheat_core.h"
+
+/* Defined further down, beside the cache it guards. Declared here because the cheat routes need a
+   title's installed version and they are wired in above it. */
+static int console_titles_cached(ps4_title_t *out, int max);
+
+/* The installed version of a title, from the console's own app.db. cheat_pick_file() needs it to
+   choose between several files for one game, and an empty answer is fine - it then picks the best
+   it has and says so in `reason`. */
+static void installed_ver_for(const char *tid, char *out, size_t outsz) {
+    if (outsz) out[0] = 0;
+    ps4_title_t *rows = (ps4_title_t *)calloc(MAX_TITLES, sizeof(ps4_title_t));
+    if (!rows) return;
+    int n = console_titles_cached(rows, MAX_TITLES);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i].tid, tid)) { snprintf(out, outsz, "%s", rows[i].ver); break; }
+    free(rows);
+}
+
+/* Does the library hold anything at all for this title - a cheat file for any version, or a game
+   patch? Either one needs the helper, because both are written into the running game. Defined here
+   rather than beside the rest of autoarm because it needs installed_ver_for, cheat_pick_file and
+   patch_file_for, none of which exist that early in this file. */
+static int title_wants_agent(const char *tid) {
+    char iver[48] = {0};
+    installed_ver_for(tid, iver, sizeof(iver));
+    char pick[600]; const char *why = "none";
+    (void)cheat_pick_file(tid, iver, pick, sizeof(pick), &why);
+    if (pick[0]) return 1;
+    char pf[600] = {0};
+    return patch_file_for(tid, pf, sizeof(pf)) == 0;
+}
+
+/* DECIDE AND APPLY: the helper is listed for exactly those installed titles the library has something
+ * for, and for no others. Cheap and exact - both halves are facts we already hold.
+ *
+ * Measured on this console: 14 installed titles, 5 with cheats. So this writes five small [TID]
+ * sections and a game with nothing never loads our module at all, which is strictly better than the
+ * blanket [default] form.
+ *
+ * Returns the number of titles armed, or -1 if the list could not be written. Writes nothing when the
+ * result would be identical to what is already there, so this is safe to call on every boot and after
+ * every library change.
+ */
+static int agent_autoarm_reconcile(void) {
+    if (!autoarm_enabled()) return 0;
+    autoarm_seed_skip();
+
+    ps4_title_t *rows = (ps4_title_t *)calloc(MAX_TITLES, sizeof(ps4_title_t));
+    if (!rows) return -1;
+    int n = console_titles_cached(rows, MAX_TITLES);
+
+    /* A LOCAL, NOT A STATIC. 64 x 16 is one kilobyte, and a function-local static is shared by
+       every thread in the function - the watcher and /api/cheat/rescan both reach this. */
+    char wanted[AUTOARM_MAX][16];
+    int nw = 0;
+    for (int i = 0; i < n && nw < AUTOARM_MAX; i++) {
+        const char *tid = rows[i].tid;
+        if (!tid[0]) continue;
+        /* A title id and nothing else can become a section header. */
+        int ok = 1;
+        for (const char *c = tid; *c; c++)
+            if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+                  (*c >= '0' && *c <= '9'))) { ok = 0; break; }
+        if (!ok) continue;
+        if (autoarm_skipped(tid)) continue;
+        if (!title_wants_agent(tid)) continue;
+        int dup = 0;
+        for (int k = 0; k < nw; k++) if (!strcmp(wanted[k], tid)) { dup = 1; break; }
+        if (!dup) snprintf(wanted[nw++], sizeof(wanted[0]), "%s", tid);
+    }
+    free(rows);
+
+    /* The module has to be on the console before it is listed - listing a file that is not there is
+       harmless but pointless, and this is also what refreshes it after the shop is rebuilt. */
+    if (nw && agent_deploy() != 0) return -1;
+
+    int armed = 0;
+    if (agent_autoarm_apply((const char (*)[16])wanted, nw, &armed) != 0) return -1;
+    /* Our own message replaces GoldHEN's gold banner whenever anything of ours is listed. */
+    (void)gh_set_load_notification(armed ? 0 : 1);
+    return armed;
+}
+
+/* WHICH FILE DOES THIS REQUEST MEAN? Without a version, the installed one - which is what
+   mods_file_for has always answered. With a version, THAT version's file, and if the library has no
+   file for exactly that version the request is REFUSED rather than quietly served from another one.
+   The refusal is the whole point: a mod is applied by its INDEX into the file the panel listed, so
+   serving a different file under the same index applies a different cheat and reports success under
+   the wrong name. Returns 0 resolved, -1 nothing at all, -2 nothing for that exact version. */
+static int mods_file_for(const char *tid, char *out, size_t outsz);
+
+static int mods_file_for_req(const char *tid, const char *want_ver, char *out, size_t outsz) {
+    if (outsz) out[0] = 0;
+    if (!want_ver || !want_ver[0]) return mods_file_for(tid, out, outsz);
+    const char *why = "none";
+    int exact = cheat_pick_file(tid, want_ver, out, outsz, &why);
+    if (!out[0]) return -1;
+    if (!exact) { if (outsz) out[0] = 0; return -2; }
+    return 0;
+}
+
+/* Which cheat file would we use for this title? Same two steps as the PS5's mods_file_for(). */
+static int mods_file_for(const char *tid, char *out, size_t outsz) {
+    char iver[48] = {0};
+    installed_ver_for(tid, iver, sizeof(iver));
+    const char *why = "none";
+    cheat_pick_file(tid, iver, out, outsz, &why);
+    return out[0] ? 0 : -1;
+}
+
+/* ---- WHY THERE IS NO "START A GAME" HERE ------------------------------------------------------
+ * It was written and then taken out again, because it cannot be done from this payload on this
+ * firmware. Measured with /api/engine/symprobe against all five libraries this payload loads:
+ *
+ *     sceLncUtilLaunchApp              false      <- the only one with a real signature
+ *     sceLncUtilGetAppStatus           false
+ *     sceSystemServiceLaunchApp        true       <- declared `void f()`: no arguments, no shape
+ *     sceSystemServiceKillApp          true       <- typed, but three of its four ints are unnamed
+ *     sceUserServiceGetForegroundUser  true
+ *     sceSystemServiceGetAppIdOfBigApp true
+ *
+ * The toolchain declares sceLncUtilLaunchApp in full - (const char *title_id, const char *argv[],
+ * LncAppParam *param) - and there is no libSceLncUtil.sprx to resolve it from: /system/common/lib
+ * has 439 entries and /system/priv/lib has 23, both listed from the console, and it is in neither.
+ * Its exports live inside ShellCore.
+ *
+ * sceSystemServiceLaunchApp resolves, and using it would mean inventing its arguments - the same
+ * shape as sceSystemServiceLaunchWebBrowser, which ps4-app/tile-pkg/pms/main.c already carries a
+ * comment about. This project crashed a console once by inferring a call it had not read, and the
+ * rule that came out of that has no exceptions. sceSystemServiceKillApp fails the same test from
+ * the other side: typed, but three of its four integers have no documented meaning, so there would
+ * be no honest way to close what we had opened.
+ *
+ * The consequence is worth stating plainly rather than leaving implicit: the last step of the PS4
+ * cheat chain - a cheat actually landing in a running game - is verified by somebody starting a
+ * game, and nothing here can stand in for that.
+ */
+
+/* The PS5's patch_action_json, written against this payload's row type. Everything it actually
+   does lives in patch_apply/patch_revert, which ARE shared; this only gathers the answer. */
+static void ps4_patch_action_json(const char *tid, int index, int force, int dry, int is_revert,
+                                  char *out, size_t outsz) {
+    char iver[48] = {0};
+    installed_ver_for(tid, iver, sizeof(iver));
+
+    /* DOES THIS TITLE HAVE A PATCH FILE AT ALL - asked FIRST. Asking "is the game running" first
+       told an owner to launch a game in order to be refused for a completely different reason,
+       which is a wrong answer dressed as a helpful one. */
+    char pfile[600] = {0};
+    if (patch_file_for(tid, pfile, sizeof(pfile)) != 0) {
+        snprintf(out, outsz,
+                 "{\"ok\":false,\"error\":\"no_patch_file\",\"title_id\":\"%s\","
+                 "\"message\":\"There is no game patch file for this title on the console.\"}",
+                 tid);
+        return;
+    }
+
+    /* THE VERSION GATE, which the PS5 has had from the start and this did not. A game patch is a
+       list of byte offsets into one exact build of a game; applied to another build those offsets
+       point at unrelated code. The expect-gate below refuses most of it, but "most" is not a thing
+       to rely on inside a running game. force=1 is still honoured - that is what it is for. */
+    char aver[32] = {0}, pname[160] = {0};
+    patch_meta_attr(tid, index, "AppVer", aver, sizeof(aver));
+    patch_meta_attr(tid, index, "Name", pname, sizeof(pname));
+    if (!is_revert && !force && aver[0] && iver[0] && strcmp(aver, iver) != 0) {
+        char ea[64], eb[64];
+        json_escape(aver, ea, sizeof(ea));
+        json_escape(iver, eb, sizeof(eb));
+        snprintf(out, outsz,
+                 "{\"ok\":false,\"error\":\"version_mismatch\",\"title_id\":\"%s\","
+                 "\"app_ver\":\"%s\",\"installed_version\":\"%s\",\"message\":\"This patch "
+                 "was written for version %s and version %s is installed.\"}",
+                 tid, ea, eb, ea, eb);
+        return;
+    }
+
+    char rtid[24] = {0};
+    pid_t pid = 0; intptr_t base = 0;
+    int live = (running_game(rtid, sizeof(rtid), &pid, &base) == 0 && !strcmp(rtid, tid));
+    if (!live) {
+        snprintf(out, outsz,
+                 "{\"ok\":false,\"error\":\"game_not_running\",\"title_id\":\"%s\","
+                 "\"message\":\"Launch the game first - a patch is written into its live "
+                 "memory.\"}", tid);
+        return;
+    }
+    /* 0x400000 is the PS4's no-ASLR load address and what every offset in the library is relative
+       to. The agent reports the real one and that is what is used; this only covers an agent that
+       answered without a base, where guessing nothing would mean writing to offset-from-zero. */
+    if (!base) base = (intptr_t)PATCH_NO_ASLR;
+
+    char detail[400] = {0};
+    int rc = is_revert ? patch_revert(tid, index, iver, pid, base, detail, sizeof(detail))
+                       : patch_apply(tid, index, iver, pid, base, force, dry, detail, sizeof(detail));
+    if (!dry) patch_result_toast(pname[0] ? pname : "Game patch", is_revert, rc, detail, tid);
+
+    /* The same keys the PS5 answers with, because the panel reads them by name and a missing key
+       is a blank line in the UI, not an error anybody can see. */
+    int partial = 0, written = 0, failed = 0;
+    {
+        const char *w = strstr(detail, "written=");
+        const char *f = strstr(detail, "failed=");
+        if (w) written = atoi(w + 8);
+        if (f) failed = atoi(f + 7);
+        partial = (written > 0 && failed > 0);
+    }
+    char ed[800], en[400], ea2[64], eb2[64];
+    json_escape(detail, ed, sizeof(ed));
+    json_escape(pname, en, sizeof(en));
+    json_escape(aver, ea2, sizeof(ea2));
+    json_escape(iver, eb2, sizeof(eb2));
+    const char *msg = rc >= 0
+        ? (partial ? "The patch was only partly applied." : (is_revert ? "Patch reverted."
+                                                                       : "Patch applied."))
+        : "The console refused this patch.";
+    snprintf(out, outsz,
+             "{\"ok\":%s,\"rc\":%d,\"index\":%d,\"title_id\":\"%s\",\"name\":\"%s\","
+             "\"app_ver\":\"%s\",\"installed_version\":\"%s\",\"revert\":%s,\"dry\":%s,"
+             "\"partial\":%s,\"pid\":%d,\"base\":\"0x%llx\",\"detail\":\"%s\","
+             "\"message\":\"%s\"}",
+             rc >= 0 ? "true" : "false", rc, index, tid, en, ea2, eb2,
+             is_revert ? "true" : "false", dry ? "true" : "false",
+             partial ? "true" : "false",
+             (int)pid, (unsigned long long)base, ed, msg);
+}
+
+
+
+
 static void bgft_bootstrap(void) {
     static const char *LIBS[] = {
         "/system/common/lib/libSceBgft.sprx",
         "/system/common/lib/libSceAppInstUtil.sprx",
         "/system/common/lib/libSceUserService.sprx",
         "/system/common/lib/libSceSystemService.sprx",
+        /* MEASURED BY /api/engine/proclist, which came back have_getappinfo:false on a console
+           that plainly has the call. sceKernelGetAppInfo lives in libkernel, which was never in
+           this list - and RTLD_DEFAULT does not reach it, exactly as it did not reach a single
+           BGFT symbol when this file was first written. Same lesson, second library. */
+        "/system/common/lib/libkernel.sprx",
         NULL
     };
     for (int i = 0; LIBS[i]; i++) {
@@ -1420,6 +3602,13 @@ static int bgft_install_url(const char *uri, const char *label, const char *cid,
     p.option = ORBIS_BGFT_TASK_OPT_DISABLE_CDN_QUERY_PARAM;
     p.packageType = (ptype && *ptype) ? ptype : "PS4GD";
     p.packageSubType = "";
+    /* THIS FIELD IS 32 BITS IN THE FIRMWARE'S OWN STRUCT - see bgft.h, which is the canonical
+       OpenOrbis layout - so a package over 4 GiB is necessarily registered modulo 2^32 and there
+       is nothing to widen. It is not the corruption it looks like: BGFT sizes the transfer from
+       the HTTP Content-Length, and an 11,409,948,672-byte game registered here as 2,820,014,080
+       still installed byte-for-byte correctly (verified at eight offsets spanning the whole file
+       with tools/verify_console_install.py). The value is advisory - free-space estimate and the
+       progress UI - and the finished check uses g_job.expect, which is the untruncated size. */
     p.packageSize = (uint32_t)(size > 0 ? size : 0);
 
     OrbisBgftTaskId task = BGFT_INVALID_TASK_ID;
@@ -1557,7 +3746,16 @@ static void job_refresh(void) {
     if (tid[0]) title_proof_facts(tid, jcat, &onDisk, &onDiskMtime);
 
     pthread_mutex_lock(&g_job_lock);
-    if (have) { g_job.done = done; g_job.total = total; }
+    /* BEFORE the assignment below, because the movement test further down compares against it. It
+       used to read g_job.done after this line had already set it to `done`, i.e. `done > done`. */
+    long long prev_done = g_job.done;
+    /* THE COUNT ONLY GOES FORWARD. The progress read happens outside this lock, so two polls can
+       land out of order and store an older count over a newer one - and the owner watches the
+       percentage go down. Keeping the larger is honest: BGFT's counter does not rewind. */
+    if (have) {
+        if (done > g_job.done) g_job.done = done;
+        g_job.total = total;
+    }
     if (total > g_job.seen_total) g_job.seen_total = total;
     /* WHAT COUNTS AS DONE. app.pkg on disk at the expected size is the honest proof, exactly as on
        the PS5 side - the console's own progress counter is useful for showing movement but has
@@ -1586,9 +3784,29 @@ static void job_refresh(void) {
        is the one answer this shop must never give. Movement is more bytes transferred OR the title's
        own file changing; fifteen minutes without either, on a transfer the service is not reporting
        an error for, is a stall. Generous, because a large game on a slow link is slow, not stuck. */
-    if (have && done > g_job.done) g_job.last_move_ms = now_ms();
-    if (onDisk != g_job.base_size || onDiskMtime != g_job.base_mtime) g_job.last_move_ms = now_ms();
-    if (!err && g_job.last_move_ms && now_ms() - g_job.last_move_ms > 15LL * 60 * 1000) {
+    if (have && done > prev_done) g_job.last_move_ms = now_ms();
+    /* AGAINST THE PREVIOUS POLL, not the start of the job. Against the baseline this fired on every
+       poll once the file had changed once (so a dead transfer could never be detected) and never at
+       all while BGFT was still staging into /user/bgft/task/<id>/ (so a healthy download was on a
+       fifteen-minute wall clock from handoff). */
+    if (!g_job.last_seen || onDisk != g_job.last_size || onDiskMtime != g_job.last_mtime) {
+        g_job.last_move_ms = now_ms();
+        g_job.last_size = onDisk;
+        g_job.last_mtime = onDiskMtime;
+        g_job.last_seen = 1;
+    }
+    /* A STALL IS "NOTHING IS HAPPENING", NOT "I CANNOT TELL" - and the first version of this guard
+       asked the wrong question. It asked whether the console LISTS the title, which for an update, an
+       add-on or a reinstall is true before the transfer even starts: the guard always held and a dead
+       one could never be detected. It was written for the case where a large FIRST install finished
+       and its app.pkg did not match the package size.
+       So: a job whose package file has changed since it started is not stalled, whatever the size
+       says - and the app.db fallback stays for a first install, which is the case it is for. */
+    int file_moved = onDisk > 0 && (!g_job.base_had ||
+                                    onDisk != g_job.base_size || onDiskMtime != g_job.base_mtime);
+    int looks_alive = file_moved || (!g_job.base_had && g_job.tid[0] && console_lists_title(g_job.tid));
+    if (!err && g_job.last_move_ms && now_ms() - g_job.last_move_ms > 15LL * 60 * 1000
+        && !looks_alive) {
         snprintf(g_job.state, sizeof(g_job.state), "error");
         snprintf(g_job.msg, sizeof(g_job.msg),
                  "This install stopped making progress and the console has not said why. Nothing "
@@ -1604,6 +3822,34 @@ static void job_refresh(void) {
     int replaced = onDisk > 0 && (!g_job.base_had ||
                                   onDisk != g_job.base_size || onDiskMtime != g_job.base_mtime);
     int big_enough = replaced && (want <= 0 || onDisk >= (want - want / 50));
+
+    /* THE SIZE TEST IS NOT THE ONLY WAY AN INSTALL CAN BE FINISHED.
+     *
+     * Measured: BO3 downloaded, installed and ran, and this said it stopped at 99%. Its installed
+     * app.pkg is 43.6 GB and need not land within 2% of the package we handed over - a console
+     * writing a large base game does not owe us a byte-identical file. When the size test misses, the
+     * job never leaves "transferring", so it shows BGFT's last byte count for fifteen minutes and is
+     * then failed by the stall detector, having actually succeeded.
+     *
+     * So there is a second route, and it is three facts together because no ONE of them is safe:
+     *   done >= total       the console says it moved every byte it asked for - but a counter can
+     *                       reach its total before the install step has run;
+     *   replaced            this package file really changed - but so does a download in progress;
+     *   console_lists_title the console's own database has the title - but a registered title can be
+     *                       a phantom with no bytes behind it, which this project has already shipped
+     *                       once and written a memory about.
+     * Each alone is a false positive. All three at once is what "installed" means.
+     *
+     * The database read is why this is guarded: it happens only when the cheap size test has already
+     * failed AND the transfer is otherwise complete, so the ordinary polling path is untouched. */
+    if (!big_enough && replaced && !err && g_job.total > 0 && g_job.done >= g_job.total
+        && tid[0] && console_lists_title(tid)) {
+        big_enough = 1;
+        ilog("install: %s - the size test missed (%lld on disk vs %lld expected) but the console "
+             "transferred every byte and lists the title, so it is installed",
+             tid, (long long)onDisk, (long long)want);
+    }
+
     if (err) {
         g_job.rc = err;
         snprintf(g_job.state, sizeof(g_job.state), "error");
@@ -1644,6 +3890,10 @@ static void job_refresh(void) {
     } else if (big_enough) {
         /* Something just appeared on this console, so a remembered list of what it has is wrong. */
         titles_cache_drop();
+        /* ...and so is the decision about which titles carry the in-game helper. The owner installed
+           a game the library has cheats for and had to arm it by hand, because that decision was only
+           ever made at boot. Deferred to the watcher: this runs under g_job_lock. */
+        g_autoarm_dirty = 1;
         snprintf(g_job.state, sizeof(g_job.state), "installed");
         snprintf(g_job.msg, sizeof(g_job.msg), "Installed on this PS4");
         /* A FINISHED REPAIR OF THE ICON RECORDS ITSELF, whoever started it. The PC's lane is the
@@ -1680,12 +3930,33 @@ static void job_refresh(void) {
     if (spent != BGFT_INVALID_TASK_ID) bgft_release(spent);
 }
 
+/* THE CATEGORY AND THE EXPECTED SIZE the finished check needs, from the package type the companion
+   named. Call with g_job_lock HELD, before job_baseline_locked().
+
+   `cat` is WHERE title_proof_facts looks: "gp" is /user/patch/<TID>/patch.pkg, "ac" is an add-on's
+   ac.pkg, "gd" is the game's own app.pkg. `expect` is what the size test compares against. Four start
+   paths set both; the queue release and the retry set neither, so a queued or retried UPDATE looked
+   for a game's app.pkg - which an update never writes - and ran to completion with the row still
+   saying "downloading". One function now, so a fifth path cannot forget. */
+static void job_set_kind_locked(const char *ptype, long long psize, const char *cid) {
+    g_job.expect = psize;
+    if (ptype) {
+        if (!strcmp(ptype, "PS4GP"))      snprintf(g_job.cat, sizeof(g_job.cat), "gp");
+        else if (!strcmp(ptype, "PS4AC")) snprintf(g_job.cat, sizeof(g_job.cat), "ac");
+        else if (!strcmp(ptype, "PS4GD")) snprintf(g_job.cat, sizeof(g_job.cat), "gd");
+    }
+    if (!g_job.tid[0] && cid) tid_from_cid(cid, g_job.tid, sizeof(g_job.tid));
+}
+
 /* Remember what app.pkg looked like before an install starts. Call with g_job_lock HELD, straight
    after g_job.tid is final: the finished check is only as honest as this snapshot. */
 static void job_baseline_locked(void) {
     g_job.base_had = g_job.tid[0]
                      ? title_proof_facts(g_job.tid, g_job.cat, &g_job.base_size, &g_job.base_mtime)
                      : 0;
+    g_job.last_size = g_job.base_size;
+    g_job.last_mtime = g_job.base_mtime;
+    g_job.last_seen = 1;
     g_job.last_move_ms = now_ms();
 }
 
@@ -2025,7 +4296,9 @@ static void fs_send_list(int fd, const char *path) {
     free(out);
 }
 
-static void fs_send_read(int fd, const char *path) {
+/* `req` is the whole request, so this can read a Range header; NULL means "no range", which is
+   what every caller that does not have the request text passes. */
+static void fs_send_read_ranged(int fd, const char *path, const char *req) {
     int f = open(path, O_RDONLY);
     if (f < 0) {
         send_status(fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"cannot open\"}");
@@ -2038,20 +4311,94 @@ static void fs_send_read(int fd, const char *path) {
                     "{\"ok\":false,\"error\":\"not a regular file\"}");
         return;
     }
-    char hdr[300];
-    int hn = snprintf(hdr, sizeof(hdr),
-                      "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
-                      "Content-Length: %lld\r\nCache-Control: no-store\r\n"
+
+    /* EVERYTHING HERE IS 64-BIT ON PURPOSE. A PS4 game package is routinely over 4 GB - the one
+       that prompted this is 11,409,948,672 bytes - and the reason this route exists at all is
+       that GoldHEN's FTP reports such a file's size modulo 2^32 and refuses to seek past 2 GB.
+       Repeating either mistake here would make this no better than the thing it replaces. */
+    long long size = (long long)st.st_size;
+    long long start = 0, end = size - 1;
+    int partial = 0;
+
+    const char *h = req ? strcasestr_local(req, "\nRange:") : NULL;
+    if (h) {
+        const char *p = strchr(h, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!strncasecmp(p, "bytes=", 6)) {
+                p += 6;
+                const char *dash = strchr(p, '-');
+                if (dash) {
+                    char a[32] = {0}, b[32] = {0};
+                    size_t an = (size_t)(dash - p);
+                    if (an < sizeof(a)) memcpy(a, p, an);
+                    const char *q = dash + 1;
+                    size_t bn = 0;
+                    while (q[bn] && q[bn] != '\r' && q[bn] != '\n' && q[bn] != ',' && bn < sizeof(b) - 1) bn++;
+                    memcpy(b, dash + 1, bn);
+                    if (!a[0] && b[0]) {                 /* bytes=-N : the LAST N bytes */
+                        long long n = strtoll(b, NULL, 10);
+                        if (n > 0) { start = size > n ? size - n : 0; end = size - 1; partial = 1; }
+                    } else if (a[0]) {
+                        start = strtoll(a, NULL, 10);
+                        if (b[0]) {
+                            long long e = strtoll(b, NULL, 10);
+                            if (e < end) end = e;
+                        }
+                        partial = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (partial && (start < 0 || start >= size || start > end)) {
+        char h416[200];
+        int n416 = snprintf(h416, sizeof(h416),
+                            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */%lld\r\n"
+                            "Content-Length: 0\r\nAccess-Control-Allow-Origin: *\r\n"
+                            "Connection: close\r\n\r\n", size);
+        write_all(fd, h416, (size_t)n416);
+        close(f);
+        return;
+    }
+
+    long long length = end - start + 1;
+    char hdr[400];
+    int hn;
+    if (partial) {
+        hn = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n"
+                      "Content-Length: %lld\r\nContent-Range: bytes %lld-%lld/%lld\r\n"
+                      "Accept-Ranges: bytes\r\nCache-Control: no-store\r\n"
                       "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                      (long long)st.st_size);
+                      length, start, end, size);
+    } else {
+        hn = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                      "Content-Length: %lld\r\nAccept-Ranges: bytes\r\n"
+                      "Cache-Control: no-store\r\n"
+                      "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                      size);
+    }
     write_all(fd, hdr, (size_t)hn);
+
+    if (start && lseek(f, (off_t)start, SEEK_SET) < 0) { close(f); return; }
     char buf[65536];
-    for (;;) {
-        ssize_t r = read(f, buf, sizeof(buf));
+    long long left = length;
+    while (left > 0) {
+        size_t want = left > (long long)sizeof(buf) ? sizeof(buf) : (size_t)left;
+        ssize_t r = read(f, buf, want);
         if (r <= 0) break;
-        write_all(fd, buf, (size_t)r);
+        if (write_all(fd, buf, (size_t)r) != 0) break;
+        left -= r;
     }
     close(f);
+}
+
+static void fs_send_read(int fd, const char *path) {
+    fs_send_read_ranged(fd, path, NULL);
 }
 
 /* Streamed upload, .part then rename - a half-written file must never look finished. */
@@ -2154,28 +4501,66 @@ static ps4_title_t     g_titles[MAX_TITLES];
 static int             g_titles_n = -1;
 static long long       g_titles_at = 0;
 
+/* BUMPED BY EVERY DROP, so a read that was already in flight cannot put its older answer back.
+   console_titles_cached releases the lock while it reads app.db - it must, the read is slow and
+   megabytes - and it used to store the result unconditionally on the way out. A drop landing in
+   that window was silently undone, which for the autoarm decision means deciding from a snapshot
+   taken before the game existed. */
+static unsigned g_titles_gen = 0;
+
 static void titles_cache_drop(void) {
     pthread_mutex_lock(&g_titles_lock);
     g_titles_n = -1;
+    g_titles_gen++;
     pthread_mutex_unlock(&g_titles_lock);
 }
 
 /* Copies into the caller's array so nothing holds g_titles_lock while it works. */
+/* NO g_scan_lock IN HERE, AND NOTHING SHARED TO PROTECT.
+ *
+ * This used to take g_scan_lock around its app.db read - and all three library builders call it from
+ * inside a wrapper that is already holding that lock. A statically initialised mutex on this platform
+ * does not block when the same thread locks it twice, so the INNER UNLOCK handed the caller's critical
+ * section away, mid-scan, over the shared buffers the note beside g_scan_lock describes. With a
+ * five-second TTL that was the ordinary path.
+ *
+ * The lock was only ever protecting the shared `fresh[]` static. read_console_titles keeps nothing
+ * shared - it fills the caller's array and slurps app.db onto the heap - so `fresh` goes on the heap
+ * too and the lock is not needed at all. 40 KB per cache miss, at most once every five seconds. */
 static int console_titles_cached(ps4_title_t *out, int max) {
     pthread_mutex_lock(&g_titles_lock);
     long long now = now_ms();
     if (g_titles_n < 0 || now - g_titles_at > TITLES_TTL_MS) {
+        unsigned gen = g_titles_gen;                  /* what we are answering for */
         pthread_mutex_unlock(&g_titles_lock);
-        static ps4_title_t fresh[MAX_TITLES];
-        pthread_mutex_lock(&g_scan_lock);
+        ps4_title_t *fresh = (ps4_title_t *)calloc(MAX_TITLES, sizeof(ps4_title_t));
+        if (!fresh) {
+            pthread_mutex_lock(&g_titles_lock);       /* fall through to whatever the cache has */
+            int have = g_titles_n > 0 ? g_titles_n : 0;
+            if (have > max) have = max;
+            if (have > 0 && out) memcpy(out, g_titles, sizeof(ps4_title_t) * (size_t)have);
+            pthread_mutex_unlock(&g_titles_lock);
+            return have;
+        }
         int n = read_console_titles(fresh, MAX_TITLES);
-        pthread_mutex_unlock(&g_scan_lock);
         pthread_mutex_lock(&g_titles_lock);
+        /* A DROP WHILE WE WERE READING WINS. Our answer predates it, so storing it would undo an
+           invalidation somebody raised on purpose - see g_titles_gen. The caller still gets this
+           read's rows; only the cache is left empty so the next question goes to app.db again. */
+        if (gen != g_titles_gen) {
+            int m = n > 0 ? n : 0;
+            if (m > max) m = max;
+            if (m > 0 && out) memcpy(out, fresh, sizeof(ps4_title_t) * (size_t)m);
+            pthread_mutex_unlock(&g_titles_lock);
+            free(fresh);
+            return m;
+        }
         if (n > 0 || g_titles_n < 0) {
             memcpy(g_titles, fresh, sizeof(ps4_title_t) * (size_t)(n > 0 ? n : 0));
             g_titles_n = n;
             g_titles_at = now;
         }
+        free(fresh);
     }
     int n = g_titles_n > 0 ? g_titles_n : 0;
     if (n > max) n = max;
@@ -2186,11 +4571,18 @@ static int console_titles_cached(ps4_title_t *out, int max) {
 
 static int console_lists_title(const char *tid) {
     if (!tid || !tid[0]) return 0;
-    static ps4_title_t rows[MAX_TITLES];
+    /* HEAP, NOT A FUNCTION-LOCAL STATIC. A static inside a function is shared by every thread in it,
+       and this one is called from the install poller, the stall detector and the routes at the same
+       time - so one thread's rows were overwritten while another walked them. 40 KB is too much for a
+       thread stack, which is why it was static; the heap is the answer. */
+    ps4_title_t *rows = (ps4_title_t *)calloc(MAX_TITLES, sizeof(ps4_title_t));
+    if (!rows) return 0;
     int n = console_titles_cached(rows, MAX_TITLES);
+    int hit = 0;
     for (int i = 0; i < n; i++)
-        if (!strcmp(rows[i].tid, tid)) return 1;
-    return 0;
+        if (!strcmp(rows[i].tid, tid)) { hit = 1; break; }
+    free(rows);
+    return hit;
 }
 
 /* The USB scan, remembered briefly. Every /api/library used to walk eight mount points and read
@@ -2348,7 +4740,11 @@ static void send_devices(int fd) {
     send_json(fd, out);
 }
 
-/* The three wrappers. Every caller goes through these; nothing takes the lock twice. */
+/* The three wrappers, and they are the ONLY callers of the _locked builders (checked: one caller
+   each). g_scan_lock is what makes the builders' function-local `static ps4_title_t rows[MAX_TITLES]`
+   and the shared g_usb buffers safe, so a caller that skipped a wrapper would take that away silently.
+   console_titles_cached no longer takes this lock itself - it used to, from inside these builders,
+   which handed the critical section away mid-scan. */
 static char *build_library_json(void) {
     pthread_mutex_lock(&g_scan_lock);
     char *r = build_library_json_locked();
@@ -2410,7 +4806,21 @@ static void serve_pkgfile(int fd, const char *path, const char *req, int head_on
     char tok[24] = {0};
     const char *t = path + 9;                       /* after "/pkgfile/" */
     size_t k = 0;
-    while (t[k] && t[k] != '?' && t[k] != '/' && k + 1 < sizeof(tok)) { tok[k] = t[k]; k++; }
+    /* STOP AT THE DOT TOO. install_local_pkg registers the url /pkgfile/<n>.pkg - the extension
+       is there because the console refuses a package url without one - and this loop stopped only
+       at '?' and '/', so the token became "0.pkg", the digits test below failed on the '.', and
+       this server answered its OWN url with 404. Every console-local install died there: a USB
+       package, /api/engine/install-local, and the dashboard app installing itself.
+
+       It is in the console's own log, and it was misread for a long time as a network problem:
+           [BGFT] ERROR: [360] status = 404
+           install: register failed rc=0x80991404 ... uri=http://10.0.0.86:8710/pkgfile/0.pkg
+       0x80991404 was recorded as "who serves it, not loopback-vs-LAN". It was neither - it was
+       this parser. The 404 in that line is ours.
+
+       The PS5 twin has always done this correctly (ps5-app/onconsole/server.c, "const char *dot =
+       strchr(path + 1, '.')"), which is the shape copied here. */
+    while (t[k] && t[k] != '?' && t[k] != '/' && t[k] != '.' && k + 1 < sizeof(tok)) { tok[k] = t[k]; k++; }
     tok[k] = 0;
     char local[1024];
     /* DIGITS ONLY. atoi() answers 0 for anything it cannot parse, so /pkgfile/anything served
@@ -2912,12 +5322,14 @@ static int tile_ver_num(const char *v) {
 /* The version of the app the console currently has, or "" if it has none. */
 static void tile_installed_ver(char *out, size_t outsz) {
     out[0] = 0;
-    static ps4_title_t rows[MAX_TITLES];
-    pthread_mutex_lock(&g_scan_lock);
+    /* No g_scan_lock and no shared static: console_titles_cached needs neither now, and taking that
+       lock here was half of the recursive-lock defect it used to be on the other side of. */
+    ps4_title_t *rows = (ps4_title_t *)calloc(MAX_TITLES, sizeof(ps4_title_t));
+    if (!rows) return;
     int n = console_titles_cached(rows, MAX_TITLES);
     for (int i = 0; i < n; i++)
         if (!strcmp(rows[i].tid, PS4_TILE_TID)) { snprintf(out, outsz, "%s", rows[i].ver); break; }
-    pthread_mutex_unlock(&g_scan_lock);
+    free(rows);
 }
 
 /* Write the embedded package out and hand it to the install lane. 0 = handed over. */
@@ -3246,28 +5658,29 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         /* MEASURED, not asserted - see ftp_live_port(). ftp_port is 0 when nothing is listening,
            and the page prints the port only when ftp_online is true, so that 0 is never shown. */
         int fport = ftp_live_port();
-        /* running_title STAYS EMPTY, and that is something checked rather than something
-           forgotten. This payload has no honest way to learn which game is running: what it reads
-           of the console is app.db, which is the list of what is INSTALLED - tbl_appbrowse_<userid>
-           and tbl_appinfo, neither of which knows anything about a running process - and nothing
-           else it reads knows either. The PS5 half answers this with
-           sceSystemServiceGetAppIdOfRunningBigApp and sceKernelGetAppInfo, but those signatures are
-           read off the PS5 side of this repo, not out of any PS4 header we hold; inferring one is
-           how this project once crashed a console, and here we are inside a SHARED system daemon
-           where that takes the whole process down with us. So the field waits for a PS4 signature
-           somebody can actually read. The page treats empty as "no game to highlight", which is the
-           harmless reading of not knowing. */
-        char out[700];
+        /* running_title IS ANSWERED NOW. It stayed empty for as long as this file could not
+           find a PS4 signature it was allowed to trust - the right call, and the note that used to
+           sit here explained why. The signatures turned out to be readable after all, in the
+           payload SDK's own sample and in OpenOrbis, and the one thing they disagreed about was
+           measured on this console rather than picked. See running_title_id(). Empty still means
+           "no game running", which is what the page has always treated it as. */
+        char rt_now[16];
+        running_title_id(rt_now, sizeof(rt_now));
+        char csig[96];      /* four %lld (20 each) and three dashes is 83 - sized from the format */
+        content_sig(csig, sizeof(csig));
+        char out[900];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"on_console\":true,\"server\":\"on-console\",\"platform\":\"ps4\","
                  "\"connected\":true,\"version\":\"%s\",\"built\":\"%s %s\",\"ps5_ip\":\"%s\","
                  "\"lan_ip\":\"%s\",\"companion_port\":%d,\"shop_port\":%d,"
                  "\"engine\":\"pms-bgft\",\"engine_ready\":%s,\"ftp_online\":%s,\"ftp_port\":%d,"
-                 "\"shadowmount\":false,\"shadowmount_port\":0,\"running_title\":\"\","
+                 "\"shadowmount\":false,\"shadowmount_port\":0,\"running_title\":\"%s\","
+                 "\"console_id\":\"%s\","
+                 "\"apps_sig\":\"%s\","
                  "\"uptime_s\":%lld,\"conns\":%lld}",
                  SHOP_VERSION, __DATE__, __TIME__, lan_ip_str(), lan_ip_str(), PORT, PORT,
                  g_bgft_ready ? "true" : "false",
-                 fport ? "true" : "false", fport,
+                 fport ? "true" : "false", fport, rt_now, console_id(), csig,
                  g_boot_ms ? (now_ms() - g_boot_ms) / 1000 : 0, g_conns_served);
         send_json(fd, out);
         return;
@@ -3425,6 +5838,12 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         g_job.expect = psize;
         snprintf(g_job.uri, sizeof(g_job.uri), "%s", uri);
         snprintf(g_job.name, sizeof(g_job.name), "%s", name);
+        /* WHAT A RETRY WILL NEED. JOB_CLAIM_RETRY hands these to bgft_install_url, and only the
+           queued lane used to write them - so retrying an ordinary install re-registered with no
+           content id and size 0, which is not the package that failed. */
+        snprintf(g_job.want_cid, sizeof(g_job.want_cid), "%s", cid);
+        snprintf(g_job.want_type, sizeof(g_job.want_type), "%s", ptype);
+        g_job.want_size = psize;
         /* The title id comes out of the CONTENT id first, by STRUCTURE - everything between the
            first '-' and the '_' - because that works for any title id there is. The older reader
            below only recognises a game's (CUSA/NPXS), and this shop installs one package that is
@@ -3472,10 +5891,1110 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
        this refusal, and because this one runs first it only ever saw /api/mem - where it answered
        the same refusal WITHOUT the "platform" key, so the one path that reached it got a different
        shape from every other path in the set. One list, one answer. */
+    /* ---- THE TWO MEASUREMENTS THE CHEAT ENGINE IS WAITING ON -------------------------------
+     * Both are read-only and neither touches a game. They are under /api/engine/ deliberately:
+     * /api/mem is the refused prefix below, and a diagnostic must not answer on a path the app
+     * uses for the real thing. They are also the ONLY two routes in this file that issue a syscall
+     * by number, which is why the comment above pms_mdbg_op() is where the reasoning lives.
+     */
+    if (!strcmp(path, "/api/engine/ptraceprobe")) {
+        /* Is ptrace implemented for us? Nothing is attached to - see the file note above. The pid
+           is picked out of the live process list precisely so that "it does not exist" is measured
+           rather than assumed, and the raw errno is reported rather than a verdict. */
+        int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+        size_t need = 0;
+        int live[512];
+        int nlive = 0;
+        if (!sysctl(mib, 4, NULL, &need, NULL, 0) && need) {
+            need += need / 8 + 8192;
+            char *buf = (char *)malloc(need);
+            if (buf) {
+                if (!sysctl(mib, 4, buf, &need, NULL, 0)) {
+                    for (char *p = buf; p < buf + need && nlive < 512; ) {
+                        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+                        if (ki->ki_structsize <= 0 || p + ki->ki_structsize > buf + need) break;
+                        p += ki->ki_structsize;
+                        live[nlive++] = (int)ki->ki_pid;
+                    }
+                }
+                free(buf);
+            }
+        }
+        /* The first number above every live pid, so it cannot collide with one that exists. */
+        int free_pid = 30000;
+        for (int i = 0; i < nlive; i++) if (live[i] >= free_pid) free_pid = live[i] + 1;
+
+        errno = 0;
+        int rc = ptrace(PT_ATTACH, (pid_t)free_pid, 0, 0);
+        int er = errno;
+
+        /* Named, because an errno number in a JSON field is a thing nobody can read at a glance -
+           and the whole value of this probe is in WHICH refusal it is. */
+        const char *meaning =
+            (er == ENOSYS) ? "not implemented for us - ptrace is a dead end like mdbg"
+          : (er == ESRCH)  ? "implemented and reachable - it looked for the process and did not "
+                             "find it, which is the answer we wanted; credentials against a REAL "
+                             "target are still unproven"
+          : (er == EPERM)  ? "refused before it even looked - a harder no than ESRCH is a yes"
+          : (er == EINVAL) ? "reached the call and rejected the request shape"
+          : "unexpected - read the number";
+
+        char out[520];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"call\":\"ptrace\",\"request\":\"PT_ATTACH\","
+                 "\"pid_tried\":%d,\"pid_exists\":false,\"live_procs\":%d,\"rc\":%d,\"errno\":%d,"
+                 "\"meaning\":\"%s\",\"attached_to_anything\":false}",
+                 free_pid, nlive, rc, er, meaning);
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/engine/memprobe")) {
+        /* OUR OWN PROCESS, OUR OWN BYTES, READ ONLY. The source is a local array we just filled;
+           the destination is a second local array. If the kernel refuses the call, nothing has
+           been touched; if it accepts it, `match` is 1 and the whole engine is unblocked. A game
+           is never a valid target for this route - see /api/engine/proclist for finding one, and
+           note that reading a game would prove nothing this does not. */
+        volatile unsigned char src[16];
+        unsigned char dst[16];
+        for (int i = 0; i < 16; i++) src[i] = (unsigned char)(0xA5 ^ (i * 17));
+        memset(dst, 0, sizeof(dst));
+
+        pms_mdbg_args_t a;
+        pms_mdbg_res_t  r;
+        a.pid = (int)getpid();
+        a.src = (unsigned long)(void *)src;
+        a.dst = (unsigned long)dst;
+        a.len = sizeof(dst);
+        long rc = pms_mdbg_op(PMS_MDBG_READ, &a, &r);
+
+        int match = 1;
+        for (int i = 0; i < 16; i++)
+            if (dst[i] != (unsigned char)(0xA5 ^ (i * 17))) { match = 0; break; }
+
+        char hex[48];
+        for (int i = 0; i < 8; i++) snprintf(hex + i * 2, 3, "%02x", dst[i]);
+        hex[16] = 0;
+
+        char out[420];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"call\":\"mdbg_call\",\"syscall\":%d,"
+                 "\"pid\":%d,\"rc\":%ld,\"status\":%d,\"len\":%lu,\"match\":%s,\"first8\":\"%s\","
+                 "\"usable\":%s}",
+                 PMS_SYS_MDBG_CALL, a.pid, rc, r.status, (unsigned long)r.len,
+                 match ? "true" : "false", hex,
+                 (rc >= 0 && match) ? "true" : "false");
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/engine/credprobe")) {
+        /* REVERSIBLE. Escalate with GoldHEN's own pair, test mdbg, restore, report. Guesses no
+           credential value; modifies no game memory. See scratchpad/credprobe.py for the why. */
+        unsigned char src[16], dst[16];
+        for (int i = 0; i < 16; i++) src[i] = (unsigned char)(0x5A ^ (i * 11));
+
+        /* mdbg self-read BEFORE (baseline - expected to fail as it always has). */
+        pms_mdbg_args_t a; pms_mdbg_res_t r;
+        memset(dst, 0, sizeof(dst));
+        a.pid = (int)getpid(); a.src = (unsigned long)src; a.dst = (unsigned long)dst; a.len = 16;
+        long before = pms_mdbg_op(PMS_MDBG_READ, &a, &r);
+
+        /* Escalate. jb is filled by the kernel; we treat it as opaque. */
+        gh_jailbreak_backup_t jb;
+        memset(&jb, 0, sizeof(jb));
+        long jbrc = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_JAILBREAK, &jb);
+
+        /* mdbg self-read WHILE escalated. */
+        memset(dst, 0, sizeof(dst));
+        long during = pms_mdbg_op(PMS_MDBG_READ, &a, &r);
+        int during_match = 1;
+        for (int i = 0; i < 16; i++) if (dst[i] != src[i]) { during_match = 0; break; }
+
+        /* mdbg CROSS-PROCESS read (read-only) while escalated: read a few bytes of another live
+           process. This is the real question - can we reach a process that is not us. No write. */
+        int other_pid = 0; char other_comm[24] = {0};
+        long xrc = 1; int xok = 0;
+        {
+            int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+            size_t need = 0;
+            if (!sysctl(mib, 4, NULL, &need, NULL, 0) && need) {
+                need += need / 8 + 8192;
+                char *b = (char *)malloc(need);
+                if (b && !sysctl(mib, 4, b, &need, NULL, 0)) {
+                    for (char *p = b; p < b + need; ) {
+                        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+                        if (ki->ki_structsize <= 0 || p + ki->ki_structsize > b + need) break;
+                        p += ki->ki_structsize;
+                        if ((int)ki->ki_pid != (int)getpid() && ki->ki_pid > 1) {
+                            other_pid = (int)ki->ki_pid;
+                            snprintf(other_comm, sizeof(other_comm), "%.19s", ki->ki_comm);
+                            break;
+                        }
+                    }
+                }
+                free(b);
+            }
+            if (other_pid > 0) {
+                unsigned char xbuf[16];
+                memset(xbuf, 0, sizeof(xbuf));
+                pms_mdbg_args_t xa; pms_mdbg_res_t xr;
+                /* read the other process's low code region read-only; 0x400000 is the PS4 no-ASLR
+                   image base and is a valid readable address in a normal process. */
+                xa.pid = other_pid; xa.src = 0x400000UL; xa.dst = (unsigned long)xbuf; xa.len = 16;
+                xrc = pms_mdbg_op(PMS_MDBG_READ, &xa, &xr);
+                xok = (xrc >= 0 && xr.status == 0);
+            }
+        }
+
+        /* Restore, immediately, from the untouched backup. */
+        long unrc = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_UNJAILBREAK, &jb);
+
+        /* mdbg self-read AFTER restore - so we can SEE we came back to the baseline. */
+        memset(dst, 0, sizeof(dst));
+        long after = pms_mdbg_op(PMS_MDBG_READ, &a, &r);
+
+        char out[900];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"reversible\":true,"
+                 "\"jailbreak_rc\":%ld,\"unjailbreak_rc\":%ld,"
+                 "\"authid\":\"0x%016lx\",\"caps0\":\"0x%016lx\",\"caps1\":\"0x%016lx\","
+                 "\"uid\":%u,"
+                 "\"mdbg_self_before\":%ld,\"mdbg_self_during\":%ld,\"during_match\":%s,"
+                 "\"mdbg_self_after\":%ld,"
+                 "\"xproc_pid\":%d,\"xproc_comm\":\"%s\",\"mdbg_xproc_rc\":%ld,"
+                 "\"mdbg_xproc_ok\":%s,"
+                 "\"unlocked\":%s}",
+                 jbrc, unrc,
+                 jb.cr_paid, jb.cr_caps[0], jb.cr_caps[1], jb.cr_uid,
+                 before, during, during_match ? "true" : "false", after,
+                 other_pid, other_comm, xrc, xok ? "true" : "false",
+                 (xok || during_match) ? "true" : "false");
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/engine/ghrwprobe")) {
+        /* THE DECISIVE READ-ONLY TEST. Nothing here is a destination for a game's memory. It asks
+           the gateway three questions and reports the raw answers; the console settles what they
+           mean, exactly as /api/engine/proclist settles the app-info layout. */
+
+        /* 1. The SDK version. A quirk worth noting: this errors on some builds while the info
+              command below works fine, so "is the gateway usable" is decided by the info call, not
+              by this. Reported for the record. */
+        long ver = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_VERSION, (void *)0);
+
+        /* 2. Our OWN process info. pid=0 in, so what comes back tells us whether the kernel FILLS
+              the caller's identity (pid is an OUTPUT - bad, means caller-only) or would have used
+              a pid we set (pid is an INPUT selector - good). */
+        gh_proc_info_t self;
+        memset(&self, 0, sizeof(self));
+        long self_rc = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_PROCESS_INFO, &self);
+
+        /* 2b. THE DISAMBIGUATOR, and it needs no game running. Ask about a DIFFERENT process by
+               pid - the first live pid that is not ours. If the answer describes THAT process, the
+               pid field is an input selector and the gateway is cross-process; if it comes back
+               describing us again, the pid is caller-only and no outside-in route exists here. */
+        int other_pid = 0;
+        char other_comm[24] = {0};
+        {
+            int mib2[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+            size_t need2 = 0;
+            if (!sysctl(mib2, 4, NULL, &need2, NULL, 0) && need2) {
+                need2 += need2 / 8 + 8192;
+                char *b2 = (char *)malloc(need2);
+                if (b2 && !sysctl(mib2, 4, b2, &need2, NULL, 0)) {
+                    for (char *p = b2; p < b2 + need2; ) {
+                        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+                        if (ki->ki_structsize <= 0 || p + ki->ki_structsize > b2 + need2) break;
+                        p += ki->ki_structsize;
+                        if ((int)ki->ki_pid != (int)getpid() && ki->ki_pid > 1) {
+                            other_pid = (int)ki->ki_pid;
+                            snprintf(other_comm, sizeof(other_comm), "%.19s", ki->ki_comm);
+                            break;
+                        }
+                    }
+                }
+                free(b2);
+            }
+        }
+        gh_proc_info_t other;
+        long other_rc = -1;
+        int other_is_selected = 0;
+        memset(&other, 0, sizeof(other));
+        if (other_pid > 0) {
+            other.pid = other_pid;
+            other_rc = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_PROCESS_INFO, &other);
+            /* the returned pid matches what we asked = pid is an input selector */
+            other_is_selected = (other_rc == 0 && other.pid == other_pid && other.pid != self.pid);
+        }
+
+        /* 3. The RUNNING GAME's process info, asked by pid. If the gateway is cross-process this
+              comes back describing the GAME (its titleid, its base_address); if the gateway only
+              ever sees the caller, it comes back describing ScePartyDaemon no matter what pid we
+              put in. Either answer is decisive and neither writes anything. */
+        int game_pid = 0;
+        char game_comm[24] = {0};
+        {
+            int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+            size_t need = 0;
+            int (*getappinfo)(pid_t, void *) =
+                (int (*)(pid_t, void *))dlsym_any("sceKernelGetAppInfo");
+            int (*bigapp)(void) = (int (*)(void))dlsym_any("sceSystemServiceGetAppIdOfBigApp");
+            int fg = bigapp ? bigapp() : -1;
+            if (fg > 0 && getappinfo && !sysctl(mib, 4, NULL, &need, NULL, 0) && need) {
+                need += need / 8 + 8192;
+                char *buf = (char *)malloc(need);
+                if (buf && !sysctl(mib, 4, buf, &need, NULL, 0)) {
+                    for (char *p = buf; p < buf + need; ) {
+                        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+                        if (ki->ki_structsize <= 0 || p + ki->ki_structsize > buf + need) break;
+                        p += ki->ki_structsize;
+                        unsigned char ai[0x100];
+                        memset(ai, 0, sizeof(ai));
+                        if (getappinfo(ki->ki_pid, ai)) continue;
+                        if (*(unsigned int *)ai != (unsigned int)fg) continue;
+                        game_pid = (int)ki->ki_pid;
+                        snprintf(game_comm, sizeof(game_comm), "%.19s", ki->ki_comm);
+                        break;
+                    }
+                }
+                free(buf);
+            }
+        }
+
+        gh_proc_info_t game;
+        long game_rc = -1;
+        int game_base_nonzero = 0, game_base_differs = 0;
+        memset(&game, 0, sizeof(game));
+        if (game_pid > 0) {
+            game.pid = game_pid;
+            game_rc = gh_orbis_syscall(GH_SDK_SYSCALL, GH_SDK_CMD_PROCESS_INFO, &game);
+            game_base_nonzero = (game.base_address != 0);
+            game_base_differs = (game.base_address != self.base_address);
+        }
+
+        /* Sanitise the text fields before they go into JSON: the structs are packed binary and a
+           stray control byte would break the document. Non-printables become '.'. */
+        char sn[48], stid[24], gn[48], gtid[24];
+        snprintf(sn, sizeof(sn), "%.39s", self.name);
+        snprintf(stid, sizeof(stid), "%.15s", self.titleid);
+        snprintf(gn, sizeof(gn), "%.39s", game.name);
+        snprintf(gtid, sizeof(gtid), "%.15s", game.titleid);
+        for (char *c = sn;   *c; c++) if (*c < 32 || *c > 126) *c = '.';
+        for (char *c = stid; *c; c++) if (*c < 32 || *c > 126) *c = '.';
+        for (char *c = gn;   *c; c++) if (*c < 32 || *c > 126) *c = '.';
+        for (char *c = gtid; *c; c++) if (*c < 32 || *c > 126) *c = '.';
+
+        char on[48], otid[24];
+        snprintf(on, sizeof(on), "%.39s", other.name);
+        snprintf(otid, sizeof(otid), "%.15s", other.titleid);
+        for (char *c = on;   *c; c++) if (*c < 32 || *c > 126) *c = '.';
+        for (char *c = otid; *c; c++) if (*c < 32 || *c > 126) *c = '.';
+
+        char out[1700];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"syscall\":%d,"
+                 "\"version_rc\":%ld,\"version\":\"0x%08lx\","
+                 "\"gateway_reachable\":%s,"
+                 "\"self\":{\"rc\":%ld,\"pid\":%d,\"name\":\"%s\",\"titleid\":\"%s\","
+                 "\"base\":\"0x%lx\"},"
+                 "\"other\":{\"asked_pid\":%d,\"comm\":\"%s\",\"rc\":%ld,\"pid\":%d,"
+                 "\"name\":\"%s\",\"titleid\":\"%s\",\"base\":\"0x%lx\","
+                 "\"is_selected\":%s},"
+                 "\"pid_is_input_selector\":%s,"
+                 "\"game\":{\"asked_pid\":%d,\"comm\":\"%s\",\"rc\":%ld,\"pid\":%d,"
+                 "\"name\":\"%s\",\"titleid\":\"%s\",\"base\":\"0x%lx\","
+                 "\"base_nonzero\":%s,\"base_differs_from_self\":%s},"
+                 "\"cross_process\":%s}",
+                 GH_SDK_SYSCALL,
+                 ver, (unsigned long)(ver & 0xffffffff),
+                 (self_rc == 0) ? "true" : "false",
+                 self_rc, self.pid, sn, stid, self.base_address,
+                 other_pid, other_comm, other_rc, other.pid, on, otid, other.base_address,
+                 other_is_selected ? "true" : "false",
+                 other_is_selected ? "true" : "false",
+                 game_pid, game_comm, game_rc, game.pid, gn, gtid, game.base_address,
+                 game_base_nonzero ? "true" : "false",
+                 game_base_differs ? "true" : "false",
+                 (game_pid > 0 && game_rc == 0 && game_base_nonzero && game_base_differs)
+                     ? "true" : "false");
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/engine/proclist")) {
+        /* THE SIGNATURE THIS FILE SAID IT WAS WAITING FOR. /api/health's comment records that
+           running_title stays empty because no PS4 signature for "which game is running" could be
+           read anywhere - it turns out the SDK ships a working sample that uses two of them, so
+           nothing here is inferred: sysctl{CTL_KERN,KERN_PROC,KERN_PROC_PROC,0} walked by each
+           record's OWN ki_structsize, and sceKernelGetAppInfo per pid.
+
+           THE LAYOUT IS REPORTED, NOT DECIDED. The two PS4 toolchains on this machine disagree
+           about where the title id sits inside the app-info block - offset 12 with 14 bytes in the
+           payload SDK's sample, offset 16 with 10 bytes in OpenOrbis - and they cannot both be
+           right for 13.52. So both candidates come back as raw text and the console settles it. A
+           wrong offset here yields a plausible wrong pid, and a wrong pid is what a memory write
+           must never be handed. */
+        int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0 };
+        size_t need = 0;
+        if (sysctl(mib, 4, NULL, &need, NULL, 0) || !need) {
+            send_json(fd, "{\"ok\":false,\"platform\":\"ps4\",\"error\":\"the kernel would not "
+                          "say how many processes there are\"}");
+            return;
+        }
+        need += need / 8 + 8192;                 /* the list can grow between the two calls */
+        char *buf = (char *)malloc(need);
+        if (!buf) { send_json(fd, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
+        if (sysctl(mib, 4, buf, &need, NULL, 0)) {
+            free(buf);
+            send_json(fd, "{\"ok\":false,\"platform\":\"ps4\",\"error\":\"the kernel would not "
+                          "list the processes\"}");
+            return;
+        }
+
+        /* sceKernelGetAppInfo is a libkernel export; 0x100 is far larger than either candidate
+           layout, so the call cannot write past it whichever one is right. */
+        int (*getappinfo)(pid_t, void *) = (int (*)(pid_t, void *))dlsym_any("sceKernelGetAppInfo");
+        int (*bigapp)(void) = (int (*)(void))dlsym_any("sceSystemServiceGetAppIdOfBigApp");
+        int fg = bigapp ? bigapp() : -1;
+
+        char *out = (char *)malloc(64000);
+        if (!out) { free(buf); send_json(fd, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
+        int n = snprintf(out, 64000,
+                         "{\"ok\":true,\"platform\":\"ps4\",\"foreground_app_id\":%d,"
+                         "\"have_getappinfo\":%s,\"procs\":[", fg,
+                         getappinfo ? "true" : "false");
+        int first = 1, count = 0;
+        for (char *p = buf; p < buf + need && count < 400; ) {
+            struct kinfo_proc *ki = (struct kinfo_proc *)p;
+            if (ki->ki_structsize <= 0 || p + ki->ki_structsize > buf + need) break;
+            p += ki->ki_structsize;
+            count++;
+
+            unsigned char info[0x100];
+            memset(info, 0, sizeof(info));
+            int got = (getappinfo && !getappinfo(ki->ki_pid, info)) ? 1 : 0;
+            unsigned int app_id = got ? *(unsigned int *)info : 0u;
+
+            /* Both candidates, printed as text and nothing else. */
+            char a12[16], a16[12];
+            memset(a12, 0, sizeof(a12)); memset(a16, 0, sizeof(a16));
+            for (int i = 0; i < 14; i++) { unsigned char c = info[12 + i]; a12[i] = (c >= 32 && c < 127) ? (char)c : 0; }
+            for (int i = 0; i < 10; i++) { unsigned char c = info[16 + i]; a16[i] = (c >= 32 && c < 127) ? (char)c : 0; }
+
+            if (n > 62000) break;
+            n += snprintf(out + n, 64000 - n,
+                          "%s{\"pid\":%d,\"comm\":\"%.19s\",\"app_id\":%u,\"info\":%s,"
+                          "\"tid_at12\":\"%.14s\",\"tid_at16\":\"%.10s\"}",
+                          first ? "" : ",", (int)ki->ki_pid, ki->ki_comm, app_id,
+                          got ? "true" : "false", a12, a16);
+            first = 0;
+        }
+        snprintf(out + n, 64000 - n, "],\"count\":%d}", count);
+        send_json(fd, out);
+        free(out);
+        free(buf);
+        return;
+    }
+    /* ---- CHEATS AND PATCHES, answered for real ------------------------------------------
+     * The engine is ps5-app/onconsole/server.c's, copied into cheat_core.h and kept in sync by
+     * tools/ps4_sync_cheat_core.py. Memory is reached through the in-game agent - see the client
+     * above it. When no game is running (or the agent is not in the one that is), everything here
+     * still LISTS; only toggling needs the agent, which is exactly how the PS5 panel behaves with
+     * a game closed.
+     */
+    if (!strcmp(path, "/api/cheat/list")) {
+        /* /api/cheat/list?file=<path>[&pid=&base=]  -> the mods inside one cheat file.
+           THE ROUTE THE MODS PANEL IS BUILT FROM. The companion composes its answer from find +
+           list + patches; without this one the panel reported "no cheats" for every PS4 title
+           while the console itself listed them perfectly. */
+        char file[600] = {0};
+        if (!qparam(rawpath, "file", file, sizeof(file)) || !file[0]) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need file\"}"); return;
+        }
+        char lp[16] = {0}, lb[32] = {0};
+        qparam(rawpath, "pid", lp, sizeof(lp));
+        qparam(rawpath, "base", lb, sizeof(lb));
+        int lpid = lp[0] ? atoi(lp) : 0;
+        /* WHAT THE CALLER SAID, THEN WHAT THE AGENT MEASURED, THEN the PS4's no-ASLR load address -
+           which is what every offset in our library is relative to when a game does load there. It
+           used to jump straight to that address, which quietly turned "I do not know this game's
+           base" into "this game is at 0x400000". See agent_image_base(). */
+        intptr_t lbase = lb[0] ? (intptr_t)strtoull(lb, NULL, 0) : 0;
+        if (!lbase && lpid) lbase = agent_image_base();
+        if (!lbase) lbase = (intptr_t)PATCH_NO_ASLR;
+        int non_json = 0;
+        char *json = cheat_load_doc(file, &non_json);
+        if (!json) { send_json(fd, "{\"ok\":false,\"error\":\"cannot read file\"}"); return; }
+        char title[160] = {0}, id[32] = {0}, ver[32] = {0}, proc[64] = {0};
+        json_str_after(json, "name", title, sizeof(title));
+        json_str_after(json, "id", id, sizeof(id));
+        json_str_after(json, "version", ver, sizeof(ver));
+        json_str_after(json, "process", proc, sizeof(proc));
+        const char *fmt = path_ext_is(file, ".shn") ? "shn"
+                        : path_ext_is(file, ".mc4") ? "mc4" : "json";
+        cheat_entry_t *ents = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
+        size_t OUTSZ = 65536;
+        char *out = (char *)malloc(OUTSZ);
+        if (!out || !ents) { free(out); free(ents); free(json); send_json(fd, "{\"ok\":false}"); return; }
+        char et[200], ei[64], ev[64], ep[128];
+        json_escape(title, et, sizeof(et)); json_escape(id, ei, sizeof(ei));
+        json_escape(ver, ev, sizeof(ev));   json_escape(proc, ep, sizeof(ep));
+        size_t len = 0;
+        len += snprintf(out + len, OUTSZ - len,
+                        "{\"ok\":true,\"title\":\"%s\",\"id\":\"%s\",\"version\":\"%s\","
+                        "\"process\":\"%s\",\"format\":\"%s\",\"mods\":[", et, ei, ev, ep, fmt);
+        const char *from = mods_array_start(json);
+        for (int i = 0; from && i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
+            const char *end = NULL;
+            const char *blk = next_mod_block(from, &end);
+            if (!blk) break;
+            from = end;
+            char nm[240] = {0};
+            json_str_after_lim(blk, end, "name", nm, sizeof(nm));   /* this block's name */
+            int dropped = 0;
+            int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
+            char esc2[500]; json_escape(nm, esc2, sizeof(esc2));
+            const char *stt = (lpid > 0) ? cheat_mod_state_blk(json, blk, end, (pid_t)lpid, lbase,
+                                                               non_json)
+                                         : "unknown";
+            len += snprintf(out + len, OUTSZ - len,
+                            "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"dropped\":%d,"
+                            "\"state\":\"%s\",\"on\":%s}",
+                            i ? "," : "", i, esc2, n, dropped, stt,
+                            strcmp(stt, "on") == 0 ? "true" : "false");
+        }
+        char idbuf[24] = {0};
+        snprintf(idbuf, sizeof(idbuf), "%s", id);
+        char vers[600] = "[]";
+        if (idbuf[0]) cheat_versions_json(idbuf, vers, sizeof(vers));
+        /* A MASTER CODE CHANGES WHAT TURNING EVERYTHING OFF MEANS - see cheat_master_info. */
+        int m_rem = 0, m_has = cheat_master_info(json, &m_rem);
+        snprintf(out + len, OUTSZ - len, "],\"versions\":%s,\"master\":%s,\"master_removable\":%s}",
+                 vers, m_has ? "true" : "false", m_rem ? "true" : "false");
+        send_json(fd, out);
+        free(out); free(ents); free(json);
+        return;
+    }
+    if (!strcmp(path, "/api/patch/apply") || !strcmp(path, "/api/patch/revert")) {
+        char tid[24] = {0}, ib[16] = {0}, fb[8] = {0}, db[8] = {0};
+        if (!qparam(rawpath, "title", tid, sizeof(tid))) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need title\"}"); return;
+        }
+        qparam(rawpath, "index", ib, sizeof(ib));
+        qparam(rawpath, "force", fb, sizeof(fb));
+        qparam(rawpath, "dry", db, sizeof(db));
+        char o[1400];
+        ps4_patch_action_json(tid, ib[0] ? atoi(ib) : 0, fb[0] ? atoi(fb) : 0,
+                              db[0] ? atoi(db) : 0,
+                              !strcmp(path, "/api/patch/revert"), o, sizeof(o));
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/apply")) {
+        /* /api/cheat/apply?file=&mod=&on=0|1&pid=&base=0x400000[&force=1][&name=] */
+        char file[600] = {0}, mb[16] = {0}, ob[8] = {0}, pb[16] = {0}, bb[32] = {0},
+             fb[8] = {0}, nm[160] = {0};
+        if (!qparam(rawpath, "file", file, sizeof(file)) || !qparam(rawpath, "pid", pb, sizeof(pb))) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need file and pid\"}"); return;
+        }
+        qparam(rawpath, "mod", mb, sizeof(mb)); qparam(rawpath, "on", ob, sizeof(ob));
+        qparam(rawpath, "base", bb, sizeof(bb)); qparam(rawpath, "force", fb, sizeof(fb));
+        qparam(rawpath, "name", nm, sizeof(nm));
+        /* &check=1 RUNS THE WHOLE DECISION AND WRITES NOTHING - see cheat_apply_blk's check_only. */
+        char ckb[8] = {0};
+        qparam(rawpath, "check", ckb, sizeof(ckb));
+        int check_only = ckb[0] ? atoi(ckb) : 0;
+        int idx = mb[0] ? atoi(mb) : 0, want = ob[0] ? atoi(ob) : 1, force = fb[0] ? atoi(fb) : 0;
+        pid_t pid = (pid_t)atoi(pb);
+        /* Same order as /api/cheat/list, and for the same reason - see agent_image_base(). */
+        intptr_t base = bb[0] ? (intptr_t)strtoull(bb, NULL, 0) : 0;
+        if (!base) base = agent_image_base();
+        if (!base) base = (intptr_t)PATCH_NO_ASLR;
+        char detail[200] = {0};
+        int rc = cheat_apply_mod(file, idx, want, pid, base, force, check_only,
+                                 detail, sizeof(detail));
+        char gtitle[24] = {0};
+        running_title_id(gtitle, sizeof(gtitle));
+        const char *what = nm[0] ? nm : "Cheat";
+        /* NOTHING HAPPENED, SO NOTHING IS ANNOUNCED. A toast for a question is noise. */
+        if (!check_only) cheat_result_toast(what, want, rc, detail, gtitle);
+        char ed[300], out[1100];
+        /* A SENTENCE FOR THE OWNER, alongside the numbers for us. Without it errText() in the page
+           falls through to `detail` and toasts "entries=3 written=0 skipped=0 failed=3". It is left
+           out entirely when there is nothing to explain, so a success carries no message at all. */
+        char msg[420] = {0}, emsg[500];
+        cheat_rc_message(rc, detail, want, msg, sizeof(msg));
+        json_escape(detail, ed, sizeof(ed));
+        json_escape(msg, emsg, sizeof(emsg));
+        snprintf(out, sizeof(out),
+                 "{\"ok\":%s,\"rc\":%d,\"mod\":%d,\"on\":%d,\"pid\":%d,\"base\":\"0x%llx\","
+                 "\"detail\":\"%s\"%s%s%s}",
+                 rc >= 0 ? "true" : "false", rc, idx, want, (int)pid,
+                 (unsigned long long)base, ed,
+                 msg[0] ? ",\"message\":\"" : "", msg[0] ? emsg : "", msg[0] ? "\"" : "");
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find/status")) {
+        char out[2048];
+        sig_status_json(out, sizeof(out));
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find/cancel")) {
+        sig_cancel();
+        send_json(fd, "{\"ok\":true,\"cancelled\":true}");
+        return;
+    }
+    if (!strcmp(path, "/api/mem/find")) {
+        /* THE SIGNATURE SEARCH. Read-only, one at a time, in its own thread - see sig_start. This is
+           the primitive that porting a cheat by signature, the mask patch lines and finding an address
+           from scratch all need, and none of them can exist without it.
+           Offsets are IMAGE-RELATIVE, like a cheat file's. */
+        char pt[200] = {0}, pb[16] = {0}, bb[32] = {0}, f1[24] = {0}, f2[24] = {0};
+        if (!qparam(rawpath, "pattern", pt, sizeof(pt)) || !pt[0]) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need a pattern, e.g. pattern=488B05????????89\"}");
+            return;
+        }
+        qparam(rawpath, "pid", pb, sizeof(pb));
+        qparam(rawpath, "base", bb, sizeof(bb));
+        qparam(rawpath, "from", f1, sizeof(f1));
+        qparam(rawpath, "to", f2, sizeof(f2));
+        pid_t spid = (pid_t)atoi(pb);
+        intptr_t sbase = bb[0] ? (intptr_t)strtoull(bb, NULL, 0) : 0;
+        long long sfrom = f1[0] ? strtoll(f1, NULL, 0) : 0;
+        long long sto = f2[0] ? strtoll(f2, NULL, 0) : 0;
+                /* WHAT "THE WHOLE MODULE" MEANS HERE. The agent measures its own base and size and reports
+           both, so neither is guessed; the no-ASLR address is the last resort it always was. */
+        if (!spid || !sbase) {
+            char rtid[24] = {0};
+            pid_t apid = 0; intptr_t abase = 0;
+            if (running_game(rtid, sizeof(rtid), &apid, &abase) == 1) {
+                if (!spid) spid = apid;
+                if (!sbase) sbase = abase;
+            }
+        }
+        if (!sbase) sbase = agent_image_base();
+        if (!sbase) sbase = (intptr_t)PATCH_NO_ASLR;
+        if (sto <= 0) {
+            long long sz = agent_image_size();
+            sto = sz > 0 ? sz : (long long)(32 << 20);
+        }
+        int rc = sig_start(pt, spid, sbase, sfrom, sto);
+        const char *why = rc == 0 ? "" :
+                          rc == -1 ? "a search is already running - read /api/mem/find/status" :
+                          rc == -2 ? "that is not a usable signature: at least 4 bytes, 3 of them real" :
+                          rc == -3 ? "that range is empty, or wider than a single search will sweep" :
+                          rc == -5 ? "there is no game running to search" :
+                                     "could not start the search thread";
+        char o[420], ew[300];
+        json_escape(why, ew, sizeof(ew));
+        snprintf(o, sizeof(o),
+                 "{\"ok\":%s,\"rc\":%d,\"pid\":%d,\"base\":\"0x%llx\",\"from\":%lld,\"to\":%lld,"
+                 "\"span_guessed\":%s%s%s%s}",
+                 rc == 0 ? "true" : "false", rc, (int)spid, (unsigned long long)sbase, sfrom, sto,
+                 agent_image_size() > 0 ? "false" : "true",
+                 why[0] ? ",\"error\":\"" : "", why[0] ? ew : "", why[0] ? "\"" : "");
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/read")) {
+        /* Read-only, and the one call that proves the in-game agent is working before any cheat
+           is written. Same shape the PS5 answers with. */
+        char pb[16] = {0}, ab[32] = {0}, lb[16] = {0};
+        if (!qparam(rawpath, "pid", pb, sizeof(pb)) || !qparam(rawpath, "addr", ab, sizeof(ab))) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need pid and addr\"}"); return;
+        }
+        qparam(rawpath, "len", lb, sizeof(lb));
+        int pid = atoi(pb);
+        intptr_t addr = (intptr_t)strtoull(ab, NULL, 0);
+        int len = lb[0] ? atoi(lb) : 16;
+        if (len < 1) len = 1;
+        if (len > 256) len = 256;
+        unsigned char buf[256];
+        int rc = mem_read((pid_t)pid, addr, buf, (size_t)len);
+        char hex[520]; hex[0] = 0;
+        if (rc == 0) for (int i = 0; i < len; i++) snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02X", buf[i]);
+        char out[700];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":%s,\"rc\":%d,\"pid\":%d,\"addr\":\"0x%llx\",\"len\":%d,\"hex\":\"%s\"}",
+                 rc == 0 ? "true" : "false", rc, pid, (unsigned long long)addr, len, hex);
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/mem/write")) {
+        /* /api/mem/write?pid=&addr=&hex=[&expect=]
+           THE EXPECT GATE IS THE WHOLE POINT, and it is the same one the cheat engine uses: write
+           only if what is there now is what the caller says it should be. Without it this is a
+           hand-loaded gun pointed at a running game. `expect` is optional only because the PS5's
+           is; a caller that omits it is saying it has already read the bytes itself. */
+        char pb[16] = {0}, ab[32] = {0}, hb[600] = {0}, eb[600] = {0};
+        if (!qparam(rawpath, "pid", pb, sizeof(pb)) || !qparam(rawpath, "addr", ab, sizeof(ab)) ||
+            !qparam(rawpath, "hex", hb, sizeof(hb))) {
+            send_json(fd, "{\"ok\":false,\"error\":\"need pid, addr and hex\"}"); return;
+        }
+        qparam(rawpath, "expect", eb, sizeof(eb));
+        unsigned char want[256], expect[256], cur[256];
+        int wl = hex2bytes(hb, want, sizeof(want));
+        if (wl <= 0) { send_json(fd, "{\"ok\":false,\"error\":\"bad hex\"}"); return; }
+        int el = eb[0] ? hex2bytes(eb, expect, sizeof(expect)) : 0;
+        if (eb[0] && el != wl) {
+            send_json(fd, "{\"ok\":false,\"error\":\"expect and hex are different lengths\"}");
+            return;
+        }
+        pid_t pid = (pid_t)atoi(pb);
+        intptr_t addr = (intptr_t)strtoull(ab, NULL, 0);
+        if (!ADDR_OK(addr)) { send_json(fd, "{\"ok\":false,\"error\":\"address out of range\"}"); return; }
+        if (el > 0) {
+            if (mem_read(pid, addr, cur, (size_t)el) != 0) {
+                send_json(fd, "{\"ok\":false,\"error\":\"cannot read that address\"}"); return;
+            }
+            if (memcmp(cur, expect, (size_t)el) != 0) {
+                char gh[520]; gh[0] = 0;
+                for (int i = 0; i < el; i++) snprintf(gh + i * 2, sizeof(gh) - i * 2, "%02X", cur[i]);
+                char o[800];
+                snprintf(o, sizeof(o),
+                         "{\"ok\":false,\"error\":\"expect_mismatch\",\"addr\":\"0x%llx\","
+                         "\"found\":\"%s\",\"message\":\"Nothing was written - that address "
+                         "does not hold the bytes you expected.\"}",
+                         (unsigned long long)addr, gh);
+                send_json(fd, o);
+                return;
+            }
+        }
+        int rc = mem_write(pid, addr, want, (size_t)wl);
+        char o[400];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":%s,\"rc\":%d,\"pid\":%d,\"addr\":\"0x%llx\",\"len\":%d,"
+                 "\"gated\":%s}",
+                 rc == 0 ? "true" : "false", rc, (int)pid, (unsigned long long)addr, wl,
+                 el > 0 ? "true" : "false");
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/rescan") || !strcmp(path, "/api/cheats/rescan")) {
+        /* The Settings panel's Rescan button, and the thing that makes an FTP drop useful. It used
+           to hit the "not implemented on the PS4 yet" catch-all below. */
+        mkdir(CHEAT_ROOT, 0777);
+        mkdir(CHEAT_JSON_DIR, 0777);
+        mkdir(CHEAT_SHN_DIR, 0777);
+        mkdir(CHEAT_MC4_DIR, 0777);
+        mkdir(CHEAT_PATCH_DIR, 0777);
+        mkdir(CHEAT_INBOX_DIR, 0777);
+        int filed = cheat_intake_all();
+        titles_cache_drop();
+        /* NEW CHEAT FILES CAN CHANGE WHO SHOULD BE ARMED - a title that had nothing a moment ago may
+           have something now. Writes nothing when the answer is unchanged. */
+        if (filed > 0) (void)agent_autoarm_reconcile();
+        char o[400];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"filed\":%d,\"drop_here\":\"%s\"}",
+                 filed, CHEAT_INBOX_DIR);
+        send_json(fd, o);
+        notify_cheats_filed(filed);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/library")) {
+        /* How many of each kind are on this console - the one honest answer to "did my FTP copy
+           actually land". The claim that the panel shows this in Settings has been removed: nothing
+           in web/index.html fetches any library count, so it was describing UI that does not exist. */
+        int nj = count_dir(CHEAT_JSON_DIR), nh = count_dir(CHEAT_SHN_DIR);
+        int nm = count_dir(CHEAT_MC4_DIR), np = count_dir(CHEAT_PATCH_DIR);
+        /* DERIVED, not asserted. "ready" was a literal, so a console with an entirely empty library
+           reported the same status as a full one. Modelled on the PS5's g_lib_status. */
+        const char *lib_status = (nj + nh + nm + np) ? "ready" : "empty";
+        char o[700];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"status\":\"%s\",\"json\":%d,"
+                 "\"shn\":%d,\"mc4\":%d,\"patches\":%d,\"total\":%d,\"root\":\"%s\","
+                 "\"drop_here\":\"%s\",\"shipped\":false}",
+                 lib_status, nj, nh, nm, np, nj + nh + nm + np, CHEAT_ROOT, CHEAT_INBOX_DIR);
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/running")) {
+        /* Same shape the PS5 answers with, and the same keys the companion reads - see the note
+           in tools about the one field that differs and why.
+
+           THE TITLE DOES NOT DEPEND ON THE HELPER. running_title_id() asks the console (foreground
+           app id, then a process walk) and is right whether or not our agent is in the game. The
+           pid and base DO depend on it, because only code inside the process can report them, so
+           they come back zero when the helper is not there and `can_cheat` says so plainly. */
+        char tid[24] = {0};
+        running_title_id(tid, sizeof(tid));
+        if (!tid[0]) {
+            send_json(fd, "{\"ok\":true,\"running\":false,\"platform\":\"ps4\"}");
+            return;
+        }
+
+        /* The pid and image base come from the in-game agent, which only exists once the game has
+           loaded it. When it is there, can_cheat is true and cheats can be toggled; when it is not,
+           listing still works and can_cheat is false with `why` naming the reason the panel can
+           act on. */
+        pid_t pid = 0;
+        intptr_t base = 0;
+        char info[512];
+        char agent_tid[16] = {0};
+        int agrees = 1;
+        int have_agent = (agent_info(info, sizeof(info)) == 0);
+        if (have_agent) {
+            const char *b = strstr(info, "\"base\":\"0x");
+            const char *p = strstr(info, "\"pid\":");
+            if (b) base = (intptr_t)strtoull(b + 10, NULL, 16);
+            if (p) pid  = (pid_t)strtol(p + 6, NULL, 10);
+
+            /* THIS ROUTE DID NOT COMPARE, and it is the one the panel decides can_cheat from. It
+               took the title from the console and the pid and base from the agent and never asked
+               whether they describe the same game - so an agent still answering from a game the
+               owner has just closed would have reported the NEW title as ready to cheat, with the
+               OLD game's pid and base. The first toggle then writes into whatever still holds that
+               pid. running_game already refuses this; the route that gates the button did not.
+
+               The reason reported stays "helper_not_loaded" rather than a new value: for the title
+               being asked about, that is literally true - our helper is not in THAT game - and it
+               keeps the panel's existing wording honest without inventing a state the UI has no
+               sentence for. agent_title is added alongside so the disagreement is still visible to
+               anyone reading the route. */
+            if (agent_title_agrees(info, tid, agent_tid, sizeof(agent_tid)) == 0) {
+                agrees = 0;
+                have_agent = 0;
+                pid = 0;
+                base = 0;
+            }
+        }
+
+        char ver[48] = {0};   /* 48: see the note on iver below - a version is a filename key */
+        qparam(rawpath, "version", ver, sizeof(ver));
+        if (!ver[0]) installed_ver_for(tid, ver, sizeof(ver));
+        char pick[600]; const char *why = "none";
+        int exact = cheat_pick_file(tid, ver, pick, sizeof(pick), &why);
+        /* Why can't a cheat be written, if it can't: helper not loaded into this game yet, or an
+           agent that answered without an image base. Empty when everything is ready. */
+        const char *blocked = have_agent ? (base ? "" : "no_base") : "helper_not_loaded";
+        char ef[700], o[1300], eat[40];
+        json_escape(pick, ef, sizeof(ef));
+        json_escape(agent_tid, eat, sizeof(eat));
+        snprintf(o, sizeof(o),
+                 "{\"ok\":true,\"running\":true,\"platform\":\"ps4\",\"title_id\":\"%s\","
+                 "\"pid\":%d,\"base\":\"0x%llx\",\"cheat_file\":\"%s\",\"match\":\"%s\","
+                 "\"exact\":%s,\"can_cheat\":%s,\"helper\":%s,\"why\":\"%s\","
+                 "\"agent_title\":\"%s\",\"titles_agree\":%s}",
+                 tid, (int)pid, (unsigned long long)base, ef, why,
+                 exact ? "true" : "false",
+                 (have_agent && base) ? "true" : "false",
+                 have_agent ? "true" : "false", blocked,
+                 eat, agrees ? "true" : "false");
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/engine/agent")) {
+        /* The real state of the load-safe agent, read from the console. `agent_present` is the one
+           that matters most: it is true only when the agent's socket answers, i.e. it is actually
+           inside a running game and ready. `installed` = the file is on the console; `listed`/
+           `enabled` = named in plugins.ini ([default] or a per-title section). */
+        char info[512];
+        int rc = agent_info(info, sizeof(info));
+        char rt[24] = {0};
+        running_title_id(rt, sizeof(rt));
+        struct stat pst;
+        int installed = (stat(PMS_AGENT_PRX, &pst) == 0 && pst.st_size > 0);
+        /* WHICH SECTIONS ARM IT, not just whether something does. A per-title arm and an
+           every-game arm have very different blast radii, and "enabled":true said nothing about
+           which one is in force - so the one instrument for "is this module wired into a game"
+           could not answer the question anybody actually asks of it. */
+        agent_arm_t arm;
+        agent_scan_arm(&arm);
+        int en = (arm.armed_default || arm.armed_titles) ? 1 : (arm.listed ? 0 : -1);
+        char armt[200];
+        json_escape(arm.titles, armt, sizeof(armt));
+        int aa = autoarm_enabled();
+        char o[1300];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"agent_present\":%s,\"rc\":%d,"
+                 "\"installed\":%s,\"enabled\":%s,\"listed\":%s,\"running_title\":\"%s\","
+                 "\"armed_default\":%s,\"armed_titles\":%d,\"armed_for\":\"%s\","
+                 "\"autoarm\":%s,"
+                 "\"port\":%d,\"info\":%s,\"plugin\":\"%s\",\"config\":\"%s\"}",
+                 rc == 0 ? "true" : "false", rc,
+                 installed ? "true" : "false",
+                 en == 1 ? "true" : "false",
+                 en >= 0 ? "true" : "false",
+                 rt,
+                 arm.armed_default ? "true" : "false", arm.armed_titles, armt,
+                 aa ? "true" : "false",
+                 AGENT_PORT,
+                 (rc == 0 && info[0] == '{') ? info : "null",
+                 PMS_AGENT_PRX, GH_PLUGINS_INI);
+        send_json(fd, o);
+        return;
+    }
+    if (!strncmp(path, "/api/mods/", 10)) {
+        const char *rest = path + 10;
+        char tid[24] = {0};
+        size_t ti = 0;
+        while (rest[ti] && rest[ti] != '/' && ti < sizeof(tid) - 1) { tid[ti] = rest[ti]; ti++; }
+        tid[ti] = 0;
+        for (char *c = tid; *c; c++) {
+            if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+                  (*c >= '0' && *c <= '9') || *c == '-' || *c == '_')) { *c = 0; break; }
+        }
+        if (!tid[0]) { send_json(fd, "{\"ok\":false,\"reachable\":true,\"error\":\"bad title\"}"); return; }
+
+        /* TWO VARIABLES, AND THE DISTINCTION IS LOAD-BEARING. `iver` is what is actually installed
+           on this console: it feeds installed_version, the compatible test and patches_json, and none
+           of those may report what the caller ASKED for as though it were a fact about the console.
+           `pver` is the version the panel's picker selected, and all it does is choose which cheat
+           file to read. Collapsing the two is exactly how /api/cheat/find came to report a requested
+           version as the installed one. */
+        char iver[48] = {0};
+        installed_ver_for(tid, iver, sizeof(iver));
+        char pver[48] = {0};
+        if (!qparam(rawpath, "version", pver, sizeof(pver))) pver[0] = 0;
+
+        /* ?state=1 - just the live on/off of each mod, which is the refresh the panel fires after
+           every toggle. The page has always sent it and this console has always ignored it,
+           composing the entire document (patches, the version list, more file reads) to answer a
+           question about a handful of booleans. */
+        char stq[8] = {0};
+        int state_only = (qparam(rawpath, "state", stq, sizeof(stq)) && stq[0] && stq[0] != '0');
+
+        char pick[600]; const char *why = "none";
+        int exact = cheat_pick_file(tid, pver[0] ? pver : iver, pick, sizeof(pick), &why);
+        /* A picked version the library has no file for is refused, not silently served from a
+           neighbour: the caller is about to apply a mod by its index into what it was shown. */
+        if (pver[0] && !exact) {
+            char ev[110], o[600];
+            json_escape(pver, ev, sizeof(ev));
+            snprintf(o, sizeof(o),
+                     "{\"ok\":false,\"reachable\":true,\"platform\":\"ps4\",\"title_id\":\"%s\","
+                     "\"installed_version\":\"%s\",\"selected_version\":\"%s\","
+                     "\"error\":\"no_cheat_file_for_version\",\"mods\":[],\"patches\":[],"
+                     "\"candidates\":[]}", tid, iver, ev);
+            send_json(fd, o);
+            return;
+        }
+        if (!pick[0]) {
+            /* No cheat file is not the same as nothing to show: a title can have game patches and
+               no cheats at all, and returning an empty patches[] here hid them completely. */
+            size_t PSZ = 32768;
+            char *pj = (char *)malloc(PSZ);
+            if (pj) patches_json(tid, iver, pj, PSZ);
+            int has_patch = pj && pj[0] == '[' && pj[1] != ']';
+            size_t OSZ = PSZ + 400;
+            char *o = (char *)malloc(OSZ);
+            if (!o) { free(pj); send_json(fd, "{\"ok\":false,\"reachable\":true}"); return; }
+            snprintf(o, OSZ,
+                     "{\"ok\":%s,\"reachable\":true,\"engine\":\"mutant\",\"platform\":\"ps4\","
+                     "\"error\":\"%s\",\"title_id\":\"%s\",\"installed_version\":\"%s\","
+                     "\"selected_version\":\"%s\","
+                     "\"mods\":[],\"patches\":%s,\"candidates\":[]}",
+                     has_patch ? "true" : "false",
+                     has_patch ? "" : "no_local_cheat_found",
+                     tid, iver, pver, pj ? pj : "[]");
+            send_json(fd, o);
+            free(o); free(pj);
+            return;
+        }
+
+        char rtid[24] = {0};
+        pid_t rpid = 0; intptr_t rbase = 0;
+        int live = (running_game(rtid, sizeof(rtid), &rpid, &rbase) == 0 && !strcmp(rtid, tid));
+
+        /* IS THE HELPER ALREADY SET UP FOR THIS TITLE? The panel cannot tell "you need to switch it
+           on" from "it is on and will load when you start the game" without this, so it offered a
+           button for something the app had already done. */
+        int hv_autoarm = autoarm_enabled();
+        int hv_armed = 0;
+        {
+            agent_arm_t aa;
+            agent_scan_arm(&aa);
+            if (aa.armed_default) hv_armed = 1;
+            else if (aa.titles[0]) {
+                const char *p2 = aa.titles;
+                size_t tl = strlen(tid);
+                while (*p2 && !hv_armed) {
+                    const char *e2 = strchr(p2, ',');
+                    size_t seg = e2 ? (size_t)(e2 - p2) : strlen(p2);
+                    if (seg == tl && !strncmp(p2, tid, tl)) hv_armed = 1;
+                    p2 = e2 ? e2 + 1 : p2 + seg;
+                }
+            }
+        }
+
+        int non_json = 0;
+        char *doc = cheat_load_doc(pick, &non_json);
+        if (!doc) { send_json(fd, "{\"ok\":false,\"reachable\":true,\"error\":\"cannot read cheat file\"}"); return; }
+        char fver[32] = {0};
+        json_str_after(doc, "version", fver, sizeof(fver));
+        const char *fmt = path_ext_is(pick, ".shn") ? "shn"
+                        : path_ext_is(pick, ".mc4") ? "mc4" : "json";
+        /* COMPATIBLE WITH WHAT IS INSTALLED - not with what was asked for. `exact` is exact against
+           the version in the REQUEST, so including it here meant that deliberately picking another
+           version reported compatible:true and the panel painted it green with "matched", hiding the
+           mismatch note entirely. The question this field answers is whether the cheat file suits the
+           game on the console, and only iver can answer that. */
+        int compatible = (!iver[0]) || (fver[0] && !strcmp(fver, iver));
+        const char *reason = why;
+        if (!iver[0] && !strcmp(why, "other version")) reason = "installed version unknown";
+
+        cheat_entry_t *ents = (cheat_entry_t *)malloc(CHEAT_ENTS_BYTES);
+        size_t OUTSZ = 65536;
+        char *out = (char *)malloc(OUTSZ);
+        if (!out || !ents) { free(out); free(ents); free(doc); send_json(fd, "{\"ok\":false}"); return; }
+        const char *bn = strrchr(pick, '/');
+        bn = bn ? bn + 1 : pick;
+        char ep[700], eb[220];
+        json_escape(pick, ep, sizeof(ep));
+        json_escape(bn, eb, sizeof(eb));
+        size_t len = 0;
+        len += snprintf(out + len, OUTSZ - len,
+            "{\"ok\":true,\"reachable\":true,\"engine\":\"mutant\",\"platform\":\"ps4\","
+            "\"title_id\":\"%s\","
+            "\"installed_version\":\"%s\",\"selected_version\":\"%s\","
+            "\"file_version\":\"%s\",\"file\":\"%s\","
+            "\"path\":\"%s\",\"format\":\"%s\",\"compatible\":%s,\"reason\":\"%s\","
+            "\"running\":%s,\"pid\":%d,\"base\":\"0x%llx\","
+            "\"helper_autoarm\":%s,\"helper_armed\":%s,\"mods\":[",
+            tid, iver, pver, fver, eb, ep, fmt, compatible ? "true" : "false", reason,
+            live ? "true" : "false", live ? (int)rpid : 0,
+            (unsigned long long)(live ? rbase : 0),
+            hv_autoarm ? "true" : "false", hv_armed ? "true" : "false");
+        const char *from = mods_array_start(doc);
+        for (int i = 0; from && i < CHEAT_MAX_MODS && len < OUTSZ - 1024; i++) {
+            const char *end = NULL;
+            const char *blk = next_mod_block(from, &end);
+            if (!blk) break;
+            from = end;
+            char nm[240] = {0};
+            json_str_after_lim(blk, end, "name", nm, sizeof(nm));   /* this block's name */
+            int dropped = 0;
+            int n = parse_mod_entries_ex(blk, end, ents, CHEAT_MAX_ENTRIES, &dropped);
+            char en[500]; json_escape(nm, en, sizeof(en));
+            const char *stt = live ? cheat_mod_state_blk(doc, blk, end, rpid, rbase, non_json)
+                                   : "unknown";
+            len += snprintf(out + len, OUTSZ - len,
+                "%s{\"index\":%d,\"name\":\"%s\",\"entries\":%d,\"dropped\":%d,\"state\":\"%s\","
+                "\"on\":%s,\"conflict\":%s,\"can_toggle\":%s,\"conflicts_with\":[]}",
+                i ? "," : "", i, en, n, dropped, stt,
+                !strcmp(stt, "on") ? "true" : "false",
+                !strcmp(stt, "partial") ? "true" : "false",
+                live ? "true" : "false");
+        }
+        /* INITIALISED, because state_only skips the call that fills it and this is formatted with
+           %s straight into the reply - uninitialised stack there would put garbage inside "versions"
+           and JSON.parse would throw, blanking the panel. */
+        char vers[600] = "[]";
+        char *pj = NULL;
+        if (!state_only) {
+            cheat_versions_json(tid, vers, sizeof(vers));
+            size_t left = (len + 800 < OUTSZ) ? (OUTSZ - len - 800) : 0;
+            size_t PSZ = left > 24576 ? 24576 : left;
+            pj = (PSZ > 64) ? (char *)malloc(PSZ) : NULL;
+            if (pj) patches_json(tid, iver, pj, PSZ);
+        }
+        int mm_rem = 0, mm_has = cheat_master_info(doc, &mm_rem);   /* see cheat_master_info */
+        snprintf(out + len, OUTSZ - len,
+                 "],\"patches\":%s,\"candidates\":[],\"master\":%s,\"master_removable\":%s,"
+                 "\"versions\":%s}",
+                 pj ? pj : "[]", mm_has ? "true" : "false", mm_rem ? "true" : "false", vers);
+        send_json(fd, out);
+        free(pj); free(out); free(ents); free(doc);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/paths") || !strcmp(path, "/api/cheats/paths")) {
+        char o[1100];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":true,\"platform\":\"ps4\",\"ftp\":\"ftp://%s:%d\",\"ftp_port\":%d,"
+                 "\"drop_here\":\"%s\",\"json\":\"%s\",\"shn\":\"%s\",\"mc4\":\"%s\","
+                 "\"patches\":\"%s\"}",
+                 lan_ip_str(), ftp_live_port(), ftp_live_port(), CHEAT_INBOX_DIR,
+                 CHEAT_JSON_DIR, CHEAT_SHN_DIR, CHEAT_MC4_DIR, CHEAT_PATCH_DIR);
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/cheat/find")) {
+        char tid[24] = {0};
+        qparam(rawpath, "title", tid, sizeof(tid));
+        if (!tid[0]) { send_json(fd, "{\"ok\":false,\"error\":\"title required\"}"); return; }
+        /* &version= IS HONOURED, and this route used to ignore it completely.
+           A title often carries one cheat file per game version and they are NOT equal - Dark
+           Souls II has 1 mod in its 01.00 file and 7 in its 01.02 one. The panel's version picker
+           asks for a specific version; reading only the INSTALLED version here meant it always got
+           the same file back, with `match` cheerfully reporting "exact version", so picking 01.02
+           silently did nothing. The PS5's twin has always accepted this parameter. */
+        /* TWO VARIABLES. `real` is what this console has installed; `iver` is the version to look
+           the file up by, which is the request's when it names one. They were ONE variable, so asking
+           for a version made the route report that version as installed - the request echoed back as
+           a fact about the console, which is the kind of answer that makes a panel agree with itself
+           and be wrong. */
+        char real[48] = {0};
+        installed_ver_for(tid, real, sizeof(real));
+        char iver[48] = {0};
+        if (!qparam(rawpath, "version", iver, sizeof(iver)) || !iver[0])
+            snprintf(iver, sizeof(iver), "%s", real);
+        char pick[600]; const char *why = "none";
+        /* `match` and `exact`, not `reason`. The companion reads THOSE two by name to decide
+           whether a file really fits the installed version (companion/server.py's mods handler);
+           with a differently named key every PS4 answer read as "no reason given" and every cheat
+           file looked like a guess. */
+        int exact = cheat_pick_file(tid, iver, pick, sizeof(pick), &why);
+        char ep[700], er[110], ei[110];
+        json_escape(pick, ep, sizeof(ep));
+        json_escape(real, er, sizeof(er));
+        json_escape(iver, ei, sizeof(ei));
+        char o[1000];
+        snprintf(o, sizeof(o),
+                 "{\"ok\":%s,\"platform\":\"ps4\",\"title_id\":\"%s\",\"installed_version\":\"%s\","
+                 "\"asked_version\":\"%s\",\"cheat_file\":\"%s\",\"match\":\"%s\","
+                 "\"reason\":\"%s\",\"exact\":%s}",
+                 pick[0] ? "true" : "false", tid, er, ei, ep, why, why,
+                 exact ? "true" : "false");
+        send_json(fd, o);
+        return;
+    }
+    if (!strcmp(path, "/api/patch/list")) {
+        char tid[24] = {0};
+        qparam(rawpath, "title", tid, sizeof(tid));
+        if (!tid[0]) { send_json(fd, "{\"ok\":false,\"error\":\"title required\"}"); return; }
+        /* &version= IS HONOURED. The companion has always sent the installed version it read
+           from its own library, and ignoring it meant the compatible flag on every row was decided
+           against whatever this console happened to think - which for a title whose APP_VER it
+           cannot read is nothing at all. */
+        /* Same split as /api/cheat/find above: what is installed, and what to evaluate against. */
+        char real[48] = {0};
+        installed_ver_for(tid, real, sizeof(real));
+        char iver[48] = {0};
+        if (!qparam(rawpath, "version", iver, sizeof(iver)) || !iver[0])
+            snprintf(iver, sizeof(iver), "%s", real);
+        char pfile[600] = {0};
+        int havefile = (patch_file_for(tid, pfile, sizeof(pfile)) == 0);
+        size_t PSZ = 32768;
+        char *pj = (char *)malloc(PSZ);
+        if (!pj) { send_json(fd, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
+        patches_json(tid, iver, pj, PSZ);
+        size_t OSZ = PSZ + 1200;
+        char *o = (char *)malloc(OSZ);
+        if (!o) { free(pj); send_json(fd, "{\"ok\":false}"); return; }
+        char ef[700];
+        json_escape(pfile, ef, sizeof(ef));
+        /* ok REFLECTS WHETHER THERE IS A FILE. It was hardcoded true, so "this title has no game
+           patches" and "here are its game patches" were the same answer with a different array. */
+        char er2[110], ei2[110];
+        json_escape(real, er2, sizeof(er2));
+        json_escape(iver, ei2, sizeof(ei2));
+        snprintf(o, OSZ, "{\"ok\":%s,\"platform\":\"ps4\",\"title_id\":\"%s\","
+                 "\"installed_version\":\"%s\",\"asked_version\":\"%s\",\"file\":\"%s\","
+                 "\"patches\":%s}",
+                 havefile ? "true" : "false", tid, er2, ei2, ef, pj);
+        send_json(fd, o);
+        free(o); free(pj);
+        return;
+    }
+    /* Whatever is left in these families is genuinely not implemented here yet, and says so
+       rather than falling through to the bare {} an unknown /api/ path returns - which reads as
+       "nothing to report" instead of "this console does not do that". */
     if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
         !strncmp(path, "/api/patch", 10) || !strncmp(path, "/api/mem", 8)) {
         send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
-                      "\"error\":\"Mods and cheats are not available on the PS4 yet\"}");
+                      "\"error\":\"This particular cheat route is not implemented on the PS4 yet\"}");
         return;
     }
     if (!strcmp(path, "/api/move") || !strcmp(path, "/api/move/status") ||
@@ -3500,6 +7019,85 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         send_json(fd, "{\"ok\":true,\"platform\":\"ps4\",\"stopped\":[],\"survived\":[],"
                       "\"message\":\"Nothing of ours has to be stopped on the PS4 before rest "
                       "mode. The shop has to be loaded again after the console wakes.\"}");
+        return;
+    }
+    /* ---------------------------------------------------- Payloads & Homebrews ---------------
+     * The same two endpoints the PS5 answers, for the same reason: the catalogue is a static file
+     * this ELF already carries, so the page reads that and this end answers only what is true right
+     * now. Installing a seeded homebrew needs no route of its own - /api/install already takes a
+     * path on this console.
+     *
+     * WHAT IS DIFFERENT HERE. There is no Payload Manager to ask which processes exist, so "is it
+     * running" can only be a port that answered - and :9090 can never be one of those ports. A
+     * payload with nothing to listen on therefore reports nothing, and the panel says so. */
+    if (!strcmp(path, "/api/payloads")) {
+        char live[400]; int ln = 0; live[0] = 0;
+        for (int i = 0; i < PS4_PAYLOAD_BUNDLE_COUNT; i++) {
+            const p4pb_entry_t *e = &PS4_PAYLOAD_BUNDLE[i];
+            /* No Payload Manager on this console, so a port is all there is - and for a UDP
+               service the only observable fact is that the port is taken. */
+            int up = (e->port > 0) && (e->udp ? udp_port_taken(e->port) : p4_port_open(e->port));
+            if (!up) continue;
+            ln += snprintf(live + ln, sizeof(live) - (size_t)ln, "%s\"%s\"",
+                           ln ? "," : "", e->filename);
+            if (ln >= (int)sizeof(live) - 48) break;
+        }
+        char have[1400];
+        hb_list_json(have, sizeof(have));
+        /* SIZED FROM THE REAL COUNT, NOT A GUESS. This console reports 72 installed titles at
+           about 12 bytes each, and a 900-byte buffer silently truncated the list - dropping the
+           very homebrew that had just been installed, so the panel said "Install" about something
+           that was already there. Room for ~250 titles. */
+        /* WHAT WOULD ACTUALLY RUN, not what happens to be lying in the folder. /api/payloads/load
+           resolves a request by stem against the BUNDLE, so the file it would start is
+           PB_DIR/<bundled name> - and listing the directory instead reported leftovers from older
+           builds under the same stem, one of which won the comparison and made a PC re-send a
+           payload the console already had. Ask the bundle, stat one file per entry. */
+        char have_p[900]; int hp = 0; have_p[0] = 0;
+        for (int i = 0; i < PS4_PAYLOAD_BUNDLE_COUNT && hp < (int)sizeof(have_p) - 90; i++) {
+            char fp[600];
+            snprintf(fp, sizeof(fp), "%s/%s", PB_DIR, PS4_PAYLOAD_BUNDLE[i].filename);
+            struct stat ps;
+            if (stat(fp, &ps) != 0 || !S_ISREG(ps.st_mode)) continue;
+            hp += snprintf(have_p + hp, sizeof(have_p) - (size_t)hp,
+                           "%s{\"n\":\"%s\",\"s\":%lld}",
+                           hp ? "," : "", PS4_PAYLOAD_BUNDLE[i].filename, (long long)ps.st_size);
+        }
+        char apps[3200];
+        app_ids_json(apps, sizeof(apps));
+        char out[7400];
+        snprintf(out, sizeof(out),
+                 "{\"ok\":true,\"on_console\":true,\"platform\":\"PS4\",\"console\":\"%s\","
+                 "\"source_here\":false,\"items\":null,\"hb_dir\":\"%s\","
+                 "\"state\":{\"live\":[%s],\"kept\":[%s],\"apps\":[%s],\"have\":[%s]}}",
+                 console_id(), HB_DIR, live, have, apps, have_p);
+        send_json(fd, out);
+        return;
+    }
+    if (!strcmp(path, "/api/payloads/load")) {
+        char want[256] = {0};
+        /* rawpath, NOT req. qparam() takes the request PATH - every other caller in this file
+           passes rawpath - and handing it the whole request text made it parse the query out of a
+           line that still had " HTTP/1.1" on the end, so the name never matched anything and the
+           console answered "this build does not carry that one" about a payload it was holding. */
+        qparam(rawpath, "name", want, sizeof(want));
+        char wstem[128];
+        p4_stem(want, wstem, sizeof(wstem));
+        for (int i = 0; i < PS4_PAYLOAD_BUNDLE_COUNT; i++) {
+            const p4pb_entry_t *e = &PS4_PAYLOAD_BUNDLE[i];
+            char estem[128];
+            p4_stem(e->filename, estem, sizeof(estem));
+            if (strcmp(estem, wstem)) continue;
+            char full[512], why[160];
+            snprintf(full, sizeof(full), "%s/%s", PB_DIR, e->filename);
+            int rc = gh_send_payload(full, why, sizeof(why));
+            char out[400];
+            snprintf(out, sizeof(out), "{\"ok\":%s,\"message\":\"%s\"}",
+                     rc == 0 ? "true" : "false", why);
+            send_json(fd, out);
+            return;
+        }
+        send_json(fd, "{\"ok\":false,\"message\":\"This build does not carry that one.\"}");
         return;
     }
     if (!strcmp(path, "/api/tile/status")) {
@@ -3690,6 +7288,7 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         }
         g_job.held = 0; g_job.active = 1; g_job.task = task;
         g_job.job_id = now_ms(); g_job.started_ms = now_ms();
+        job_set_kind_locked(qtype, qsize, qcid);      /* where to look, and what size to expect */
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
@@ -3841,7 +7440,7 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         const char *op = path + 8;
         if (!strncmp(op, "stat", 4)) { fs_send_stat(fd, p); return; }
         if (!strncmp(op, "list", 4)) { fs_send_list(fd, p); return; }
-        if (!strncmp(op, "read", 4)) { fs_send_read(fd, p); return; }
+        if (!strncmp(op, "read", 4)) { fs_send_read_ranged(fd, p, req); return; }
         if (!strncmp(op, "mkdir", 5)) {
             char tmp[1100];
             snprintf(tmp, sizeof(tmp), "%s/", p);
@@ -3942,8 +7541,12 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         int lrc = launch ? launch(url, 0, 0, 0) : -1;
         /* The message is not a consolation prize - it carries the address, so a browser that refuses
            to open still leaves the user something they can type on a phone. */
+        /* ONE MESSAGE CARRIES THE ADDRESS, AND ONLY WHEN IT IS USEFUL. The browser opening IS the
+           answer, so repeating the address there just puts a second near-identical toast on screen
+           right after the startup one - which is what an owner sees as the app talking to itself.
+           The address appears only in the fallback, where they actually have to type it. */
         if (launch && lrc == 0)
-            notifyf("Opening PKG MUTANT SHOP\n%s", url);
+            notify("Opening PKG MUTANT SHOP");
         else
             notifyf("PKG MUTANT SHOP is running\nOpen %s in any browser", url);
         char eu[340], o[560];
@@ -4102,7 +7705,11 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
            Measured: the new build asked, the old build exited, and both disappeared, leaving :8710
            dead and the console with no shop at all.
            Instead: stop the accept loop and close the listening socket, which is all the new
-           instance needs in order to bind. Our threads end; the host process is untouched. */
+           instance needs in order to bind. The host process is untouched.
+           "OUR THREADS END" IS WHAT THIS USED TO CLAIM, AND IT WAS NOT TRUE. The watcher
+           (startup_extras -> rt_thread) was `for (;;)` with no test of g_quit, so every reload left one
+           behind walking the process list every two seconds inside this shared daemon, for ever. It
+           tests the flag now. Any thread added here must do the same, or it leaks on every update. */
         g_quit = 1;
         int s = g_srv;
         g_srv = -1;
@@ -4198,6 +7805,7 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         }
         g_job.held = 0; g_job.active = 1; g_job.task = task;
         g_job.job_id = now_ms(); g_job.started_ms = now_ms();
+        job_set_kind_locked(rtype, rsize, rcid);      /* the same two facts a retry also needs */
         job_baseline_locked();
         snprintf(g_job.state, sizeof(g_job.state), "downloading");
         snprintf(g_job.msg, sizeof(g_job.msg), "The PS4 is downloading and installing it");
@@ -4367,6 +7975,20 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
         handle_get(fd, rawpath, NULL);
         return;
     }
+    /* AND THE SAME TRAP, THIRD TIME: every /api/fs/ operation except write lives in the GET half,
+       so a POST to /api/fs/delete or /api/fs/mkdir fell through to the bare 200 {} at the bottom
+       of this function. Found while cleaning up after a test wrote a file to the console and then
+       could not remove it - the delete answered {} and the caller read that as a success, which
+       is exactly how the queue buttons and the Save button failed before it. Write is NOT here:
+       it is answered further up, where the request body is still in hand. */
+    if (!strncmp(path, "/api/fs/", 8) && strncmp(path, "/api/fs/write", 13)) {
+        /* NULL, not `body`. handle_get's third argument is the RAW REQUEST TEXT - fs_send_read
+           reads the Range header out of it - and handing it a POST body instead would have it
+           looking for a header inside somebody's JSON. NULL is what "this caller has no request
+           text" means everywhere else in this file. */
+        handle_get(fd, rawpath, NULL);
+        return;
+    }
     /* THE SAVE BUTTON PAINTED GREEN AND SAVED NOTHING, and only the POST half of it. handle_get
        already answers /api/config with saved:false, which is what makes Settings show its
        read-only banner instead of live fields - but the page SAVES with a POST, and a POST for
@@ -4399,10 +8021,272 @@ static void handle_post(int fd, const char *rawpath, const char *body) {
                       "or it is not there\"}");
         return;
     }
+    if (!strcmp(path, "/api/engine/agent")) {
+        /* Switch the load-safe agent on or off.
+             {"enabled":0}                      -> off everywhere: unlist and delete the file.
+             {"enabled":1,"title":"CUSA01589"}  -> list for THAT ONE game only (a [TID] section).
+                                                   The safe way to switch it on: no other game and
+                                                   no other plugin the owner runs is touched, so if
+                                                   anything is still wrong the blast radius is that
+                                                   single title. This is what the first live test
+                                                   uses. Takes effect the next time that game starts.
+             {"enabled":1}                      -> list under [default] (every game). For after a
+                                                   per-title test has proven it safe.
+             {"enabled":1,"all_games":1}        -> the same thing, said out loud. Required, see below.
+           A game already running does not pick this up - the loader reads plugins.ini at launch -
+           so the message says to start the game. */
+
+        /* THE KEY IS MANDATORY. It used to default to 1, so a POST with no body, an empty {}, or a
+           misspelled {"enable":0} armed the helper for EVERY game - json_num_after returns its
+           default for a NULL or empty body, an absent key, a literal null, and for any value that is
+           not a bare number or true/false, including the STRING "0". The default is not moved to 0
+           either: that would turn the same malformed POST into a silent agent_purge() and wipe a
+           per-title arm somebody set up by hand. A sentinel is the only answer that cannot be wrong
+           in one direction or the other. */
+        /* {"autoarm":0|1} on its own switches the decision itself, without touching anything else.
+           Off writes the marker and purges; on removes it and arms what should be armed. */
+        long aa_l = json_num_after(body, "autoarm", -1);
+        if (aa_l == 0 || aa_l == 1) {
+            if (aa_l == 0) {
+                int f = open(AUTOARM_OFF_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+                if (f >= 0) { (void)!write(f, "off\n", 4); close(f); }
+                int n2 = agent_purge();
+                char o[420];
+                snprintf(o, sizeof(o),
+                         "{\"ok\":true,\"platform\":\"ps4\",\"autoarm\":false,\"removed\":%d,"
+                         "\"message\":\"The helper will not switch itself on any more. It is off now "
+                         "for every game.\"}", n2);
+                send_json(fd, o);
+            } else {
+                unlink(AUTOARM_OFF_PATH);
+                int armed = agent_autoarm_reconcile();
+                char o[460];
+                snprintf(o, sizeof(o),
+                         "{\"ok\":%s,\"platform\":\"ps4\",\"autoarm\":true,\"armed\":%d,"
+                         "\"message\":\"The helper will switch itself on for games that have cheats. "
+                         "%d game%s ready - start one and cheats will work.\"}",
+                         armed >= 0 ? "true" : "false", armed,
+                         armed < 0 ? 0 : armed, armed == 1 ? "" : "s");
+                send_json(fd, o);
+            }
+            return;
+        }
+
+        long want_l = json_num_after(body, "enabled", -1);
+        if (want_l != 0 && want_l != 1) {
+            send_json(fd, "{\"ok\":false,\"platform\":\"ps4\",\"error\":\"This request has to "
+                          "say \\\"enabled\\\":0 or \\\"enabled\\\":1 - it is not guessed\"}");
+            return;
+        }
+        int want = (int)want_l;
+        if (!want) {
+            int n = agent_purge();
+            char o[420];
+            snprintf(o, sizeof(o),
+                     "{\"ok\":true,\"platform\":\"ps4\",\"enabled\":false,\"removed\":%d,"
+                     "\"message\":\"The in-game helper is off and its file removed.\"}", n);
+            send_json(fd, o);
+            return;
+        }
+        char tid[24] = {0};
+        json_str_after(body, "title", tid, sizeof(tid));
+        int rc;
+        char o[600];
+        if (tid[0]) {
+            rc = agent_enable_for_title(tid);
+            snprintf(o, sizeof(o),
+                     "{\"ok\":%s,\"platform\":\"ps4\",\"enabled\":%s,\"scope\":\"title\","
+                     "\"title\":\"%s\",\"message\":\"%s\"}",
+                     rc == 0 ? "true" : "false", rc == 0 ? "true" : "false", tid,
+                     rc == 0 ? "The in-game helper is on for this game. Start it (or close and "
+                               "reopen it) and the cheats panel will work."
+                             : "The plugin list could not be written.");
+        } else if ((int)json_num_after(body, "all_games", 0) != 1) {
+            /* ASK FOR THIS ONE OUT LOUD. Without a title, this arms the helper inside every game the
+               console runs, and that is not something to reach by leaving a field out. It gets its
+               own sentence rather than falling through to "The plugin list could not be written.",
+               which would be a false cause for a deliberate refusal. */
+            send_json(fd, "{\"ok\":false,\"platform\":\"ps4\",\"scope\":\"default\","
+                          "\"error\":\"This would switch the in-game helper on for every game. "
+                          "Turn it on for one game first by naming its title, or say "
+                          "\\\"all_games\\\":1 if that is really what you want\"}");
+            return;
+        } else {
+            if (agent_deploy() == 0) rc = agent_set_enabled(1); else rc = -1;
+            snprintf(o, sizeof(o),
+                     "{\"ok\":%s,\"platform\":\"ps4\",\"enabled\":%s,\"scope\":\"default\","
+                     "\"message\":\"%s\"}",
+                     rc == 0 ? "true" : "false", rc == 0 ? "true" : "false",
+                     rc == 0 ? "The in-game helper is on for all games. Start a game (or close and "
+                               "reopen one) to use cheats."
+                             : "The plugin list could not be written.");
+        }
+        send_json(fd, o);
+        return;
+    }
+    if (!strncmp(path, "/api/mods/", 10)) {
+        char tid[24] = {0};
+        const char *rest = path + 10;
+        size_t i = 0;
+        while (rest[i] && rest[i] != '/' && i < sizeof(tid) - 1) { tid[i] = rest[i]; i++; }
+        tid[i] = 0;
+        const char *action = rest[i] == '/' ? rest + i + 1 : "";
+        for (char *c = tid; *c; c++) {
+            if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+                  (*c >= '0' && *c <= '9') || *c == '-' || *c == '_')) { *c = 0; break; }
+        }
+        if (!tid[0]) { send_json(fd, "{\"ok\":false,\"error\":\"bad title\"}"); return; }
+
+        /* Kept only so an older page's "select" call still gets a sane answer: this engine
+           resolves the cheat file per request and has no document to select. */
+        if (!strcmp(action, "select")) { send_json(fd, "{\"ok\":true,\"selected\":true}"); return; }
+
+        /* A game PATCH is not a cheat - it comes from the XML library and is applied once rather
+           than toggled - so it is handled BEFORE the cheat-file lookup. On the PS5 this ordering
+           was load-bearing for a real bug: "apply" had been a silent alias for "toggle", which
+           would flip an unrelated cheat the moment a title turned out to have patches. */
+        if (!strcmp(action, "apply") || !strcmp(action, "unapply")) {
+            char o[1400];
+            ps4_patch_action_json(tid, (int)json_num_after(body, "index", 0),
+                                  (int)json_num_after(body, "force", 0),
+                                  (int)json_num_after(body, "dry", 0),
+                                  !strcmp(action, "unapply"), o, sizeof(o));
+            send_json(fd, o);
+            return;
+        }
+
+        /* THE SAME FILE THE PANEL LISTED. A mod is applied by its INDEX, so if the page is showing
+           one version's cheats and this resolves another version's file, index i is a different cheat
+           - applied, and reported ok:true under the name the page thinks it pressed. The version
+           travels with the request for exactly that reason, and a version the library cannot match
+           exactly is refused rather than approximated. */
+        char wver[48] = {0};
+        json_str_after(body, "version", wver, sizeof(wver));
+        char file[600];
+        int frc = mods_file_for_req(tid, wver, file, sizeof(file));
+        if (frc == -2) {
+            char ev[110], o[520];
+            json_escape(wver, ev, sizeof(ev));
+            snprintf(o, sizeof(o),
+                     "{\"ok\":false,\"platform\":\"ps4\",\"error\":\"no_cheat_file_for_version\","
+                     "\"version\":\"%s\",\"message\":\"There is no cheat file for that version of "
+                     "this game, so nothing was changed. Pick a version the list offers.\"}", ev);
+            send_json(fd, o);
+            return;
+        }
+        if (frc != 0) {
+            send_json(fd, "{\"ok\":false,\"error\":\"no_local_cheat_found\"}");
+            return;
+        }
+        char rtid[24] = {0};
+        pid_t pid = 0; intptr_t base = 0;
+        if (running_game(rtid, sizeof(rtid), &pid, &base) != 0 || strcmp(rtid, tid)) {
+            /* TWO CAUSES, ONE SYMPTOM - AND THEY ARE TOLD APART HERE rather than described as a
+               pair and left to the owner to work out which they have. running_game() answers no
+               both when nothing is running and when the helper is not inside the game that is,
+               but running_title_id() is a separate fact that does not need the helper at all.
+               Saying "start the game first" to somebody looking at that game on their television
+               is the kind of wrong answer that sends people hunting through cheat files. */
+            char cur[24] = {0};
+            running_title_id(cur, sizeof(cur));
+            if (cur[0] && !strcmp(cur, tid)) {
+                /* The game is running but the agent is not inside it - it was not listed before
+                   this game launched. Enable the helper for this title in the app and start the
+                   game again. */
+                send_json(fd, "{\"ok\":false,\"error\":\"helper_not_loaded\",\"platform\":\"ps4\","
+                              "\"why\":\"helper_not_loaded\",\"message\":\"Turn the in-game helper "
+                              "on for this game in the app, then close the game and open it again "
+                              "- cheats load with the game.\"}");
+            } else if (cur[0]) {
+                send_json(fd, "{\"ok\":false,\"error\":\"other_game_running\",\"platform\":\"ps4\","
+                              "\"message\":\"A different game is running - cheats are written "
+                              "into the memory of the game that is actually on screen.\"}");
+            } else {
+                send_json(fd, "{\"ok\":false,\"error\":\"game_not_running\",\"platform\":\"ps4\","
+                              "\"message\":\"Start the game first - cheats are written into its "
+                              "live memory.\"}");
+            }
+            return;
+        }
+
+        if (!strcmp(action, "disable-all")) {
+            int non_json = 0;
+            char *doc = cheat_load_doc(file, &non_json);
+            if (!doc) { send_json(fd, "{\"ok\":false,\"error\":\"cannot read cheat file\"}"); return; }
+            int reverted = 0, already = 0, failed = 0;
+            const char *from = mods_array_start(doc);
+            for (int m = 0; from && m < CHEAT_MAX_MODS; m++) {
+                const char *end = NULL;
+                const char *blk = next_mod_block(from, &end);
+                if (!blk) break;
+                from = end;
+                char detail[200] = {0};
+                int rc = cheat_apply_blk(doc, non_json, blk, end, m, 0, pid, base, 0, 0,
+                                         detail, sizeof(detail));
+                if (rc > 0) reverted++;
+                else if (rc == 0) already++;
+                else failed++;
+            }
+            /* AND THE MASTER CODE, LAST. Every mod that was patching the master's own routine has
+               just been put back, so the routine itself is no longer needed. Only the Trainer form
+               can go: it documents the bytes it replaced. The json form answers "the file does not
+               say what was there before it" and stays until the game is closed, which is exactly what
+               the panel tells that owner. */
+            char mrem[120] = {0};
+            int master_gone = cheat_master_off(doc, pid, base, non_json, mrem, sizeof(mrem));
+            if (mrem[0]) ilog("cheats: %s", mrem);
+            free(doc);
+            char o[260];
+            snprintf(o, sizeof(o),
+                     "{\"ok\":true,\"disabled\":%d,\"already_off\":%d,\"failed\":%d,"
+                     "\"master_removed\":%s}",
+                     reverted, already, failed, master_gone > 0 ? "true" : "false");
+            send_json(fd, o);
+            if (failed)
+                notifyf("Cheats turned off\n%d undone, %d would not undo - close the game to "
+                        "clear those completely", reverted, failed);
+            else if (reverted)
+                notifyf("All cheats turned off\n%d change%s put back to the game's original code",
+                        reverted, reverted == 1 ? "" : "s");
+            else
+                notify("No cheats were on\nNothing needed changing");
+            return;
+        }
+
+        if (!strcmp(action, "toggle")) {
+            int idx  = (int)json_num_after(body, "index", 0);
+            int want = (int)json_num_after(body, "on", 1);
+            int force = (int)json_num_after(body, "force", 0);
+            char nm[200] = {0};
+            json_str_after(body ? body : "", "name", nm, sizeof(nm));
+            char detail[200] = {0};
+            int rc = cheat_apply_mod(file, idx, want, pid, base, force, 0, detail, sizeof(detail));
+            const char *what = nm[0] ? nm : "Cheat";
+            cheat_result_toast(what, want, rc, detail, rtid);
+            char ed[300], o[1100];
+        /* A SENTENCE FOR THE OWNER, alongside the numbers for us. Without it errText() in the page
+           falls through to `detail` and toasts "entries=3 written=0 skipped=0 failed=3". It is left
+           out entirely when there is nothing to explain, so a success carries no message at all. */
+            char msg[420] = {0}, emsg[500];
+            cheat_rc_message(rc, detail, want, msg, sizeof(msg));
+            json_escape(detail, ed, sizeof(ed));
+            json_escape(msg, emsg, sizeof(emsg));
+            snprintf(o, sizeof(o),
+                     "{\"ok\":%s,\"rc\":%d,\"mod\":%d,\"on\":%d,\"pid\":%d,\"base\":\"0x%llx\","
+                     "\"detail\":\"%s\"%s%s%s}",
+                     rc >= 0 ? "true" : "false", rc, idx, want, (int)pid,
+                     (unsigned long long)base, ed,
+                     msg[0] ? ",\"message\":\"" : "", msg[0] ? emsg : "", msg[0] ? "\"" : "");
+            send_json(fd, o);
+            return;
+        }
+        send_json(fd, "{\"ok\":false,\"error\":\"unknown action\"}");
+        return;
+    }
     if (!strncmp(path, "/api/cheat", 10) || !strncmp(path, "/api/mods", 9) ||
         !strncmp(path, "/api/patch", 10)) {
-        send_json(fd, "{\"ok\":false,\"unsupported\":true,"
-                      "\"error\":\"Mods and cheats are not available on the PS4 yet\"}");
+        send_json(fd, "{\"ok\":false,\"unsupported\":true,\"platform\":\"ps4\","
+                      "\"error\":\"This particular cheat route is not implemented on the PS4 yet\"}");
         return;
     }
     send_json(fd, "{}");
@@ -4550,8 +8434,22 @@ static int sec_fetch_ok(const char *req) {
 static int route_changes_state(const char *rawpath, int is_post) {
     static const char *EXACT[] = {
         "/api/quit", "/api/notify", "/api/open", "/api/register-pc", "/api/install",
+        "/api/payloads/load",
         "/api/engine/cancel", "/api/engine/spawn-cleanup", "/api/fs/write", "/api/fs/mkdir",
         "/api/fs/delete",
+        /* The cheat engine's write side. /api/mods/<TID>/<action> is matched by prefix further
+           down rather than listed here, because the title id is part of the path. */
+        "/api/cheat/apply", "/api/patch/apply", "/api/patch/revert",
+        /* The in-game helper's own switch - it edits GoldHEN's plugin list. */
+        "/api/engine/agent",
+        /* WRITES BYTES INTO A RUNNING GAME, and it is a GET whose arguments all live in the query
+           string - so an <img> tag on any page the owner opens could fire it. request_origin_ok
+           deliberately answers yes when both Origin and Referer are absent, which is exactly what a
+           no-referrer navigation, a <script src> and <img referrerpolicy="no-referrer"> send, and
+           sec_fetch_ok is only consulted for routes named here. It was the one state-changing route
+           on this console outside the guard. The two rescan spellings rebuild the cheat library
+           index, which is cheap but still a change somebody else's page should not be making. */
+        "/api/mem/write", "/api/cheat/rescan", "/api/cheats/rescan",
         "/api/move", "/api/game/delete", "/api/game/delete-backup",
         "/api/rest/prepare", "/api/payloads/autostart",
         /* The queue's own controls: start releases a held install, clear throws a row away. */
@@ -4567,6 +8465,9 @@ static int route_changes_state(const char *rawpath, int is_post) {
     if (!strncmp(path, "/api/engine/install-", 20)) return 1;
     /* The per-row POST verbs: cancel, dismiss, retry. Same rule the PS5 build uses. */
     if (is_post && !strncmp(path, "/api/queue", 10)) return 1;
+    /* /api/mods/<TITLE_ID>/<toggle|disable-all|apply|unapply>: the title id sits in the middle of
+       the path, so this cannot be an exact-match entry. Same rule the PS5 build uses. */
+    if (is_post && !strncmp(path, "/api/mods/", 10)) return 1;
     return 0;
 }
 
@@ -4694,6 +8595,84 @@ static void *conn_thread(void *arg) {
     return NULL;
 }
 
+/* The work that must not delay the socket. Each step names itself so a stall has an address:
+   the last line in klog is the step that hung. */
+static void *startup_extras(void *arg) {
+    (void)arg;
+    /* The install engine first: it is the one thing here anybody waits on, and health reports
+       engine_ready from it. If it hangs, everything below simply never runs - and the shop is
+       still up, which is the entire point of this thread. */
+    ilog("startup: bringing up the install engine");
+    bgft_bootstrap();
+    ilog("startup: install engine ready");
+    /* THE CHEAT LIBRARY HAS TO HAVE SOMEWHERE TO LIVE. cheat_pick_file() reads four of these and
+       /api/cheat/paths tells the owner to drop files into a fifth over FTP; none of them existed
+       until a PC happened to create them, so a console with no PC had nowhere to put a cheat.
+       mkdir on something that is already there fails harmlessly, which is why this is not
+       conditional. */
+    /* THE AGENT'S MAILBOX, created HERE and not by the agent. The in-game module deliberately
+       imports as little as possible - an import a game's libraries cannot resolve fails the module
+       load, which is how it kept breaking games - so it has no mkdir. It only ever looks for a
+       directory it can write in. This payload runs as root and already owns this tree, so making
+       the folder is our job. */
+    mkdir(AGENT_DIR, 0777);
+    /* AND THE FALLBACK THE AGENT IS TOLD TO TRY. AGENT_DIRS lists /data/GoldHEN/pms-agent second,
+       and the agent's choose_dir only probes a directory by trying to write in it - it cannot create
+       a missing parent, because it has no mkdir at all. That directory does not exist on the console
+       (checked: /data/GoldHEN holds plugins, config.ini, UPDATE, cheats, stats, git, tmp, patches and
+       plugins.ini, and nothing else), so the advertised second chance was never a chance. Created
+       here, from the root payload, which is the only side that can. */
+    mkdir("/data/GoldHEN", 0777);
+    mkdir("/data/GoldHEN/pms-agent", 0777);
+    mkdir(CHEAT_ROOT, 0777);
+    mkdir(CHEAT_JSON_DIR, 0777);
+    mkdir(CHEAT_SHN_DIR, 0777);
+    mkdir(CHEAT_MC4_DIR, 0777);
+    mkdir(CHEAT_PATCH_DIR, 0777);
+    mkdir(CHEAT_INBOX_DIR, 0777);
+    int filed = cheat_intake_all();
+    ilog("startup: cheat library ready, filed %d dropped file(s)", filed);
+    if (filed > 0)
+        notifyf("Filed %d cheat file%s\nThey are ready in the game panel",
+                filed, filed == 1 ? "" : "s");
+
+    /* THE PAYLOAD NEVER ARMS THE IN-GAME PLUGIN. It removes it.
+     *
+     * Every build of that plugin has broken games on this console - first a freeze on "Please
+     * wait...", and on the last attempt badly enough that the console had to be rebooted and
+     * re-jailbroken. Both the .prx and its line in plugins.ini SURVIVE a reboot and a re-jailbreak,
+     * so a console left armed breaks the next game launch with nothing of ours even running, and
+     * there is nothing the owner can press to undo it. Cleaning up has to be automatic and it has
+     * to happen on every boot.
+     *
+     * Deploying is still possible on explicit request through /api/engine/agent, for controlled
+     * testing only. Nothing automatic writes it, and nothing automatic lists it. */
+    /* THE HELPER SWITCHES ITSELF ON, for exactly the installed titles the library has something for.
+     *
+     * This used to purge unconditionally, and that was right while the module crashed games: a console
+     * left armed re-broke the next launch with nothing of ours running. The cause of that was libc
+     * stdio, it is fixed, and the engine is verified working in a real game - so what was left was
+     * pure friction, because GoldHEN reads plugins.ini only when a game STARTS. The owner had to press
+     * a button and then close and reopen the game. Deciding here removes both steps.
+     *
+     * THE PURGE IS STILL THE RECOVERY PATH, and it is one file away: with autoarm off, this behaves
+     * exactly as it always did. So if an agent build ever misbehaves again, the owner opens the app,
+     * turns autoarm off, and every game is clean on the next boot - no re-jailbreak needed. */
+    if (autoarm_enabled()) {
+        int armed = agent_autoarm_reconcile();
+        if (armed >= 0)
+            ilog("startup: in-game helper armed for %d installed title(s) with cheats", armed);
+        else
+            ilog("startup: in-game helper could not be armed - GoldHEN's plugin list was not writable");
+    } else {
+        int rc = agent_purge();
+        ilog("startup: autoarm is off - purge removed %d item(s)", rc);
+    }
+    ilog("startup: running-title watcher starting");
+    rt_thread(NULL);                 /* never returns - this thread becomes the watcher */
+    return NULL;
+}
+
 int main(void) {
     klog_puts("[PMS] PKG MUTANT SHOP for PS4 starting");
     /* A WRITE TO A CLOSED SOCKET MUST NOT KILL US, and on this console that is not a theoretical
@@ -4710,7 +8689,28 @@ int main(void) {
     ilog("==== BOOT: PKG MUTANT SHOP PS4 %s (%s %s) ====", SHOP_VERSION, __DATE__, __TIME__);
 
     extract_web();
-    bgft_bootstrap();
+    /* The payloads this ELF carries, written to PB_DIR the same way the UI is written to WEB_ROOT.
+       NOTHING IS STARTED HERE. The only loader on this console is GoldHEN's, and the only way to
+       reach it is to POST an ELF at :9090 - which is also the only way to learn whether it is
+       listening, because a bare connect stops it. Starting payloads unasked over a lane that
+       cannot be probed first is not a thing to do on somebody's console every boot. */
+    pb_deploy_all();
+    ilog("startup: web extracted");
+    /* bgft_bootstrap() USED TO BE HERE AND IT IS WHY THE SHOP VANISHED. klog, measured:
+
+           [PMS] startup: web extracted
+           <nothing, ever again>
+
+       It loads four system modules and initialises the download service, and inside a
+       ScePartyDaemon that has had several payloads injected into it during one session that call
+       stops returning. :8710 then never opens, so there is no shop, no health, no UI and no way
+       to see what happened - from outside it is indistinguishable from a payload that never ran.
+
+       The install engine is not needed to LISTEN. It is needed to install, and every install
+       route already refuses when g_bgft_ready is false. So it moves to startup_extras() with the
+       rest of the optional work, after the socket is up. A console whose install engine is wedged
+       now still serves its library, its settings and its cheats, and says engine_ready:false -
+       which is a diagnosis instead of a silence. */
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) {
@@ -4764,6 +8764,17 @@ int main(void) {
     }
     listen(srv, 16);
     ilog("listening on :%d as %s", PORT, lan_ip_str());
+
+    /* EVERYTHING OPTIONAL HAPPENS FROM HERE, ON ITS OWN THREAD, AFTER THE PORT IS OPEN.
+       Laying the in-game agent on disk used to run BEFORE this line and stalled there once: the
+       payload logged "web: 5 file(s) written" and was never heard from again, so :8710 never
+       opened and the console had no shop at all. Nothing that merely helps cheats may be able to
+       do that to a shop that installs games. It only has to finish before the next GAME launches,
+       which is many seconds away and not something the accept loop is waiting on. */
+    {
+        pthread_t bg;
+        if (pthread_create(&bg, NULL, startup_extras, NULL) == 0) pthread_detach(bg);
+    }
     notifyf("PKG MUTANT SHOP v%s is ready\nOpen %s:%d in any browser", SHOP_VERSION, lan_ip_str(), PORT);
 
     /* THE DASHBOARD APP, after the socket is listening and not before: the install lane serves the

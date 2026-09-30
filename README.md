@@ -1,156 +1,216 @@
+<div align="center">
+
 # PKG MUTANT SHOP
 
-A homebrew **package manager + store front-end** for a jailbroken **PlayStation 5** (FW 12.70,
-Y2JB) and **PlayStation 4** (FW 13.52) - both at once, from one app. Browse a library, see a game's
-updates / DLC / cheats / patches, and install directly - from the console itself, from a PC, or from
-a phone. Version **3.62.0**. Licence: **GPL-3.0** (`LICENSE`,
-`THIRD-PARTY-NOTICES.md`).
+**One app. Two jailbroken consoles. Every device in the house.**
 
-**Start here: [SETUP.md](SETUP.md)** - the one current runbook (PC side, console side, how an
-install flows, how to update, triage). Then `MUTANT PKG ENGINE.md` section 0 for the install engine.
+A homebrew package manager and store front-end for a jailbroken **PlayStation 5** and
+**PlayStation 4** — browse a library, see each game's updates, DLC, cheats and patches, and install
+straight to the console: from the console itself, from a PC, or from a phone.
 
-> Colors: black · light matte yellow · gray. One HTML page for every device (PS5 and PS4 WebKit, PC
-> browser, phone). Fifteen languages.
+[![version](https://img.shields.io/badge/version-3.86.0-e8c547?style=flat-square)](CHANGELOG.md)
+[![PS5](https://img.shields.io/badge/PS5-12.70-2a6fdb?style=flat-square)](#supported-firmware)
+[![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
+[![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
+[![languages](https://img.shields.io/badge/languages-15-9b59b6?style=flat-square)](#fifteen-languages)
 
-> **Two consoles, one app.** A PS5 payload and a PS4 payload - one binary cannot run on both, which
-> was measured, not assumed - behind one UI, one companion, one queue and one set of build gates.
-> Both consoles get an icon on their home screen: the PS5's tile, and a real PS4 application built
-> by [ps4-app/tile-pkg](ps4-app/tile-pkg/README.md). What the PS4 does not do yet: cheats and mods,
-> because its jailbreak gives a payload no kernel access. See
-> [ps4-app/onconsole/README.md](ps4-app/onconsole/README.md).
+![The library](docs/images/library.png)
 
-> **The PS4 icon installs and updates itself, from the ELF, with this PC switched off.** The payload
-> carries the application's package and puts it on the home screen over the console's own loopback -
-> no PC, no FTP, no jailbreak folder touched. It compares versions first and then the bytes, so an
-> icon that is already current is left alone and one that is stale or wrong is replaced; the staged
-> copy is deleted once `/user/app/<TID>/app.pkg` proves the install. The version installed is proven
-> by reading that file back and hashing it, never by a return code.
-
-> **Nothing here ever touches a system update.** Console-owned transfer tasks - a firmware
-> `PS4UPDATE.PUP`, a Store download - are never started, resumed or cancelled by this app. The task
-> sweep releases a task only when that task's own record names one of our own routes.
+</div>
 
 ---
 
-## What this is (and isn't)
+## What you get
 
-**Is:** a source-agnostic installer/manager. You configure your own content sources - a folder on
-your PC served over HTTP, another PC running the same app, or your own self-hosted repo
+|   |   |
+|---|---|
+| **Two consoles, one app** | A PS5 payload and a PS4 payload — one binary cannot run on both, which was measured, not assumed — behind one UI, one companion, one queue, one set of build gates. Both consoles get an icon on their home screen. |
+| **Installs through Sony's own installer** | The console downloads each package *itself*, over HTTP Range, through BGFT. The PC serves bytes and keeps the queue; it never pushes a game over FTP. |
+| **A verdict you can trust** | "Installed" means a `bgft.db` status of **1036** (base) or **1026** (update/DLC) *and* a full-size `app.pkg` on disk. A row in `app.db` alone is never treated as proof. |
+| **Cheats and patches, live** | Applied to the *running* game by our own engine — expect-gated and revertable. Thousands of cheat files ship inside the app. |
+| **Payloads & Homebrews** | Send payload ELFs to either console and install homebrew packages through the same engine the games use — and update them from their own upstream GitHub releases. |
+| **Every device is one fleet** | Companions find each other on the LAN. A PC that does not hold a file can still press the button: whoever has the bytes is asked. |
+| **Works with the PC switched off** | All three artifacts carry the UI, the payload set, the catalogue and the cheat library. A console on its own is not a degraded mode. |
+
+---
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/game-panel.png" alt="A game's panel"><br><sub><b>A game's panel</b> — base game, updates, DLC, add-ons, and the mods that match this exact game version.</sub></td>
+<td width="50%"><img src="docs/images/payloads-ps5.png" alt="Payloads and homebrews, PS5"><br><sub><b>Payloads &amp; Homebrews</b> — a tile is green only when a port answered or the loader listed the process.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/payloads-ps4.png" alt="Payloads and homebrews, PS4"><br><sub><b>The same panel, PS4</b> — its own payloads, its own homebrews, taken from the folder layout.</sub></td>
+<td width="50%"><img src="docs/images/library.png" alt="The library"><br><sub><b>The library</b> — every drive on both consoles, and every PC in the fleet, with free space.</sub></td>
+</tr>
+</table>
+
+---
+
+## What this is, and what it is not
+
+**It is** a source-agnostic installer and manager. You configure your own content sources — a folder
+on your PC served over HTTP, another PC running the same app, or your own self-hosted
 `sources.json`. The app groups everything by game (base / update / DLC), shows install state, and
 hands install jobs to the console.
 
-**Isn't:** a scraper for any piracy site, and it ships **no bundled catalog of copyrighted games**.
-You point it at content you have the right to install. This keeps the tool clean, legal to develop,
-and resilient (no dependency on some site's HTML staying the same).
+**It is not** a scraper for any piracy site, and it ships **no bundled catalogue of copyrighted
+games**. You point it at content you have the right to install. That keeps the tool clean, legal to
+develop, and resilient — no dependency on some site's HTML staying the same.
 
 **What it does ship besides its own code:** a cheat and patch library (json / shn / mc4 cheats and
-patch XML, copied from the GPL-3.0 HEN-Cheats-Collection, credits inside each file) and
-ShadowMountPlus (GPL-3.0), both embedded in the console ELF. Origins and licences are listed in `THIRD-PARTY-NOTICES.md`.
+patch XML, from the GPL-3.0 HEN-Cheats-Collection, credits inside each file), ShadowMountPlus, and
+the helper payloads listed in the panel. Origins and licences are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+---
+
+## Supported firmware
+
+| Console | Firmware | Jailbreak | Needs |
+|---|---|---|---|
+| PlayStation 5 | 12.70 | Y2JB / Kstuff | **Payload Manager** on `:8084` — the jailbreak's own loader. Nothing else. |
+| PlayStation 4 | 13.52 | GoldHEN | GoldHEN's payload loader. The home-screen icon then reloads the app without a PC. |
+
+> **Never update the console.** A system update removes the jailbreak. This app never starts,
+> resumes or cancels a console-owned transfer, and it can block Sony's update hosts if you point the
+> console's DNS at the companion.
+
+---
+
+## Run it
+
+**On a PC** — run `PKG-MUTANT-SHOP.exe`. It creates `C:\Mutant Games\PS4` and `\PS5`, scans them,
+finds the consoles on the LAN, opens <http://localhost:8710> and sits in the tray. `config.json` is
+written beside the exe. Drop `.pkg` files into the folders.
+
+**On the PS5** — with Payload Manager running, load `PKG-MUTANT-SHOP.elf` from it. The ELF writes
+the UI, starts ShadowMountPlus if it is not already up, puts the **PKG MUTANT SHOP** tile under
+Media if it is missing, and toasts that it is ready.
+
+**On the PS4** — load `PKG-MUTANT-SHOP-PS4.elf` through GoldHEN, or press the home-screen icon. The
+payload installs and updates that icon itself, from inside the ELF, with every PC switched off.
+
+**From source** — `python companion/server.py` (Python 3.8+, standard library only; Pillow optional,
+for card thumbnails and the tray icon), or `start.cmd`.
+
+Ports, config keys, adding a second PC, triage: **[SETUP.md](SETUP.md)**.
+
+---
+
+## Updating
+
+The app checks its own releases and offers them **in the Payloads & Homebrews panel**, on the PKG
+MUTANT SHOP tile, exactly the way it offers a new ftpsrv or nanoDNS. The download is verified before
+anything is replaced: the size must match, the marker must be present *inside* the bytes, and the
+old file is kept as `.bak` until the new one is proven complete. Taking an update replaces the file;
+sending it to a console stays a second, separate press.
+
+Not every version is published — only the ones worth interrupting someone for. See
+**[RELEASING.md](RELEASING.md)**.
+
+---
+
+## How installing actually works
+
+1. **Install** is pressed on any device. The PC's queue claims the job — one running install per
+   console.
+2. The PC asks the console:
+   `GET http://<console>:8710/api/engine/install-spawn?uri=http://<pc>:8710/library/<key>&name=…`
+3. The ELF writes the request, writes its embedded `pms-installer.elf` into Payload Manager's own
+   directory, and asks Payload Manager to **spawn** it.
+4. `pms-installer.elf` — a *fresh process*, not injected code — calls
+   `sceAppInstUtilInstallByPackage(uri)`, writes its verdict, and exits. From an injected payload
+   the same call answers `0x80B2116F`; that is the whole reason for the separate process.
+5. BGFT downloads the package from the PC with HTTP Range requests and installs it. The PC's byte
+   counter on `/library/<key>` is the progress bar.
+6. **Done** means `bgft.db` 1036 / 1026 *and* a full-size `app.pkg` on disk.
+
+Where a PKG lands is the console's own *Installation Location* setting; the app does not guess it.
+PS5 **backups** take a different lane: the console copies the file to the drive you pick — staged as
+`.part`, because ShadowMountPlus mounts the instant a file appears — and then mounts it.
 
 ---
 
 ## Architecture
 
 ```
-   any browser (PC · phone · the PS5's own browser via the Media tile)
-                     │  http://<pc>:8710  or  http://<ps5>:8710
-      ┌──────────────┴──────────────────────────────────────────────────┐
-      │  web/index.html  (ONE self-contained ES5 page, embedded in BOTH   │
-      │  artifacts). Served by the console, it re-points its API at the   │
-      │  newest PC companion that announced itself.                       │
-      └──────────────┬───────────────────────────────┬──────────────────┘
-                     │ /api/*                         │ /api/*
-   ┌─────────────────▼───────────────┐   ┌───────────▼─────────────────────────────────┐
-   │ PKG-MUTANT-SHOP.exe  (PC)       │   │ PKG-MUTANT-SHOP.elf  (PS5, :8710)            │
-   │ companion/server.py             │   │ ps5-app/onconsole/server.c                   │
-   │ • scans C:\Mutant Games\PS4|PS5 │   │ • serves the UI from /data/pkg-mutant-shop   │
-   │ • serves packages on :8710      │◄──┤ • install engine: writes the request, asks   │
-   │   (/library/<key>, HTTP Range)  │   │   Payload Manager (:8084) to SPAWN            │
-   │ • install queue, one per console│   │   pms-installer.elf, which calls             │
-   │ • confirms via bgft.db 1036/1026│   │   sceAppInstUtilInstallByPackage and exits   │
-   │ • finds other PCs (federation)  │   │ • cheat/patch engine on the running game     │
-   │ • announces itself every 8 s    │   │ • dashboard tile (pms-tile.pkg), backups     │
-   └─────────────────────────────────┘   │ • carries + starts ShadowMountPlus (:10101)  │
-                                         └──────────────────────────────────────────────┘
-                                                 requires: Payload Manager on :8084
-                                                 (the jailbreak's own loader) - nothing else
+   any browser (PC · phone · the console's own browser via its home-screen icon)
+                     │  http://<pc>:8710   or   http://<console>:8710
+      ┌──────────────┴───────────────────────────────────────────────────┐
+      │  web/index.html — ONE self-contained ES5 page, embedded in ALL    │
+      │  THREE artifacts. Served by a console, it re-points its API at    │
+      │  the newest PC companion that announced itself.                   │
+      └──────────────┬───────────────────────────────┬───────────────────┘
+                     │ /api/*                        │ /api/*
+   ┌─────────────────▼───────────────┐   ┌───────────▼──────────────────────────────┐
+   │ PKG-MUTANT-SHOP.exe   (PC)      │   │ PKG-MUTANT-SHOP.elf      (PS5, :8710)     │
+   │ companion/server.py             │   │ PKG-MUTANT-SHOP-PS4.elf  (PS4, :8710)     │
+   │ • scans C:\Mutant Games\PS4|PS5 │   │ ps5-app/onconsole/server.c                │
+   │ • serves packages (HTTP Range)  │◄──┤ ps4-app/onconsole/server_ps4.c            │
+   │ • install queue, one per console│   │ • serves the UI from its own disk         │
+   │ • confirms via bgft.db          │   │ • spawns the installer per install         │
+   │ • finds other PCs (federation)  │   │ • cheat / patch engine (PS5)               │
+   │ • announces itself every 8 s    │   │ • home-screen icon, backups, payloads      │
+   └─────────────────────────────────┘   └───────────────────────────────────────────┘
 ```
 
-The console downloads each package **itself**, from the PC, through Sony's own installer (BGFT).
-The PC serves bytes and keeps the queue; it never pushes a game over FTP. No third-party install
-daemon exists in this design: nothing on 12800, no DPI host, no etaHEN, no Elf Arsenal.
+Deeper: **[ARCHITECTURE.md](ARCHITECTURE.md)**, **[MUTANT PKG ENGINE.md](MUTANT%20PKG%20ENGINE.md)**
+(the install engine), **[PAYLOADS-AND-HOMEBREWS.md](PAYLOADS-AND-HOMEBREWS.md)**.
 
 ---
 
-## How installing actually works
+## Fifteen languages
 
-1. Install is pressed (any device). The PC's queue claims the job - one running install per console.
-2. The PC asks the console: `GET http://<ps5>:8710/api/engine/install-spawn?uri=http://<pc>:8710/library/<key>&name=...`
-3. The ELF writes `/data/pkg-mutant-shop/installer-req.txt`, writes its embedded
-   `pms-installer.elf` into Payload Manager's directory and asks Payload Manager to spawn it.
-4. `pms-installer.elf` - a **fresh process**, not injected code - calls
-   `sceAppInstUtilInstallByPackage(uri)`, writes its verdict to `installer-res.json`, and exits.
-   (From an injected payload the same call answers `0x80B2116F`; that is the whole reason for the
-   separate process.)
-5. The system installer (BGFT) downloads the package from the PC with HTTP Range requests and
-   installs it; the PS5 shows its own toasts. The PC's byte counter on `/library/<key>` is the
-   progress bar.
-6. Done means **`bgft.db` status 1036** (base game) or **1026** (update/DLC) plus a full-size
-   `app.pkg` under `/user/app/<TID>/` (or `/mnt/ext1/user/app/<TID>/`). A row in `app.db` alone is
-   never treated as proof.
-
-Where a PKG lands is the console's own *Installation Location* setting; the app does not guess it.
-PS5 **backups** (`.ffpfsc` etc.) take a different lane: the console copies the file to the drive you
-pick (`/mnt/<drive>/homebrew`, staged as `.part`) and ShadowMountPlus mounts it.
+English, Spanish, Portuguese, French, German, Japanese, Arabic (RTL), Chinese, Hindi, Russian,
+Italian, Korean, Turkish, Polish, Dutch. Every key is covered in every language and a build gate
+fails if one is not. One page for TV, PC and phone; controller-navigable, with real focus rings —
+the console browser has both a stick cursor and D-pad focus, so the page uses `:focus`, not
+`:focus-visible`.
 
 ---
 
-## Run it
+## Building
 
-**PC:** run `PKG-MUTANT-SHOP.exe`. It creates `C:\Mutant Games\PS4` and `\PS5`, scans them, finds the
-PS5 on the LAN, opens `http://localhost:8710` and sits in the tray. `config.json` is written beside
-the exe. Drop `.pkg` files into the folders.
+| Artifact | Command | Notes |
+|---|---|---|
+| `PKG-MUTANT-SHOP.exe` | `build_exe.cmd` | Runs from `companion/`. Every gate is fatal. |
+| `PKG-MUTANT-SHOP.elf` | `bash ps5-app/onconsole/build-wsl.sh` | PS5 payload SDK, in WSL. |
+| `PKG-MUTANT-SHOP-PS4.elf` | `bash ps4-app/build-all-wsl.sh` | **The whole chain.** The home-screen icon carries its own copy of the payload, so building only the ELF leaves a stale icon behind. |
 
-**Console:** with Payload Manager running, load `PKG-MUTANT-SHOP.elf` from it
-(`/data/pldmgr/payloads/PKG-MUTANT-SHOP/PKG-MUTANT-SHOP.elf`). The ELF writes the UI, starts
-ShadowMountPlus if it is not up, puts the **PKG MUTANT SHOP** tile under Media if it is missing,
-and toasts that it is ready. Nothing else to install.
+Deploy a new PS5 build with `python companion/deploy.py elf`. Payload Manager resolves a load **by
+basename, from its own directory**, so the registered file is the one that has to change.
 
-**From source:** `python companion/server.py` (Python 3.8+, stdlib; Pillow optional, for card
-thumbnails and the tray icon) or `start.cmd`, which creates `companion/config.json` from the
-template. `bootstrap.cmd` installs Python first if it is missing. `build_exe.cmd` builds the exe
-through `companion/PKG-MUTANT-SHOP.spec` (all gates fatal).
-
-Details, ports, config keys, a second PC: [SETUP.md](SETUP.md).
+Toolchains and prerequisites: **[TOOLCHAIN.md](TOOLCHAIN.md)**,
+**[BUILD-PS5-APP.md](BUILD-PS5-APP.md)**.
 
 ---
 
-## Deploy a new build to the PS5
+## Documentation
 
-```
-python companion/deploy.py elf            # FTP the ELF over Payload Manager's registered copy
-                                          # (.part -> rename), /api/quit, wait for :8710 to close,
-                                          # /loadpayload, confirm /api/health version + built
-python companion/deploy.py check          # shop :8710, Payload Manager :8084, FTP 2121/1337
-```
-
-Payload Manager loads **by basename from its own directory**, so the registered file is the one that
-has to change - see SETUP.md section 5. Build the ELF in WSL with `bash ps5-app/onconsole/build-wsl.sh`.
+| | |
+|---|---|
+| [docs/FEATURES.md](docs/FEATURES.md) | The full feature list, by area. |
+| [SETUP.md](SETUP.md) | The current runbook: PC side, console side, triage. |
+| [CHANGELOG.md](CHANGELOG.md) | Every version. |
+| [RELEASING.md](RELEASING.md) | What gets published, and how a release is cut. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the pieces fit together. |
+| [MUTANT PKG ENGINE.md](MUTANT%20PKG%20ENGINE.md) | The install engine — start here when installs break. |
+| [PAYLOADS-AND-HOMEBREWS.md](PAYLOADS-AND-HOMEBREWS.md) | The payload panel's design, and its measurements. |
+| [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | Everything we ship that we did not write. |
 
 ---
 
-## What it does (3.62.0)
+## Licence and credits
 
-- Library from `param.sfo` metadata and real `icon0.png` art; base / update / DLC grouped by title id;
-  install state read from the console (`bgft.db`, `app.pkg` presence) - never from `app.db` alone
-- Installs through the console's own installer, spawned per install; per-console serialization;
-  integrity check before hand-off; out-of-space refusal only when a package fits on no drive
-- PS5 backups to any drive; ShadowMountPlus carried and started by the ELF; move / delete backups
-- Cheats and patches applied to the running game by the ELF's own engine (expect-gated, revertable)
-- Dashboard tile (`pms-tile.pkg`, embedded) that opens the shop in the PS5 browser
-- Multi-PC: companions find each other on the LAN; the console installs from whichever PC has the game
-- Fifteen languages, RTL for Arabic; one page for TV, PC and phone; controller-navigable
+**GPL-3.0** — see [LICENSE](LICENSE). Everything embedded that we did not write is credited in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), with its own licence.
 
-`CHANGELOG.md` has every version. `ARCHITECTURE.md`, `ROADMAP.md`, `ROADMAP-OVERHAUL.md`,
-`TOOLCHAIN.md`, `BUILD-PS5-APP.md` and `SETUP-REMOTE.md` are older design and status notes and each
-carries a banner saying what in it is no longer true.
+The jailbreak, its loaders and the payloads in the panel are other people's work and stay theirs:
+Payload Manager, ShadowMountPlus, GoldHEN, ftpsrv, nanoDNS, OnionHEN, the WebKit autoloader,
+Itemzflow, FPKGi, RetroArch and PS4-Xplorer. This app replaces none of them, and the injection lane
+on the PS4 is GoldHEN's, not ours.
+
+Built by **XavyProd**.

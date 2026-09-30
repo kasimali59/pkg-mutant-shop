@@ -294,6 +294,38 @@ static int ask_shop_to_open(void) {
     return strstr(rep, "\"launched\":true") ? 0 : -1;
 }
 
+/* IS THE JAILBREAK LOADED, even if its payload loader is not?
+ *
+ * GoldHEN's FTP server is the tell. It comes up with the jailbreak and, unlike the payload loader
+ * on 9090, it SURVIVES a rest/resume - which is exactly the state that produces the confusing
+ * failure this exists to name. An ordinary FTP server is safe to open a connection to and close
+ * again; nothing here does that to 9090, and nothing here ever should.
+ *
+ * Both ports, because which one answers depends on which jailbreak is loaded: 2121 is GoldHEN's,
+ * 1337 is what etaHEN-style setups use. Either one means "the console is jailbroken right now".
+ */
+static int jailbreak_is_loaded(void) {
+    static const int ports[] = { 2121, 1337 };
+    for (int i = 0; i < 2; i++) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) continue;
+        sock_no_sigpipe(s);
+        struct timeval tv;
+        tv.tv_sec = 1; tv.tv_usec = 0;
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons((unsigned short)ports[i]);
+        a.sin_addr.s_addr = inet_addr("127.0.0.1");
+        int rc = connect(s, (struct sockaddr *)&a, sizeof(a));
+        close(s);
+        if (rc == 0) return ports[i];
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------- starting the shop
 
    The package carries the shop's payload at /app0. A payload loader is what turns those bytes into
@@ -420,7 +452,15 @@ int main(void) {
     printf("[PMS] nothing on :%d - starting the shop\n", SHOP_PORT);
     notify("Starting PKG MUTANT SHOP");
 
-    int handed = (send_payload(LOADER_HTTP, 1) == 0) || (send_payload(LOADER_RAW, 0) == 0);
+    /* TWO ROUNDS. Pressing the icon seconds after the exploit lands can find the loader still
+       coming up, and the whole cost of being wrong about that is one refused connect and two
+       seconds. The payload is re-read from /app0 each time, so a half-sent first attempt cannot
+       leave the second one sending the tail of it. */
+    int handed = 0;
+    for (int round = 0; round < 2 && !handed; round++) {
+        if (round) sceKernelUsleep(2 * 1000000);
+        handed = (send_payload(LOADER_HTTP, 1) == 0) || (send_payload(LOADER_RAW, 0) == 0);
+    }
     /* THE TELEVISION IS THE ONLY DISPLAY THIS PROGRAM HAS. The splash is hidden and it draws
        nothing, so between here and the browser coming forward the screen is black - and a black
        screen is what a crash looks like too. One line, once, so the wait is visibly a wait. */
@@ -444,8 +484,19 @@ int main(void) {
         leave();
     }
 
-    notify("PKG MUTANT SHOP cannot start\n"
-           "Nothing on this PS4 can load it right now - run the jailbreak again, then open this");
-    sceKernelUsleep(6 * 1000000);
+    /* TWO FAILURES THAT LOOK IDENTICAL FROM THE SOFA, told apart by one question: is the
+       jailbreak loaded at all? See jailbreak_is_loaded(). The second case is the common one after
+       a rest/resume and the owner can fix it in seconds once it is named. */
+    int jb = jailbreak_is_loaded();
+    printf("[PMS] no payload loader answered; jailbreak %s\n",
+           jb ? "IS loaded (its payload loader is not)" : "is NOT loaded");
+    if (jb)
+        notify("PKG MUTANT SHOP cannot start\n"
+               "The jailbreak is running but its payload loader is not - this happens after rest "
+               "mode. Run the jailbreak again, then open this.");
+    else
+        notify("PKG MUTANT SHOP cannot start\n"
+               "This PS4 is not jailbroken right now - run the jailbreak, then open this.");
+    sceKernelUsleep(8 * 1000000);
     leave();
 }

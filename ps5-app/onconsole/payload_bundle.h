@@ -30,10 +30,30 @@ PB_INCBIN(pb_shadowmount, "payloads/shadowmountplus.elf")
    spawns it per install. See /api/engine/install-spawn. */
 PB_INCBIN(pb_installer,   "payloads/pms-installer.elf")
 
-/* `port` is the service the payload provides, and it doubles as the auto-start rule:
-     >0  launch it only when that port is NOT already bound (relaunching a live install host is
-         exactly what wedges installs), and treat a bound port as "already running".
-      0  ship the file but never auto-start it.
+/* THE OWNER'S OWN SET (3.84.0). These are the payloads they keep in
+   "C:/Mutant Payloads & HomeBrews/Payloads/PS5", refreshed into ps5-app/onconsole/payloads by
+   tools/sync_payload_bins.py so a build never depends on a folder that exists on one PC. They are
+   here so the Payloads & Homebrews panel works on a console with every PC switched off: the shop
+   writes them to PB_DIR at boot and can hand any of them to Payload Manager on request.
+   12.6 MB of ELF buys a console that needs nothing from anywhere to re-arm itself. */
+PB_INCBIN(pb_ftpsrv,      "payloads/ftpsrv.elf")
+PB_INCBIN(pb_nanodns,     "payloads/nanodns.elf")
+PB_INCBIN(pb_kstuff,      "payloads/kstuff.elf")
+PB_INCBIN(pb_onionhen,    "payloads/onionhen.elf")
+PB_INCBIN(pb_pldmgr,      "payloads/pldmgr.elf")
+PB_INCBIN(pb_wkauto,      "payloads/webkit-autoloader-installer.elf")
+
+/* `port` is the service the payload provides, and `autostart` is whether we may start it at boot.
+   THESE USED TO BE ONE FIELD and that was a mistake worth writing down, because the console proved
+   it: `port > 0` meant both "this is how you tell it is running" and "launch it when that port is
+   free", so a payload that runs WITHOUT binding anything could never be described honestly. Payload
+   Manager lists shadowmountplus.elf at a live pid while :10101 is closed - measured 2026-09-30 - so
+   under the old rule it looked stopped AND was a candidate to be started again on every single
+   boot. Two questions, two fields.
+
+     port       the TCP port that PROVES it is running, or 0 when nothing listens for it.
+     autostart  1 only for a payload that provides a service, binds its port reliably, and touches
+                nothing underneath it. Everything else ships and waits to be asked.
 
    Neither Elf Arsenal nor etaHEN is bundled, and neither is the install host. Installs go through
    OUR spawned installer (pms-installer, below), which needs nothing to be running beforehand
@@ -50,19 +70,37 @@ PB_INCBIN(pb_installer,   "payloads/pms-installer.elf")
    embedded at all (see above), so there is no etaHEN entry in the table and nothing of ours can
    start it by accident. server.c's REST_STOP still names it, only to stand down a copy the user
    runs before rest mode. */
-typedef struct { const char *name; const char *filename; int port;
+typedef struct { const char *name; const char *filename; int port; int autostart; int udp;
                  const unsigned char *data; const unsigned char *end; } pb_entry_t;
 
 static const pb_entry_t PAYLOAD_BUNDLE[] = {
   /* 10101, NOT 9021. ShadowMount announces its own listener in its log:
        [API] HTTP/JSON ready: http://127.0.0.1:10101/api/v1 (v1)
-     9021 belongs to elfldr, the ELF loader, which is ALWAYS running. Because this number is
-     also the "is it already up?" test, the check was permanently true and ShadowMount was
-     therefore never actually auto-started by us - it only ever ran because the user
-     autoloads it from Payload Manager. Same wrong port was reported as ShadowMount health. */
-  { "shadowmount", "shadowmountplus.elf", 10101, pb_shadowmount, pb_shadowmount_end },
-  { "pms-installer", "pms-installer.elf", 0,     pb_installer,   pb_installer_end   },
+     9021 belongs to elfldr, the ELF loader, which is ALWAYS running. Because this number used to
+     be the "is it already up?" test as well, the check was permanently true and ShadowMount was
+     therefore never actually auto-started by us - it only ever ran because the user autoloads it
+     from Payload Manager. Same wrong port was reported as ShadowMount health.
+     KEPT AT autostart 1, which is the behaviour this console has had for releases; the owner's
+     autoload.txt starts it first in practice, and this only fires when nothing holds :10101. */
+  { "shadowmount", "shadowmountplus.elf", 10101, 1, 0, pb_shadowmount, pb_shadowmount_end },
+  { "pms-installer", "pms-installer.elf",     0, 0, 0, pb_installer,   pb_installer_end   },
+
+  /* THE OWNER'S SET. Only ftpsrv auto-starts: it binds :2121 reliably, so the port test is a true
+     "is it already up?" and starting it twice cannot happen. nanodns answers on UDP 53 and cannot
+     be probed at all; kstuff, OnionHEN and the webkit installer change the jailbreak layer, which
+     is the owner's call by the rule above; and Payload Manager is the thing that STARTS payloads -
+     relaunching a live loader is how installs get wedged, so it ships and is never auto-started. */
+  { "ftpsrv",      "ftpsrv.elf",           2121, 1, 0, pb_ftpsrv,   pb_ftpsrv_end   },
+    /* 53/UDP, and `udp` is why it can be seen at all: nanodns answers no query sent to it from
+     the LAN even while it is running, so the only observable fact is that its port is taken.
+     autostart stays 0 - a second copy of a DNS server is not something to start unasked. */
+  { "nanodns",     "nanodns.elf",            53, 0, 1, pb_nanodns,  pb_nanodns_end  },
+  { "kstuff",      "kstuff.elf",              0, 0, 0, pb_kstuff,   pb_kstuff_end   },
+  { "onionhen",    "onionhen.elf",            0, 0, 0, pb_onionhen, pb_onionhen_end },
+  { "pldmgr",      "pldmgr.elf",           8084, 0, 0, pb_pldmgr,   pb_pldmgr_end   },
+  { "webkit-autoloader-installer", "webkit-autoloader-installer.elf",
+                                              0, 0, 0, pb_wkauto,   pb_wkauto_end   },
 };
-#define PAYLOAD_BUNDLE_COUNT 2
+#define PAYLOAD_BUNDLE_COUNT 8
 
 #endif

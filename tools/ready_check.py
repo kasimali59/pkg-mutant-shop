@@ -140,7 +140,59 @@ def offline():
         "%s bundle=%s disk=%s" % (how, (emb_sha or "?")[:12], disk_sha[:12]))
 
     for tool, args in (("check_web.py", []), ("message_report.py", ["--check"]),
-                       ("i18n_report.py", ["--check"]), ("test_storage_tiles.py", [])):
+                       ("i18n_report.py", ["--check"]), ("test_storage_tiles.py", []),
+                       ("test_mods_tabs.py", []),
+                       ("test_console_tracker.py", []),
+                       # Which console the mods panel names on the wire. One line, invisible on a
+                       # single-console setup, and it once sent a PS4 game's toggles to the PS5.
+                       ("test_mods_console.py", []),
+                       # The game panel's facts must describe the CHOSEN console. An update
+                       # installed on the PS5 showed as "Installed" with the PS4 selected, so the
+                       # owner could not install it onto the PS4 at all.
+                       ("test_panel_console_state.py", []),
+                       # An INCOMPLETE exe sitting in the repo looks exactly as legitimate as the
+                       # real one in a folder listing, and copying it gives a PS4 that never works
+                       # with nothing on screen to explain why. That cost a round of debugging.
+                       ("check_stale_exe.py", []),
+                       # Compiles the in-game agent and the shop's client from the shipped sources
+                       # and runs them against each other. It is here and not merely available
+                       # because both faults it covers - a protocol mismatch that made every
+                       # memory read fail, and a SIGPIPE that killed the game - were invisible
+                       # from the panel and cost real time on a console to find.
+                       ("test_agent_protocol.py", []),
+                       # /data/GoldHEN/plugins.ini is the OWNER'S file - every other plugin they
+                       # run is listed in it, and it outlives a reboot and a re-jailbreak. This
+                       # lifts the real functions out of the payload and drives them against a
+                       # temporary copy; it found six defects at once, one of which failed every
+                       # toggle on the console because rename() there will not replace a file.
+                       ("test_gh_ini.py", []),
+                       # THE CHEAT ENGINE ITSELF, compiled here against a fake game. Both consoles
+                       # run one copy of this byte logic (ps4_sync_cheat_core keeps them equal), and
+                       # reading it missed a mod applied half-way (which crashed Dark Souls II) and a
+                       # master code that was never applied at all (which is why five of that game's
+                       # seven cheats could not be turned on). It reads the real shipped cheat file
+                       # and sweeps all 1,761 Trainer files through the converter.
+                       ("test_cheat_core.py", []),
+                       # Porting a cheat between builds is mostly a matter of REFUSING, and every
+                       # refusal here protects a game from a plausible-looking wrong address.
+                       ("test_cheat_port.py", []),
+                       # The signal that makes the Updates section react to an install, an update or
+                       # a delete made anywhere. Its failure modes are all "it fired when it should
+                       # not have", which would reload the library for ever.
+                       ("test_content_signal.py", []),
+                       # The cheat library the exe ships to a PS4. A stale or missing archive is
+                       # not a build error - PyInstaller fails on a missing data file, loudly -
+                       # but a STALE one ships an old library to every console that asks the PC
+                       # for cheats, silently, which is the failure worth a gate.
+                       ("pack_cheats.py", ["--check"]),
+                       # PAYLOADS & HOMEBREWS. The catalogue is generated from the owner's folder
+                       # and the payload ELFs are copied out of it into the two onconsole/payloads
+                       # directories the .incbin paths point at, so both can silently fall behind
+                       # the folder they came from - which is exactly the shape of staleness this
+                       # file already exists to catch for the exe and the cheat pack.
+                       ("gen_payload_catalog.py", ["--check"]),
+                       ("sync_payload_bins.py", ["--check"]),
+                       ("test_payloads.py", [])):
         p = subprocess.run([sys.executable, os.path.join(HERE, tool)] + args,
                            capture_output=True, text=True)
         rec("build", tool, p.returncode == 0, (p.stdout or p.stderr).strip().splitlines()[-1][:70]
@@ -412,6 +464,23 @@ def online(a):
     rec("net", "both sides are the same version",
         bool((ph or {}).get("version")) and (ph or {}).get("version") == (ch or {}).get("version"),
         "%s vs %s" % ((ph or {}).get("version"), (ch or {}).get("version")))
+    # AND THE THIRD SIDE. This called two "both sides" while stamp_version.py stamps the PS4's own
+    # SHOP_VERSION and /api/health reports it - so the one artifact nobody checked was the one this
+    # project has twice caught running a build behind. Skipped, not failed, when no PS4 answers:
+    # a console that is switched off is not a version mismatch.
+    _, pdev, _ = get(pc + "/api/devices", 15)
+    p4 = ""
+    for c in ((pdev or {}).get("consoles") or []):
+        if str(c.get("platform") or "").lower() == "ps4" and c.get("ip"):
+            p4 = "http://%s:%d" % (c["ip"], int(c.get("shop_port") or 8710))
+            break
+    if p4:
+        ok4, h4, _ = get(p4 + "/api/health", 10)
+        rec("net", "the PS4 payload is the same version too",
+            bool((h4 or {}).get("version")) and (h4 or {}).get("version") == (ph or {}).get("version"),
+            "%s vs %s" % ((h4 or {}).get("version"), (ph or {}).get("version")))
+    else:
+        rec("net", "the PS4 payload is the same version too", True, "no PS4 answering - skipped")
     # Third-party install hosts must be absent - the whole point of our own engine.
     rec("net", "no third-party install host is listening",
         not any(port_open(a.ip, p, 1.5) for p in (12800, 9090, 9081, 1337, 9040)),

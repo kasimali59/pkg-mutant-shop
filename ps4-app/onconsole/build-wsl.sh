@@ -61,6 +61,26 @@ python3 "$TOOLS/check_web.py"      || { echo "ABORT: the UI script is broken - n
 python3 "$TOOLS/i18n_report.py" --check || { echo "ABORT: a language is missing keys the app uses." >&2; exit 1; }
 python3 "$TOOLS/message_report.py" --check || { echo "ABORT: a user-facing message is off house style." >&2; exit 1; }
 
+# A PS5 game must not offer a PS4 tab in its mods section. The rule lives in one line of
+# modsTabConsoles(), which defers to eligibleConsoles() - so an edit to EITHER can undo it,
+# and the symptom only appears on a two-console fleet, for one class of title.
+python3 "$TOOLS/test_mods_tabs.py" || { echo "ABORT: the mods console tabs offer the wrong consoles." >&2; exit 1; }
+
+# The panel installs onto ONE console, so every fact it prints must be that console's. An update
+# already on the PS5 read as "Installed" with the PS4 selected, which made it uninstallable there.
+python3 "$TOOLS/test_panel_console_state.py" || { echo "ABORT: the game panel is describing the wrong console." >&2; exit 1; }
+
+# Following a console that changed address is the only code allowed to REWRITE one, so its
+# refusals matter as much as its successes - see the test for the nine cases.
+python3 "$TOOLS/test_console_tracker.py" || { echo "ABORT: the console tracker would mis-address a console." >&2; exit 1; }
+
+# THE OWNER'S PLUGIN LIST. /data/GoldHEN/plugins.ini is their file, it survives a reboot and a
+# re-jailbreak, and a bad line in it hangs the next game launch with nothing of ours running to undo
+# it. This gate lifts the real functions out of server_ps4.c, compiles them on the PC and drives them
+# against a temporary file - which is how six defects in them were found at once, including a writer
+# that failed every single toggle because rename() here will not replace an existing file.
+python3 "$TOOLS/test_gh_ini.py" || { echo "ABORT: the plugins.ini code would damage the owner's plugin list." >&2; exit 1; }
+
 # The 304 lane, and the two copies of etag_matches() that must stay identical.
 python3 "$TOOLS/test_etag.py" || { echo "ABORT: the conditional-GET lane is broken, or the two copies have drifted." >&2; exit 1; }
 
@@ -71,6 +91,11 @@ python3 "$HERE/../../ps5-app/onconsole/gen_web_bundle.py" "$WEB" "$HERE/web_bund
 # Keep our copy of the SQLite reader honest against the PS5 original.
 python3 "$TOOLS/ps4_sync_sqmini.py" --check \
   || { echo "ABORT: sqmini.h has drifted from ps5-app/onconsole/server.c - re-run tools/ps4_sync_sqmini.py" >&2; exit 1; }
+
+# The cheat engine this payload now shares with the PS5. Same argument as sqmini above, with more
+# at stake: this copy is ~1,400 lines of engine, and a copy nobody checks is a copy that rots.
+python3 "$TOOLS/ps4_sync_cheat_core.py" --check \
+  || { echo "ABORT: cheat_core.h has drifted from ps5-app/onconsole/server.c - re-run tools/ps4_sync_cheat_core.py" >&2; exit 1; }
 
 # THE DASHBOARD APP THIS ELF CARRIES. tile_bundle.h .incbin's it, so a missing package is a link
 # error with no explanation; say so here instead. Build order is the package first, then this - and

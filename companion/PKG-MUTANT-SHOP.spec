@@ -49,6 +49,20 @@ _gate("test_storage_tiles.py", True)       # the M.2 duplicate tile must not com
 # controls shipped answering 500 with a NameError because nothing ever pressed them in a test.
 _gate("lint_python.py", True, ["--check"])
 
+# THE SHIPPED CHEAT ARCHIVE, GATED ON BEING CURRENT. assets/cheats-library.zip is a datas entry, so
+# PyInstaller fails loudly when it is MISSING and ships a STALE one without a word - and stale is the
+# worse failure, because every PS4 that asks this PC for cheats then receives an old library and
+# nothing says so. Repacking is cheap and deterministic, so this repacks once and only then insists:
+# the build dies only if the repack did not fix it. (The rule three lines up: a gate that only runs
+# when someone remembers is not a gate.)
+_packer = os.path.join(_ROOT, "tools", "pack_cheats.py")
+if not os.path.exists(_packer):
+    raise SystemExit("ABORT: tools/pack_cheats.py is missing - cannot verify the shipped cheat library.")
+if subprocess.call([sys.executable, _packer, "--check"], cwd=_ROOT) != 0:
+    print("spec: the shipped cheat library is out of date - repacking")
+    subprocess.call([sys.executable, _packer], cwd=_ROOT)
+    _gate("pack_cheats.py", True, ["--check"])
+
 
 a = Analysis(
     ['server.py'],
@@ -60,7 +74,17 @@ a = Analysis(
     # Forward slashes on purpose: PyInstaller accepts them and a backslash before 't' in
     # 'tile-pkg' is a tab in any string that is not raw.
     datas=[('../web', 'web'),
-           ('../ps4-app/tile-pkg/IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg', 'ps4-tile')],
+           ('../ps4-app/tile-pkg/IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg', 'ps4-tile'),
+           # The PS4 payload, so this exe can bring a PS4's shop up with nobody pressing
+           # the icon. A GoldHEN payload does not survive a reboot and there is no autoload
+           # folder on that console, so without this the only route back is the icon.
+           ('../ps4-app/onconsole/PKG-MUTANT-SHOP-PS4.elf', 'ps4-elf'),
+           # THE CHEAT LIBRARY, as ONE archive (tools/pack_cheats.py). A PS5 carries its own copy
+           # inside its ELF; a PS4 cannot, so it takes the library from the PC - and until this
+           # line the shipped exe had none to give, which made cheats a repo-only feature on that
+           # console. One file and not 6275, because the one-file build unpacks every bundled data
+           # file into %TEMP% on every launch; server.py expands it beside the exe exactly once.
+           ('../assets/cheats-library.zip', 'cheats-pack')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

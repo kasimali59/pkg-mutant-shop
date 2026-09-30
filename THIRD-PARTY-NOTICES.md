@@ -8,8 +8,15 @@ GPL-3.0 program (ShadowMountPlus), so nothing less permissive would be possible 
 This file lists what the two shipped artifacts carry or depend on that is not ours, read out of
 `ps5-app/onconsole/payload_bundle.h`, `cheat_bundle.h`/`gen_cheat_bundle.py`, `jb.c`,
 `companion/PKG-MUTANT-SHOP.spec` and the files themselves on 2026-09-04. Verified as part of
-3.60.0: `PAYLOAD_BUNDLE_COUNT` is **2** (ShadowMountPlus and our own installer). **etaHEN is not
+3.60.0: `PAYLOAD_BUNDLE_COUNT` was **2** (ShadowMountPlus and our own installer). **etaHEN is not
 embedded** and nothing of Elf Arsenal is embedded.
+
+**Re-verified 2026-09-30 for 3.84.0**, which added the Payloads & Homebrews panel: the PS5 ELF now
+carries **8** payloads and the PS4 ELF **2**, listed below. They are embedded **unmodified** and
+byte-identical to the copies the owner supplied, refreshed by `tools/sync_payload_bins.py`, and only
+`ftpsrv` and ShadowMountPlus are ever started without being asked. The homebrew **packages** are not
+embedded by anything - they are 264 MB and are copied to the console's own disk instead - so no
+homebrew's licence is engaged by redistribution inside an artifact.
 
 ## Inside `PKG-MUTANT-SHOP.elf`
 
@@ -20,6 +27,37 @@ embedded** and nothing of Elf Arsenal is embedded.
 | **`jb.c` / `jb.h`** (the credential-escalation helper linked into both ELFs) | verbatim from **CheatRunner** by maj0r - `github.com/notmaj0r/CheatRunner`, `src/jb.c` | GPL-3.0 | Raises the process credentials so the system installer accepts our request. The cheat engine in `server.c` is also derived from CheatRunner's, with the project owner's authorisation (CHANGELOG, "Licence"). The old CheatRunner tree on a console is read only to migrate cheats out of it. |
 | **pms-tile.pkg** (`tile/pms-tile.pkg`, `tile_bundle.h`) | ours - `ps5-app/tile-pkg/` | GPL-3.0 | The dashboard tile package (title `PKGM00001`). Built with LibProsperoPkg (not in this repository - see `MUTANT PKG ENGINE.md` section 8.5); the checked-in binary is currently the only copy. |
 | **The cheat and patch library** (`assets/cheats`, packed by `gen_cheat_bundle.py` into `cheat_bundle.h` + `cheats.pack`; 7,022 files in the 3.60.0 ELF, fewer once the packer's `json`/`mc4`/`shn`/`patches`-only list is rebuilt) | copied from **TeeKay87/HEN-Cheats-Collection** - `github.com/TeeKay87/HEN-Cheats-Collection` (the folder `mods-cheats-patches-others`; the copy used here was taken 2026-08-02 and the patch archive inside it was built 2026-07-12) | **GPL-3.0** (that repository's `LICENSE`, the same text as ours) | Embedded and extracted to `/data/pkg-mutant-shop/cheats` on the console's first boot. See the note below on the files' own credits. |
+
+### The payloads carried for the Payloads & Homebrews panel (3.84.0)
+
+Embedded by `.incbin` (`payload_bundle.h` on the PS5, `payload_bundle_ps4.h` on the PS4), written to
+`/data/pkg-mutant-shop/payloads` at boot, and sent to a loader only when the owner presses the tile -
+except the two marked auto-start. Sources are the upstream projects; none is in this repository.
+
+| Component | Origin | Licence | How it is used |
+|---|---|---|---|
+| **ftpsrv** (`ftpsrv-ps5.elf`, `ftpsrv-ps4.elf`) | `github.com/ps5-payload-dev/ftpsrv` | GPL-3.0 | Embedded unmodified in both ELFs. **Auto-started on the PS5** when nothing holds `:2121`; never auto-started on the PS4, which has no loader that can be asked. |
+| **nanodns** (`nanodns.elf`, `nanodns-ps4.elf`) | `github.com/ps5-payload-dev/nanodns` | GPL-3.0 | Embedded unmodified in both ELFs. Never auto-started: it answers on UDP 53, which cannot be probed, so "is it already running?" has no honest answer. |
+| **kstuff** (`kstuff.elf`) | part of the PS5 jailbreak chain | see upstream | Embedded unmodified. **Never auto-started** - it is the jailbreak layer, and `payload_bundle.h` records why that is the owner's call. |
+| **OnionHEN** (`OnionHEN.elf`) | `github.com/w90008/onionHEN` | see upstream | Embedded unmodified. Never auto-started (jailbreak layer). |
+| **Payload Manager** (`pldmgr_v0.5.2.elf`) | itsPLK - the binary names itself "Payload Manager v0.5.2 by PLK" | see upstream | Embedded unmodified. **Never auto-started**: it is the thing that starts payloads, and relaunching a live loader is how installs get wedged. |
+| **WebKit autoloader installer** (`webkit-autoloader-installer_v0.5.0.elf`) | `github.com/itsPLK/ps5-webkit-autoloader` | see upstream | Embedded unmodified. Never auto-started (jailbreak layer). |
+
+The owner's copy of **ShadowMountPlus replaced ours in 3.84.0** - theirs is 2,437,704 bytes
+(`3f716a7b…`), ours was 2,465,896 (`15af22e6…`). Same project and licence as the row above.
+
+**Licences marked "see upstream"** are recorded that way deliberately rather than guessed: those
+projects' terms were not read as part of this release, and writing a licence name we have not
+verified into this file would be worse than saying so. Anyone redistributing this build should check
+them. All six are redistributed unmodified and in full, which is the form every common licence is
+most permissive about.
+
+### The homebrew packages - NOT redistributed
+
+`Itemzflow` (`ITEM00001`), `PS4-Xplorer` (`LAPY20009`), `FPKGi` (`PKGI13337`), `Internet Browser`
+(`MOUU12023`) and `RetroArch` (`PPSA99169`) are **not inside any artifact**. The catalogue names
+them, and the bytes are copied from the owner's own folder to their own console. Nothing about them
+is distributed by this project.
 
 ### The cheat library - what is in it and whose work it is
 

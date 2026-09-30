@@ -37,9 +37,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote, quote, parse_qs
 
 import pkg_meta
+import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.64.0"
+VERSION = "3.86.0"
 
 _BUILD_ID = None
 
@@ -99,12 +100,21 @@ if getattr(sys, "frozen", False):          # PyInstaller one-file .exe
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     WEB_DIR = os.path.normpath(os.path.join(HERE, "..", "web"))
-# The cheat + patch library. WHERE IT ACTUALLY LIVES, because three comments in this file used to
-# disagree: the ELF embeds all of it (cheat_bundle.h + cheats.pack, 7022 files) and writes it to
-# the console itself at boot; the exe bundles ONLY web/ (PKG-MUTANT-SHOP.spec, datas=web), so in
-# the frozen build CHEATS_DIR does not exist and the sync below has nothing to push - by design.
-# From source, assets/cheats is the repo copy and the FTP/HTTP sync is a repair path for a console
-# whose /data was wiped.
+# The cheat + patch library. WHERE IT ACTUALLY LIVES - and this comment has been wrong before, so it
+# is written from the files rather than from memory:
+#
+#   the PS5 ELF embeds all of it (cheat_bundle.h + cheats.pack, 7022 files) and writes it to that
+#   console itself at boot, so a PS5 never needs the PC for cheats;
+#
+#   THE EXE DOES CARRY IT. PKG-MUTANT-SHOP.spec has four datas entries, one of them
+#   ('../assets/cheats-library.zip', 'cheats-pack'), and _unpack_cheat_library() below expands that
+#   archive into HERE/cheats on a daemon thread at startup - which IS CHEATS_DIR when frozen. The
+#   previous version of this comment said the exe bundled "ONLY web/" and that the sync therefore had
+#   "nothing to push - by design". Both halves were false, and the PS4 depends on this: it cannot
+#   embed the library, so it takes it from the PC;
+#
+#   from source, assets/cheats is the repo copy, and the sync is also a repair path for a console
+#   whose /data was wiped.
 # THE PS4 DASHBOARD APP. A real PS4 application package (PKGM00001) that puts the shop on the
 # console's home screen; built by ps4-app/tile-pkg/build-wsl.sh and shipped inside the exe, because
 # a PS4 whose only copy of the shop is a payload has nothing to press once a rest cycle takes the
@@ -115,14 +125,88 @@ if getattr(sys, "frozen", False):
 else:
     PS4_TILE_PKG = os.path.normpath(os.path.join(
         HERE, "..", "ps4-app", "tile-pkg", "IV0000-PKGM00001_00-PKGMUTANTSHOP001.pkg"))
+# THE PS4 PAYLOAD, so this PC can start a PS4's shop without anyone pressing the icon. Bundled
+# into the exe beside the tile package: ~9 MB, and it is the difference between "switch the PS4 on"
+# and "switch the PS4 on, then go and find the icon". The PS5's payload is deliberately NOT bundled
+# - it is 34 MB, and its own lane (Payload Manager) is a different mechanism with its own tool.
+if getattr(sys, "frozen", False):
+    PS4_PAYLOAD_ELF = os.path.join(sys._MEIPASS, "ps4-elf", "PKG-MUTANT-SHOP-PS4.elf")
+else:
+    PS4_PAYLOAD_ELF = os.path.normpath(os.path.join(
+        HERE, "..", "ps4-app", "onconsole", "PKG-MUTANT-SHOP-PS4.elf"))
+
 PS4_TILE_KEY = "PKG-MUTANT-SHOP-PS4-APP.pkg"
 PS4_TILE_TID = "PKGM00001"
 PS4_TILE_CID = "IV0000-PKGM00001_00-PKGMUTANTSHOP001"
 
+# WHERE THE LIBRARY IS, AND HOW IT GETS THERE IN A FROZEN BUILD.
+#
+# From source it is the repo's own folder. Frozen, it is a folder beside the exe that is expanded
+# once out of the archive the exe carries (see _unpack_cheat_library below) - NOT sys._MEIPASS,
+# which this line used to point at. _MEIPASS is the one-file build's scratch directory: PyInstaller
+# unpacks every bundled data file into it on EVERY launch and deletes it on exit, so putting six
+# thousand cheat files there would mean six thousand file writes each time the app starts. Beside
+# the exe, they are written once and stay.
 if getattr(sys, "frozen", False):
-    CHEATS_DIR = os.path.join(sys._MEIPASS, "cheats")
+    CHEATS_DIR = os.path.join(HERE, "cheats")
+    CHEATS_ZIP = os.path.join(sys._MEIPASS, "cheats-pack", "cheats-library.zip")
 else:
     CHEATS_DIR = os.path.normpath(os.path.join(HERE, "..", "assets", "cheats"))
+    CHEATS_ZIP = ""
+
+
+def _unpack_cheat_library():
+    """Expand the bundled cheat library beside the exe, once, and say nothing if there is none.
+
+    A PS5 carries its own copy inside its ELF. A PS4 cannot (its payload lives in a shared system
+    daemon), so it takes the library from this PC - and before this, a PC running the shipped exe
+    had no library to give. The stamp file names the archive that produced the folder, so a release
+    with a different library replaces it and every other run costs one read of 12 characters."""
+    if not CHEATS_ZIP or not os.path.exists(CHEATS_ZIP):
+        return
+    import hashlib
+    import zipfile
+    try:
+        ident = hashlib.sha256()
+        with io.open(CHEATS_ZIP, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                ident.update(chunk)
+        ident = ident.hexdigest()[:12]
+        stamp = os.path.join(CHEATS_DIR, ".library-id")
+        try:
+            if io.open(stamp, encoding="utf-8").read().strip() == ident:
+                return
+        except Exception:
+            pass
+        os.makedirs(CHEATS_DIR, exist_ok=True)
+        with zipfile.ZipFile(CHEATS_ZIP) as z:
+            names = z.namelist()
+            for name in names:
+                # Paths come from an archive this build made, but an archive is still input: a
+                # name that climbs out of the folder is refused rather than trusted.
+                if name.endswith("/") or ".." in name.replace("\\", "/").split("/"):
+                    continue
+                dest = os.path.join(CHEATS_DIR, name.replace("/", os.sep))
+                if not os.path.abspath(dest).startswith(os.path.abspath(CHEATS_DIR) + os.sep):
+                    continue
+                if os.path.exists(dest):
+                    continue                      # never overwrite a file the owner put here
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                # A DOTFILE TEMP, in the same folder as its target. These four folders are exactly
+                # what the console sync pushes FROM, and the listing there excludes dotfiles - so
+                # naming the temp this way means a sync running while the library is still expanding
+                # cannot pick up a half-written file. It was "<name>.part", which was a legitimate
+                # member of that listing.
+                tmp = os.path.join(os.path.dirname(dest), "." + os.path.basename(dest) + ".part")
+                with z.open(name) as src, io.open(tmp, "wb") as out:
+                    out.write(src.read())
+                os.replace(tmp, dest)             # nothing half-written is ever left behind
+        io.open(stamp, "w", encoding="utf-8").write(ident)
+        print("[cheats] library ready: %d file(s) in %s" % (len(names), CHEATS_DIR))
+    except Exception as e:
+        # A PC that cannot write beside its own exe has no library to push, which is exactly where
+        # this started and is better than an app that will not start.
+        print("[cheats] could not expand the bundled library: %s" % e)
 # Only what the on-console engine reads (server.c: CHEAT_JSON_DIR / SHN / MC4 / PATCH_DIR). The
 # xml/xml_orbis/xml_prospero folders are the pre-migration layout the console never opens, so
 # pushing them cost transfer for files nothing looks at.
@@ -138,8 +222,13 @@ def _cheat_local_files(sub):
     ldir = os.path.join(CHEATS_DIR, sub)
     if not os.path.isdir(ldir):
         return set()
+    # .part IS EXCLUDED TOO, belt and braces. The unpack now writes its temps as dotfiles, which the
+    # test above already covers, but this listing is the ONE place these four folders are enumerated
+    # for the push - so the rule belongs here as well, where it cannot be bypassed by some future
+    # writer that chooses a different temp name.
     return {n for n in os.listdir(ldir)
-            if not n.lower().endswith(".mc4.xml") and not n.startswith(".")}
+            if not n.lower().endswith(".mc4.xml") and not n.lower().endswith(".part")
+            and not n.startswith(".")}
 
 # ---------------------------------------------------------------------------------------------
 # [audit 17] A LOG, because the shipped exe had none.
@@ -312,6 +401,13 @@ DEFAULT_CONFIG = {
     "performance": {"serve_chunk_bytes": 1048576},
     "integrity": {"enabled": True, "verify_before_install": True, "on_local_corrupt": "warn"},
     "federation": {"enabled": False, "name": "", "peers": []},
+    # OUR OWN RELEASES. `channel` decides which of our releases this device is offered: "stable" is
+    # a published GitHub release, and only the big versions are published - see RELEASING.md, which
+    # is the whole reason this is a channel and not "is there a newer number anywhere".
+    # `github_token` is needed ONLY while our repository is private; every third-party upstream in
+    # curated.json is public and reads fine without it. It is never logged and goes nowhere except
+    # api.github.com.
+    "updates": {"channel": "stable", "github_token": "", "check_on_start": True},
     "content_ownership_ack": False,
 }
 
@@ -1011,6 +1107,13 @@ def federation_self(srv):
     # game inside the loop below - 226 sockets per /api/federation, which every peer polls every
     # 20 s - for a value that cannot change between two lines of the same reply.
     ip = lan_ip()
+    # WHAT THIS PC CAN HAND OVER FOR THE PAYLOADS PANEL. A second machine running this exe has no
+    # copy of the owner's folder, so without this every tile there reads "not on this PC" and
+    # nothing can be pressed - while the bytes sit on a console or on the PC next to it.
+    try:
+        payloads_have = payload_engine.fleet_summary(srv.cfg, WEB_DIR)
+    except Exception:
+        payloads_have = []
     games = []
     for g in srv.library.games:
         # Every installable file this PC holds for the title, tagged with what it is. Sending
@@ -1057,7 +1160,8 @@ def federation_self(srv):
                         # read-only: this reply is how other PCs identify us, so it must
                         # never wait on the console. Health refreshes the value.
                         "online": bool(con and con.pldmgr.alive(probe=False))} if con else None,
-            "counts": _library_counts(srv), "count": len(games), "games": games,
+            "counts": _library_counts(srv), "count": len(games), "payloads": payloads_have,
+        "games": games,
             # So another machine can draw this PC's tile with the same four facts as its own.
             "storage": _library_capacity(srv),
             # Who else we can see. The console reads this and registers them itself, so one PC
@@ -1838,6 +1942,11 @@ def _port_open(host, port, timeout=0.4):
 
     A refused connect returns immediately; only a filtered or black-holed port costs the full timeout.
     Used to avoid paying an HTTP timeout to talk to a service that plainly is not there.
+
+    NEVER POINT THIS AT A PAYLOAD LOADER. Opening GoldHEN's port 9090 and closing it again stops it
+    listening - this project has lost the loader that way twice, once from nothing more than a port
+    scan. The only thing that may touch that port is a POST carrying the whole payload, which is
+    what ps4_start_shop() does.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -1981,6 +2090,434 @@ def ensure_library_tree(root, layout=LIBRARY_LAYOUT):
         except OSError as e:
             return {"ok": False, "error": str(e), "created": created, "root": base}
     return {"ok": True, "root": base, "created": created}
+
+
+def console_probe(ip, timeout=1.5):
+    """What the console at this address says about itself, or None if that is not a console.
+
+    Asks /api/health and requires on_console, rather than just opening a socket. Another PC on this
+    network runs the companion on the same port, and "something answered 8710" would have this
+    follow a console to a laptop - which this project has already done once, saving a peer PC as
+    ps5_ip. The reply carries the platform and, since 3.67.0, the console's durable id."""
+    if not ip:
+        return None
+    try:
+        with urllib.request.urlopen("http://%s:8710/api/health" % ip, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        return d if d.get("on_console") else None
+    except Exception:
+        return None
+
+
+def _plat_of(d):
+    """ps4 or ps5, from a health reply or a config entry. Unknown is a PS5 - the rule this whole
+    app follows, because that is what a console that predates PS4 support is."""
+    return "ps4" if str((d or {}).get("platform") or "").lower() == "ps4" else "ps5"
+
+
+def _helper_arm_state(b, tid):
+    """{helper_autoarm, helper_armed} for one title, or {} when the console cannot say.
+
+    Absent keys mean "unknown", and the page treats unknown exactly as it behaved before these
+    existed - so an older console payload is never worse off."""
+    try:
+        d = b.engine_agent() or {}
+    except Exception:
+        return {}
+    if not d or d.get("ok") is False:
+        return {}
+    armed_for = str(d.get("armed_for") or "")
+    armed = bool(d.get("armed_default")) or (tid in [x for x in armed_for.split(",") if x])
+    return {"helper_autoarm": bool(d.get("autoarm")), "helper_armed": armed}
+
+
+# What each console's content looked like the last time we asked, by console id (or address, for an
+# entry too old to have one). Module level rather than per-Bridge: bridges are rebuilt whenever the
+# fleet reloads, and a signature that reset with them would report a change that did not happen.
+_CONTENT_SIG = {}
+
+
+def note_content_change(fleet, health, con, log=None):
+    """Did this console's installed content move since the last poll? If so, make the page re-read.
+
+    apps_sig is a stat of app.db and addcont.db, answered by both payloads on /api/health. An older
+    payload sends nothing, and nothing means unknown - in which case this does nothing at all, which
+    is exactly how the app behaved before the field existed.
+
+    Returns True when it bumped. Never raises: this runs inside the console tracker's loop, and a
+    failure here must not stop the tracker from doing its own job.
+    """
+    try:
+        sig = str((health or {}).get("apps_sig") or "")
+        if not sig:
+            return False
+        # BOTH KEYS, because the id arrives LATER than the address. track_consoles learns a console's
+        # id the first time it reports one, so the key moved from "10.0.0.86" to "d125ea52..." on that
+        # pass - the new key had no previous value, and the first-sighting rule swallowed the first
+        # real change after it. Either key matching counts as "seen before".
+        cid = str((con or {}).get("console_id") or "")
+        ip = str((con or {}).get("ip") or "")
+        key = cid or ip
+        if not key:
+            return False
+        prev = _CONTENT_SIG.get(cid) if cid else None
+        if prev is None and ip:
+            prev = _CONTENT_SIG.get(ip)
+        _CONTENT_SIG[key] = sig
+        if cid and ip and ip in _CONTENT_SIG:
+            _CONTENT_SIG.pop(ip, None)      # the id is the durable name; do not keep two forever
+        if prev is None or prev == sig:
+            return False           # a first sighting is not news, and neither is no change
+        ip = str((con or {}).get("ip") or "")
+        for b in list(getattr(fleet, "bridges", {}).values()):
+            if getattr(b, "ip", None) == ip:
+                b.invalidate_apps()
+                break
+        lib = getattr(fleet, "library", None)
+        if lib is not None:
+            # ONE MESSAGE PER THING THAT HAPPENED. _finished_installing already bumps library_gen the
+            # moment one of our own installs lands, and the page toasts on every bump - so without
+            # this, forty-five seconds later the tracker sees apps_sig move and toasts a second time
+            # for the same install. The owner has said twice that one is enough. The signature is
+            # still recorded above, so the next genuine change is not missed.
+            # SUPPRESS ONLY THE ECHO OF OUR OWN INSTALL. _finished_installing stamps _told_ms when
+            # one of our tasks lands and bumps the gen itself; forty-five seconds later apps_sig
+            # catches up and this would toast the same install a second time.
+            # It deliberately does NOT stamp on its own bumps: two console-side changes a minute apart
+            # are two things that happened, and the owner should see both.
+            told = getattr(lib, "_told_ms", 0.0)
+            if time.time() - told < 120.0:
+                if log:
+                    log(" %s content changed, and the library was told about that install already"
+                        % (con.get("name") or con.get("platform") or ip or "console"))
+                return False
+            lib.gen += 1
+        else:
+            # NOTHING TO ACT ON. The signature is recorded, so the next change is still noticed - but
+            # saying "the library will re-read" when there is no library to tell is a claim about
+            # something that did not happen. Found by a test that could not previously get this far.
+            return False
+        if log:
+            log(" %s changed what it has installed - the library will re-read"
+                % (con.get("name") or con.get("platform") or ip or "console"))
+        return True
+    except Exception:
+        return False
+
+
+def track_consoles(cfg, fleet, log=None, scan=True):
+    """Make the saved console addresses match reality. Returns what changed, as sentences.
+
+    THE ONLY WRITER OF A CONSOLE'S ADDRESS. Everything else in this file reads consoles; this is
+    where they are corrected, so there is one place to look when one is wrong.
+    """
+    say = log or (lambda m: None)
+    conf = cfg.get("consoles") or []
+    changed = []          # things worth TELLING somebody about
+    dirty = [False]       # ...and things merely worth SAVING, which is not the same set
+
+    # ---- 1. Who is where we think they are? One health call each; this is the cheap half.
+    here, silent = {}, []
+    for i, c in enumerate(conf):
+        h = console_probe(c.get("ip"))
+        if h:
+            here[i] = h
+            # CONTENT, not identity: apps_sig moving means something was installed, updated or
+            # deleted on that console. Free - this health document is already in hand.
+            note_content_change(fleet, h, c, log=say)
+            # LEARN THE ID the first time a console reports one. An entry written before identity
+            # existed, or by hand, has none - and it needs one before it can ever be followed.
+            cid = h.get("console_id")
+            if cid and c.get("console_id") != cid:
+                # LEARNING AN ID IS NOT NEWS, BUT IT MUST PERSIST. This used to set the field and
+                # nothing else, and because it added no line to `changed` the config was never
+                # written - so every restart re-learned it and the id was only ever in memory. The
+                # whole point of an id is that it outlives a restart, which made that a quiet
+                # defeat of the feature rather than a cosmetic miss.
+                dirty[0] = True
+                if c.get("console_id"):
+                    # The id at this address is not the one that used to be here: two consoles
+                    # swapped leases, or this entry was pointed somewhere new by hand. Trust what
+                    # is answering now - it is the only thing here that is measured.
+                    changed.append("%s at %s is a different console than before"
+                                   % (c.get("name") or _plat_of(c).upper(), c["ip"]))
+                c["console_id"] = cid
+        else:
+            silent.append(i)
+
+    if not silent or not scan:
+        # Nothing to look for - but an id learned above still has to reach the disk.
+        if dirty[0]:
+            try:
+                if fleet is not None:
+                    fleet.reload()
+            except Exception:
+                pass
+            try:
+                save_config(cfg)
+            except Exception:
+                pass
+        return changed
+
+    # ---- 2. Something is missing, so look. This is the expensive half and it is why the caller
+    # rate-limits us.
+    seen = []
+    for f in discover_ps5(cfg):
+        if not f.get("confirmed"):
+            continue
+        h = console_probe(f["ip"])
+        if h:
+            seen.append((f["ip"], h))
+    if not seen:
+        return changed
+
+    taken = {c.get("ip") for i, c in enumerate(conf) if i in here}
+    # Every id this PC already accounts for, so adoption below never adds a console twice.
+    known_ids = {c.get("console_id") for c in conf if c.get("console_id")}
+
+    for i in silent:
+        c = conf[i]
+        want_id = c.get("console_id")
+        want_plat = _plat_of(c)
+        old_ip = c.get("ip")
+
+        # IDENTITY FIRST, and it is certainty rather than inference.
+        hit = [ip for ip, h in seen
+               if want_id and h.get("console_id") == want_id and ip not in taken]
+        how = "id matches"
+
+        if not hit and not want_id:
+            # THE ENTRY HAS NOTHING TO IDENTIFY IT BY - and that is not a rare corner. An id is only
+            # ever learned from a console you can already reach, so an entry whose address went stale
+            # BEFORE ids existed can never learn one. Chicken and egg, and it is permanent.
+            #
+            # THIS USED TO REQUIRE THE CANDIDATE TO HAVE NO ID EITHER, and that quietly disabled the
+            # whole fallback the moment every console started reporting one. Measured on the owner's
+            # second PC: its PS4 entry had no id, the real PS4 answered at another address WITH an id,
+            # and the entry could be neither followed (no id to match) nor adopted (the platform
+            # already had an entry). A dead address for ever, on a PC where everything else worked.
+            #
+            # The old reasoning was that a candidate we CAN name must be a DIFFERENT console from an
+            # entry we cannot. That does not follow: the entry has no id to compare against, so the
+            # candidate's id says nothing about the entry - only that the candidate runs a build new
+            # enough to have one, which is now all of them.
+            #
+            # What the guard is really for is a house with a SECOND console of the same platform, and
+            # that is still refused: this fires only when EXACTLY ONE console of this platform is
+            # unaccounted for, never when its id already belongs to another entry, and never across
+            # platforms. The move is announced, so a wrong guess is visible and correctable instead of
+            # silent.
+            cands = [ip for ip, h in seen
+                     if _plat_of(h) == want_plat
+                     and ip not in taken
+                     and (not h.get("console_id") or h["console_id"] not in known_ids)]
+            if len(cands) == 1:
+                hit = cands
+                how = ("the only %s on this network that no other entry accounts for"
+                       % want_plat.upper())
+            elif len(cands) > 1:
+                say("  %s could be any of %d consoles - leaving its address alone"
+                    % (c.get("name") or want_plat.upper(), len(cands)))
+
+        if not hit:
+            continue
+
+        new_ip = hit[0]
+        c["ip"] = new_ip
+        taken.add(new_ip)
+        nh = dict(seen)[new_ip]
+        if nh.get("console_id"):
+            c["console_id"] = nh["console_id"]
+            known_ids.add(nh["console_id"])
+        # The two legacy address keys still drive a great deal and must follow the list.
+        if want_plat == "ps4" and cfg.get("ps4_ip") == old_ip:
+            cfg["ps4_ip"] = new_ip
+        elif want_plat != "ps4" and cfg.get("ps5_ip") == old_ip:
+            cfg["ps5_ip"] = new_ip
+        changed.append("%s moved %s -> %s (%s)"
+                       % (c.get("name") or want_plat.upper(), old_ip, new_ip, how))
+
+    # ---- 3. A console we have never met, answering right now. The narrow adoption rule: a
+    # platform with no entry at all. An id we do not know is not by itself a reason to add one -
+    # a console the owner deliberately removed would come straight back.
+    have_plat = {_plat_of(c) for c in conf}
+    for ip, h in seen:
+        p = _plat_of(h)
+        if p in have_plat or ip in taken:
+            continue
+        if h.get("console_id") and h["console_id"] in known_ids:
+            continue            # this is a console we already have, currently at another address
+        used = {str(x.get("id") or "") for x in conf}
+        cid, n = p, 0
+        while cid in used:
+            n += 1
+            cid = "%s-%d" % (p, n)
+        conf.append({"id": cid, "name": p.upper(), "ip": ip, "platform": p,
+                     "console_id": h.get("console_id") or "",
+                     "ftp_port": cfg.get("ftp", {}).get("port", 2121)})
+        cfg["consoles"] = conf
+        have_plat.add(p)
+        taken.add(ip)
+        if p == "ps4" and not cfg.get("ps4_ip"):
+            cfg["ps4_ip"] = ip
+        elif p != "ps4" and not cfg.get("ps5_ip"):
+            cfg["ps5_ip"] = ip
+        changed.append("found a %s at %s that this PC had never seen" % (p.upper(), ip))
+
+    if changed or dirty[0]:
+        # NOT reconcile_consoles(). It folds the settings panel's two address FIELDS into the
+        # console list, and from a list this function has just corrected it does the opposite of
+        # what is wanted: a test with no ps4_ip/ps5_ip set watched it empty the list completely
+        # after a correct move was applied. The legacy keys are kept in step above, one at a time,
+        # only when they actually pointed at the address that changed.
+        #
+        # RELOAD, NEVER REPLACE. The queue holds a reference to this exact Fleet object, so
+        # swapping in a new one would leave every running job talking to the old addresses.
+        # Ps5Bridge reads its address out of the config dict on each call, so a reload is all it
+        # takes for everything to follow.
+        try:
+            if fleet is not None:
+                fleet.reload()
+        except Exception:
+            pass
+        try:
+            save_config(cfg)
+        except Exception:
+            pass
+        for m in changed:
+            say(" %s" % m)
+    return changed
+
+
+
+
+def start_console_tracker(httpd):
+    """Keep the saved addresses true, for as long as the app is running.
+
+    The cheap check runs often; the /24 scan only after a console has actually gone quiet, and no
+    more than once every few minutes. A console that is simply switched off must not have this PC
+    sweeping the network all day - the scan costs 254 connects per port.
+    """
+    def loop():
+        time.sleep(40)                       # let startup settle; it does its own first pass
+        last_scan = 0.0
+        last_look = 0.0                      # the "never met this platform" sweep, separately
+        look_every = 900.0                   # 15 min to start, doubling while it finds nothing
+        while True:
+            try:
+                cfg = httpd.cfg
+                quiet = [c for c in (cfg.get("consoles") or [])
+                         if not console_probe(c.get("ip"), timeout=1.2)]
+                now = time.time()
+                # Scan when something we KNOW about is missing, and not more than every few minutes.
+                may_scan = bool(quiet) and (now - last_scan) > 180
+
+                # AND, MUCH MORE SLOWLY, when a whole platform has never been met. The rule above is
+                # right for a console that went quiet and wrong for one that was never configured:
+                # on a PC whose only entry is a PS5 that answers, `quiet` is empty for ever, so the
+                # sweep never ran and a PS4 on the same network could never be adopted however long
+                # the app stayed open. That was the second half of a real two-PC report.
+                # It backs off while it keeps finding nothing, so a household with no PS4 does not
+                # pay 254 connects every quarter of an hour indefinitely, and it stops entirely once
+                # a console of that platform is adopted - the platform is no longer missing.
+                have_plats = {(_plat_of(c) or "") for c in (cfg.get("consoles") or [])}
+                missing = [p for p in ("ps5", "ps4") if p not in have_plats]
+                if not may_scan and missing and (now - last_look) > look_every:
+                    may_scan = True
+                    last_look = now
+                    look_every = min(look_every * 2, 3600.0)
+                elif not missing:
+                    look_every = 900.0       # met one: be quick again if another goes missing later
+                if may_scan:
+                    last_scan = time.time()
+                track_consoles(cfg, getattr(httpd, "fleet", None),
+                               log=lambda m: print("[consoles]%s" % m), scan=may_scan)
+            except Exception as e:
+                print("[consoles] check skipped: %r" % e)
+            time.sleep(45)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def ps4_start_shop(ip, log=None):
+    """Hand the PS4 payload to GoldHEN's loader. Returns a sentence, or None when not attempted."""
+    say = log or (lambda m: None)
+    if not os.path.exists(PS4_PAYLOAD_ELF):
+        return None                      # a build that does not carry it simply cannot do this
+    try:
+        body = io.open(PS4_PAYLOAD_ELF, "rb").read()
+    except Exception:
+        return None
+    req = urllib.request.Request("http://%s:9090/" % ip, data=body,
+                                 headers={"Content-Type": "application/octet-stream"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            r.read()
+    except Exception as e:
+        say("  %s: the payload loader did not take it (%s)" % (ip, e.__class__.__name__))
+        return None
+    # It is only started when the shop answers. "The loader took the bytes" is not the same thing,
+    # and reporting it as success is how a hand-over that went nowhere reads as working.
+    end = time.time() + 40
+    while time.time() < end:
+        time.sleep(2)
+        h = console_probe(ip, timeout=2.0)
+        if h:
+            return "started the shop on %s (v%s)" % (ip, h.get("version") or "?")
+    return "handed the payload to %s but its shop did not come up" % ip
+
+
+def start_console_autostart(httpd):
+    """Bring up the shop on any console that is switched on and does not have one.
+
+    See the long note in tools for why this exists: a PS4 payload does not survive a reboot and
+    GoldHEN has no autoload, so after every restart something has to hand the ELF over. The icon
+    does it when pressed; this does it when nobody presses anything.
+    """
+    def loop():
+        time.sleep(60)                     # after the tracker's first pass, so addresses are true
+        tried = {}
+        misses = {}
+        while True:
+            try:
+                for c in (httpd.cfg.get("consoles") or []):
+                    ip = c.get("ip")
+                    if not ip or _plat_of(c) != "ps4":
+                        continue           # the PS5 has its own lane; see the note above
+                    if console_probe(ip, timeout=1.2):
+                        misses[ip] = 0
+                        continue           # its shop is already answering
+                    # A SINGLE MISS IS NOT A DEAD CONSOLE - IT IS USUALLY US.
+                    #
+                    # Reloading the payload deliberately (tools/push_consoles.py) takes the shop
+                    # down for a few seconds. This loop used to see that one gap and hand the
+                    # console the ELF BUNDLED IN THIS EXE, which is whatever was current when the
+                    # exe was built - so a freshly pushed payload got silently replaced by an older
+                    # one, and the next test measured the wrong build. That cost a real debugging
+                    # session: the console reported a build eight hours older than the one just
+                    # pushed, and its boot undid the very thing being tested.
+                    #
+                    # Two consecutive misses ~30 s apart means the shop is actually gone, not
+                    # restarting. A genuinely off-and-on console still recovers, one cycle later.
+                    misses[ip] = misses.get(ip, 0) + 1
+                    if misses[ip] < 2:
+                        continue
+                    # Is the console even there? FTP survives a rest/resume; the loader does not,
+                    # so this is the state worth acting on rather than a console that is off.
+                    if not (_port_open(ip, c.get("ftp_port") or 2121) or _port_open(ip, 1337)):
+                        continue
+                    if time.time() - tried.get(ip, 0) < 300:
+                        continue
+                    tried[ip] = time.time()
+                    print("[autostart] %s is on with no shop - handing it the payload" % ip)
+                    msg = ps4_start_shop(ip, log=lambda m: print("[autostart]%s" % m))
+                    if msg:
+                        print("[autostart] %s" % msg)
+            except Exception as e:
+                print("[autostart] skipped: %r" % e)
+            time.sleep(30)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def consoles_from_cfg(cfg):
@@ -2637,6 +3174,34 @@ class Library:
                 sizes[PS4_TILE_KEY] = os.path.getsize(PS4_TILE_PKG)
             except OSError:
                 pass
+        # THE HOMEBREWS RIDE THE SAME ROUTE, FOR THE SAME REASON, AND WITH THE SAME BOUNDARY.
+        # Registered here - after `games` is assembled, exactly like the PS4 app above - they are
+        # served by /library/<key>, which already answers HEAD, 200 and 206 correctly, so a homebrew
+        # installs through the engine the games use instead of needing a second file server.
+        #
+        # AND THEIR FOLDER IS NEVER A LIBRARY ROOT. It must not go in local_paths: scan() registers
+        # every .pkg under a root as a GAME, is_game_folder() accepts the RetroArch folder, and
+        # normalise_pkg_names() renames files on disk whose stem is not [A-Za-z0-9._-] - which would
+        # rewrite the owner's "PS4-Xplorer 2.0 (LAPY20009) - 2.08.pkg". So the bytes are reached by
+        # absolute path, here, and build_library never sees them.
+        try:
+            # LIVE, for the same reason the panel is: a homebrew replaced or renamed in the
+            # folder must be servable under the name it has now, not the one it had at build time.
+            _cat, _csig = payload_engine.live_catalog(self.cfg, WEB_DIR)
+            for _it in (_cat.get("items") or []):
+                if _it.get("kind") != "homebrew":
+                    continue
+                _p = payload_engine.local_path(self.cfg, _it)
+                if not _p or _it.get("shape") != "pkg":
+                    continue          # a folder-shaped app is a backup, not a package to serve
+                _k = payload_engine.serve_key(_it)
+                reg[_k] = _p
+                try:
+                    sizes[_k] = os.path.getsize(_p)
+                except OSError:
+                    pass
+        except Exception as _e:
+            print("[payloads] catalogue not registered: %r" % (_e,))
         self.file_registry, self.file_sizes = reg, sizes
         # str(... or ""): a sources.json entry with no name (or name: null) raised inside this
         # sort, at boot, before the log banner - the frozen exe simply closed.
@@ -3072,6 +3637,47 @@ class Ps5Bridge:
         except Exception:
             return {}
 
+    def engine_agent(self, ttl=5.0):
+        """Is the in-game helper installed, listed, and currently inside a game?
+
+        PS4 only in practice - a PS5 needs no helper because its payload reaches game memory by
+        itself - but it is not gated on platform here. A console that does not serve the route
+        answers with its own {} and the caller sees that, which is better than this file deciding
+        in advance what a console can do. That assumption is exactly what kept the PS4's cheat
+        routes unreachable while the console was serving them perfectly well.
+
+        CACHED BRIEFLY, because the Cheats panel polls while it is open: without this, every poll
+        would add a console round trip to answer a question whose answer only changes when somebody
+        arms or purges something. Five seconds is far shorter than any arming action and far longer
+        than the panel's own interval."""
+        now = time.time()
+        if now - getattr(self, "_agent_at", 0) < ttl:
+            return getattr(self, "_agent_cache", {})
+        try:
+            d = self._shop("/api/engine/agent", timeout=8) or {}
+        except Exception:
+            d = {}
+        self._agent_cache, self._agent_at = d, now
+        return d
+
+    def engine_agent_set(self, enabled, title=None, all_games=False):
+        """List or unlist the helper.
+
+        `title` lists it for ONE game by appending a [TID] section, which touches no existing line and
+        so cannot affect any other game or any other plugin the owner runs. That is the path the
+        Cheats panel uses. `all_games` is the blanket [default] form, and the console refuses it
+        unless it is asked for by name - leaving it out used to be enough to arm every game.
+        """
+        body = {"enabled": 1 if enabled else 0}
+        if title:
+            body["title"] = title
+        if all_games:
+            body["all_games"] = 1
+        try:
+            return self._shop_post("/api/engine/agent", body, timeout=20)
+        except Exception:
+            return {}
+
     def cheat_rescan(self):
         """File anything dropped in since boot, without reloading the payload."""
         try:
@@ -3160,12 +3766,13 @@ class Ps5Bridge:
         # at ~2 s, and this sits on the health path.
         #
         # The memo below hides it most of the time and then pays it again every ten minutes, on
-        # whichever poll happens to land after the timer expires. There is nothing to ask a PS4
-        # here, so ask it nothing. When the PS4 payload can report its own foreground title this is
-        # where that goes.
-        if self.is_ps4():
-            self._run_cache, self._run_ts = {}, now
-            return {}
+        # whichever poll happens to land after the timer expires.
+        #
+        # THE PS4 CAN ANSWER THIS NOW, and this is the "where that goes" the old comment here
+        # promised. Its payload reports the foreground title in /api/health (measured signatures -
+        # sceSystemServiceGetAppIdOfBigApp plus a process walk), and its in-game agent supplies the
+        # pid and image base a cheat needs. mutant_running() asks the console's own engine, which
+        # is the same question for both platforms, so there is nothing PS4-specific left to skip.
         r = self.mutant_running()          # our engine first
         if r:
             r = {"titleId": r.get("title_id"), "titleName": "", "pid": r.get("pid"),
@@ -4660,26 +5267,25 @@ class Ps5Bridge:
         def say(m):
             if log:
                 log(m)
-        # NOT TO A PS4, AND THE REASON IS NOT STORAGE. Cheats are applied by writing a running
-        # game's memory through a kernel read/write, and the PS4's jailbreak gives a payload
-        # userland only - its own server answers every /api/cheat, /api/mods and /api/patch route
-        # with "not available on the PS4 yet". So this would have pushed up to 7022 files, one FTP
-        # upload at a time, over the link an install may be using, to fill a folder nothing on that
-        # console will ever read. The 15-minute background thread already asks for a PS5 by name;
-        # this is the manual button, which asked for whatever console the request resolved to.
-        if self.is_ps4():
-            return {"ok": False, "unsupported": True, "platform": "ps4",
-                    "error": "Cheats need a PS5. The PS4 has no engine to run them, so there is "
-                             "nothing for these files to do there."}
+        # THE PS4 READS THESE NOW. This used to refuse, and the reason it gave was correct at the
+        # time: the PS4's payload answered every cheat route with "not available yet", so pushing
+        # up to 7022 files one FTP upload at a time filled a folder nothing would ever read.
+        #
+        # What changed is the engine, not the storage. The PS4 payload carries the PS5's cheat
+        # engine now (ps4-app/onconsole/cheat_core.h, generated from ps5-app/onconsole/server.c)
+        # and reads its library from exactly this folder. Unlike the PS5, whose ELF ships the whole
+        # library inside it, the PS4's does not - its payload is loaded into a system daemon and is
+        # kept small deliberately - so this sync is the ONLY way its library gets there.
         if not os.path.isdir(CHEATS_DIR):
-            # The cheat library is embedded in the ELF, not in the exe (it would roughly
-            # triple the download for a copy the console already carries). Say that, instead of
-            # printing an internal _MEI path that reads like a broken install.
+            # THIS IS NO LONGER "BY DESIGN". The exe ships assets/cheats-library.zip and expands it
+            # here on a background thread at startup, so a missing folder in a frozen build means the
+            # expansion has not finished yet, or it failed. The old message said this build did not
+            # carry a library at all, which sends whoever reads it somewhere else entirely.
             frozen = getattr(sys, "frozen", False)
             return {"ok": False, "error":
-                    ("This build does not carry the cheat library - the PS5 app has all 7022 "
-                     "files embedded and writes them to %s itself, so there is nothing to push."
-                     % CONSOLE_CHEAT_ROOT) if frozen else
+                    ("The cheat library has not finished unpacking yet. It expands to %s the first "
+                     "time this app runs - give it a moment and try again. If it never appears, the "
+                     "app could not write beside its own file." % CHEATS_DIR) if frozen else
                     ("no bundled cheat library at %s" % CHEATS_DIR)}
         if not self.ip:
             return {"ok": False, "error": "no console configured"}
@@ -5677,6 +6283,9 @@ class Queue:
             lib = getattr(self, "library", None)
             if lib is not None:
                 lib.gen += 1          # nudges the UI to reload without waiting for a poll
+                # STAMPED, so the console tracker does not toast the same install again forty-five
+                # seconds later when apps_sig catches up. See note_content_change.
+                lib._told_ms = time.time()
         except Exception:
             pass
         # A backup carries no artwork of its own — the console only creates
@@ -7398,6 +8007,29 @@ class Handler(BaseHTTPRequestHandler):
             _run_ok = ((engine_ready or ftp_on) if (_b is not None and _b is b)
                        else (_b.up() if _b is not None else False))
             _run = ((_b.running_title() if _run_ok else {}) if _b else {}) or {}
+            # ...AND IF THAT CONSOLE HAS NO GAME, ASK THE OTHERS.
+            #
+            # `_b` is the console this REQUEST is about, which on a PC with no ?console= is the
+            # first one configured - the PS5. A game running on the PS4 was therefore never asked
+            # after, and the library never floated it to the top. The PS4 was answering the
+            # question correctly the whole time; nobody was putting it.
+            #
+            # Preference is unchanged: the console the page is about still wins when it has a game,
+            # so a single-console machine and a viewer sitting on a console both behave exactly as
+            # before. This only fills a gap that used to read as "nothing is running anywhere".
+            if not _run.get("titleId"):
+                try:
+                    for _ob in (srv.fleet.bridges.values() if getattr(srv, "fleet", None) else []):
+                        if _ob is _b:
+                            continue
+                        if not _ob.up():          # cached TCP connect; a console that is off is free
+                            continue
+                        _o = _ob.running_title() or {}
+                        if _o.get("titleId"):
+                            _run = _o
+                            break
+                except Exception:
+                    pass
             # Cached helper state, so adding these two keys costs health nothing - but only ask at
             # all when the console is actually there. helper_status() probes ShadowMount and FTP,
             # and against a switched-off console each of those waits out its own timeout.
@@ -7841,8 +8473,18 @@ class Handler(BaseHTTPRequestHandler):
             # The registry's known peers, in the same shape /api/library's `peers` uses. This
             # read a `_fed_peers` attribute that nothing ever set, so it answered [] for ever.
             reg = getattr(srv, "peers", None)
-            return self._json({"peers": [peer_summary(p) for p in (reg.known() if reg is not None else [])],
-                               "enabled": bool(srv.cfg.get("federation", {}).get("enabled"))})
+            _known = reg.known() if reg is not None else []
+            # `enabled` USED TO REPORT A CONFIG FLAG THAT GATES NOTHING, and it reported it as
+            # False on a machine that was fully paired - the owner read that and concluded the two
+            # PCs were not talking, while every payload on one was already reachable from the other.
+            # Auto-discovery is unconditional (the registry scans whether or not the flag is set)
+            # and `federation.peers` is only a list of HAND-WRITTEN extras, so the flag has meant
+            # nothing since discovery landed. Report what is true instead: are we federated?
+            _cfg = srv.cfg.get("federation", {})
+            return self._json({"peers": [peer_summary(p) for p in _known],
+                               "enabled": bool(_known) or bool(_cfg.get("peers")),
+                               "discovery": True,
+                               "configured": len(_cfg.get("peers") or [])})
         if path == "/api/storage":
             b = _bridge_for(srv, self)
             devs = None
@@ -8052,13 +8694,17 @@ class Handler(BaseHTTPRequestHandler):
             if not b:
                 return self._json({"ok": False, "error": "no console configured"}, 400)
             info = b.cheat_paths() or {}
-            # A PS4 HAS NO CHEAT ENGINE, and its ELF says so in words rather than going quiet: it
-            # answers every /api/cheat path with unsupported plus platform ps4 and a sentence.
-            # Bolting an upload URL and an FTP probe onto that refusal describes five drop folders
-            # the console will never watch, and the settings card then reads "not set up yet" -
-            # which sends the owner hunting for a missing cheat file for a feature that does not
-            # exist there. A PS5 never sets `unsupported`, so this branch cannot fire on one.
-            if info.get("unsupported") or b.is_ps4():
+            # PASS THROUGH A REFUSAL THE CONSOLE ACTUALLY MADE - and only that.
+            #
+            # This used to refuse on `b.is_ps4()` as well, which was right when it was written: the
+            # PS4 payload answered every cheat route with "not available on the PS4 yet", and
+            # bolting an upload URL and five drop folders onto that refusal would have sent an
+            # owner hunting for a missing cheat file for a feature that did not exist. It now has
+            # the engine, files dropped cheats itself, and answers this route with its real drop
+            # folder and library paths - so deciding here what that console can do overrides the
+            # console's own answer with a stale belief. `unsupported` is the console speaking, and
+            # that is still honoured.
+            if info.get("unsupported"):
                 return self._json(info or {"ok": False, "unsupported": True, "platform": "ps4",
                                            "error": "mods_not_on_ps4",
                                            "message": "Mods and cheats are not available on the "
@@ -8071,6 +8717,16 @@ class Handler(BaseHTTPRequestHandler):
             info["ftp"] = ("ftp://%s:%d" % (b.ip, live_ftp)) if live_ftp else ""
             info["ftp_port"] = live_ftp or 0
             return self._json(info)
+        if path == "/api/engine/agent":
+            # THE IN-GAME HELPER, READ FROM A PC. Only the console served this, so from the desktop
+            # app the control reported nothing and could not be changed - see the POST twin below
+            # for the half that writes. A plain relay: the console owns the answer, this just puts
+            # the question to the right machine.
+            b = _bridge_for(srv, self)
+            if not b:
+                return self._json({"ok": False, "error": "no console configured"}, 400)
+            return self._json(b.engine_agent() or
+                              {"ok": False, "error": "console did not answer"})
         if path == "/api/cheats/rescan":
             if not self._origin_ok():
                 return self._refuse_cross_site()
@@ -8190,13 +8846,56 @@ class Handler(BaseHTTPRequestHandler):
                     installed_ver = a.get("app_ver") or ""
                     break
 
+            # ?version= LETS THE PANEL ASK FOR A DIFFERENT CHEAT FILE THAN THE INSTALLED VERSION'S.
+            #
+            # A title often has several cheat files, one per game version, and they are NOT equal:
+            # Dark Souls II ships 1 mod for 01.00 and 7 for 01.02. The engine correctly prefers the
+            # exact match, so an owner on 01.00 saw a single mod and no way to reach the other six -
+            # "mods are missing" from where they sit. This is the deliberate way to pick another
+            # one. It is not a free-for-all: the engine's expect-gate still refuses any write whose
+            # target does not already hold the bytes that file documents, so a file written for
+            # another build fails closed instead of corrupting the game.
+            want_ver = (parse_qs(u.query).get("version") or [""])[0].strip()
+            pick_ver = want_ver or installed_ver
+
             # OUR engine answers first, for ANY title. When the game is running we also get its
             # pid/base, so mods report live on/off state and can be toggled; when it is not we
             # still list them (read-only) instead of pretending the title has no cheats.
             # CheatRunner is a last resort, never a requirement.
-            mine = b.mutant_running(installed_ver)
-            live = bool(mine and mine.get("title_id") == tid and mine.get("cheat_file"))
-            src = mine if live else (b.mutant_find(tid, installed_ver) or {})
+            mine = b.mutant_running(pick_ver)
+            # "THE GAME IS RUNNING" IS NOT "A CHEAT CAN BE WRITTEN INTO IT".
+            #
+            # On a PS5 those are one question: the payload reaches the game's memory itself, so a
+            # running game with a cheat file is a game that can be toggled. On a PS4 they come
+            # apart, and this is the ordinary case rather than an edge one - the engine lives in a
+            # small helper GoldHEN loads INTO the game, so a game started before the helper was
+            # listed is running, has a cheat file, and cannot be written to at all. The console
+            # says so plainly: running:true, can_cheat:false, pid 0.
+            #
+            # Reading `live` from title + file alone offered every tile as pressable, sent the
+            # write to pid 0, and reported a failure that reads as a bad cheat file. A console that
+            # does not report can_cheat (an older PS5 build) is unchanged: absent means "do not
+            # know", and the old answer stands.
+            # Is the game that is running the one this request is about? Hoisted because five
+            # fields below need it and three of them used to skip it.
+            same_game = bool(mine and mine.get("title_id") == tid)
+            live = bool(same_game and mine.get("cheat_file"))
+            if live and "can_cheat" in (mine or {}):
+                live = bool(mine.get("can_cheat"))
+            # When the panel asked for a specific version, that choice wins over whatever file the
+            # running-game lookup settled on - otherwise picking 01.02 would silently keep showing
+            # the 01.00 file the engine prefers.
+            src = mine if live else {}
+            if want_ver or not src.get("cheat_file"):
+                found = b.mutant_find(tid, pick_ver) or {}
+                if found.get("cheat_file"):
+                    if want_ver:
+                        src = dict(src or {})
+                        src["cheat_file"] = found["cheat_file"]
+                        src["match"] = found.get("match", "")
+                        src["exact"] = found.get("exact")
+                    else:
+                        src = found
             if src.get("cheat_file"):
                 pid = mine.get("pid") if live else None
                 base = mine.get("base") if live else None
@@ -8206,18 +8905,60 @@ class Handler(BaseHTTPRequestHandler):
                     # An UNKNOWN installed version is not the same as a mismatch. PS5 titles
                     # often expose no APP_VER, and treating that as incompatible hid every
                     # cheat for them. Only flag a mismatch when we can actually prove one.
-                    compatible = (not installed_ver) or bool(src.get("exact")) or (fv == installed_ver)
+                    # NOT `src["exact"]`. That comes from mutant_find(tid, pick_ver) and means
+                    # "exact against what was ASKED FOR" - so deliberately picking a version other
+                    # than the installed one reported compatible:true, and the panel painted the row
+                    # with the ok colour and "matched", skipping the mismatch note entirely (it lives
+                    # in the if(!okv) arm). Proven live: PPSA01342 with version=01.00 installed on
+                    # 01.02 came back compatible. The question this field answers is whether the file
+                    # suits the game ON THE CONSOLE, and only installed_ver can answer it.
+                    compatible = (not installed_ver) or (fv == installed_ver)
                     reason = src.get("match", "")
                     if not installed_ver and reason == "other version":
                         reason = "installed version unknown"
                     return self._json({
                         "ok": True, "reachable": True, "engine": "mutant", "title_id": tid,
                         "installed_version": installed_ver, "file_version": fv,
+                        # Which version the panel is CURRENTLY showing, so a version picker can
+                        # mark the active one without re-deriving it from the file name.
+                        "selected_version": want_ver or fv,
                         "file": src["cheat_file"].rsplit("/", 1)[-1],
                         "path": src["cheat_file"],
                         "format": doc.get("format") or _cheat_format(src["cheat_file"]),
                         "compatible": compatible, "reason": reason,
+                        # `running` is what the panel gates its tiles on, so it carries the
+                        # can_cheat meaning above. The console's own view is kept beside it under
+                        # its own names, so the UI can say WHY a running game cannot be toggled
+                        # instead of falling back to "not running", which is not true and sends
+                        # the owner to relaunch a game that is already on screen.
                         "running": live, "pid": pid, "base": base,
+                        # SAME TITLE OR NOTHING. `running` and `game_running` both test
+                        # mine["title_id"] == tid, but helper, can_cheat and cheat_blocked below used
+                        # to read `mine` unconditionally - and `mine` is mutant_running(), an
+                        # unfiltered read of whatever is running on that console. So with game A
+                        # running and the panel open on title B, those three described A: the panel
+                        # would report a helper present and a reason that belonged to another game.
+                        "game_running": same_game,
+                        "helper": (mine or {}).get("helper") if same_game else None,
+                        "can_cheat": (mine or {}).get("can_cheat") if same_game else None,
+                        # WHY a running game cannot be written to, in the console's own words.
+                        # "no_engine" means this console has no way to reach a running process at
+                        # all - not that something needs relaunching. Telling somebody to restart
+                        # a game that is on screen in front of them is the kind of wrong answer
+                        # that sends people hunting through cheat files for an hour.
+                        "cheat_blocked": ((mine or {}).get("why") or "") if same_game else "",
+                        # IS THE HELPER ALREADY SET UP FOR THIS TITLE? Only a PS4 has one, and this is
+                        # only asked when the panel might otherwise offer a button - i.e. when the
+                        # helper is not already in the running game - so the common path costs nothing.
+                        **(_helper_arm_state(b, tid) if (not live and b.is_ps4()) else {}),
+                        # A MASTER CODE CHANGES WHAT "OFF" MEANS. When the file carries one the
+                        # engine installs it before the first mod, and for the json form there are no
+                        # documented original bytes to put back - so turning every cheat off leaves
+                        # it in the running game and only closing the game clears it. The panel says
+                        # so once. Absent from an older payload, and absent means "no note".
+                        "master": bool(doc.get("master")),
+                        "master_removable": bool(doc.get("master_removable")),
+                        "platform": (mine or {}).get("platform") or ("ps4" if b.is_ps4() else "ps5"),
                         "mods": [{"index": m.get("index"), "name": m.get("name"),
                                   "entries": m.get("entries"),
                                   "state": m.get("state") or "unknown",
@@ -8291,6 +9032,10 @@ class Handler(BaseHTTPRequestHandler):
             res = b.console_cheats(tid) if b else None
             return self._json({"title_id": tid, "reachable": res is not None,
                                "cheats": (res or {}).get("cheats", []), "patches": (res or {}).get("patches", [])})
+        if path == "/api/payloads":
+            return self._payloads_list(q)
+        if path == "/api/payloads/updates":
+            return self._payloads_updates(q)
         if path == "/api/queue":
             return self._json({"tasks": srv.queue.snapshot()})
         if path == "/api/dpi/reload":                # the dock's manual reload button
@@ -8392,6 +9137,27 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
 
         # ---- mods / cheats / patches — OUR Mutant engine first, CheatRunner only as a fallback ----
+        if path == "/api/engine/agent":
+            # Listing or unlisting the in-game helper changes what loads into every game on that
+            # console, so it is a POST and it carries the same cross-site guard as everything else
+            # that changes a console.
+            if not self._origin_ok():
+                return self._refuse_cross_site()
+            b = _bridge_for(srv, self, body)
+            if not b:
+                return self._json({"ok": False, "error": "no console configured"}, 400)
+            # THE KEY IS MANDATORY HERE TOO. `1 if enabled else 0` turns a missing or misspelled
+            # field into an explicit {"enabled": 0}, which is a PURGE - so the console's own refusal
+            # would never be reached and a malformed request would quietly wipe a deliberate arm.
+            want = body.get("enabled")
+            if want not in (0, 1, True, False):
+                return self._json({"ok": False, "error": "This request has to say \"enabled\":0 or "
+                                                         "\"enabled\":1 - it is not guessed"}, 400)
+            return self._json(b.engine_agent_set(
+                want,
+                title=(str(body.get("title") or "").strip() or None),
+                all_games=bool(body.get("all_games"))) or
+                {"ok": False, "error": "console did not answer"})
         mm = re.match(r"^/api/mods/([^/]+)/(select|toggle|apply|disable-all)$", path)
         if mm:
             tid, act = unquote(mm.group(1)), mm.group(2)
@@ -8666,6 +9432,11 @@ class Handler(BaseHTTPRequestHandler):
                                  "hold": body.get("mode") == "queued"})
             return self._json({"ok": True, "id": job, "lane": "pc-copy",
                                "from": src_game.get("source_pc"), "dest": dest})
+        if path == "/api/payloads/update":
+            return self._payloads_update(body)
+        if path in ("/api/payloads/send", "/api/payloads/seed", "/api/payloads/install",
+                    "/api/payloads/run"):
+            return self._payloads_act(path.rsplit("/", 1)[-1], body)
         if path == "/api/install":
             return self._install(body)
         if path == "/api/hosts/cleanup":             # kept as a no-op: see the reply
@@ -8707,6 +9478,416 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._json({"ok": srv.queue.retry(m.group(1))})
         return self._json({"error": "not found"}, 404)
+
+    # ---------------------------------------------------------- Payloads & Homebrews ----------
+    def _pl_platform_of(self, bridge):
+        if bridge is None:
+            return ""
+        try:
+            return "PS4" if bridge.is_ps4() else "PS5"
+        except Exception:
+            return ""
+
+    def _pl_find(self, ident, plat):
+        """The item a press means, read from the folder as it is NOW.
+
+        THIS USED THE SHIPPED CATALOGUE AND THE LIST ROUTE USED THE LIVE ONE, so the moment the
+        update button replaced webkit-autoloader-installer_v0.5.1.elf with _v0.5.2.elf the panel
+        showed 0.5.2 and pressing it answered "that file is not on this PC" - because the lookup was
+        still describing a filename that no longer existed. Two views of one folder is how that
+        happens; there is one now.
+        """
+        want = str(plat or "").upper()
+        cat, _sig = payload_engine.live_catalog(self.server.cfg, WEB_DIR)
+        for it in (cat.get("items") or []):
+            if it.get("id") == ident and str(it.get("platform") or "").upper() == want:
+                return it
+        return None
+
+    def _payloads_list(self, q):
+        """Everything the panel draws, with state that was OBSERVED rather than assumed.
+
+        Three different states, and they are not interchangeable:
+          here       the bytes are on THIS PC. The exe runs on machines that never had the folder.
+          live       a port belonging to this payload answered. None means nothing listens for it,
+                     so there is no way to tell - which the tile says, instead of showing a green
+                     light nobody can back.
+          installed  a homebrew is a title this console already has, read from the console itself.
+        """
+        srv = self.server
+        b = _bridge_for(srv, self)
+        plat = self._pl_platform_of(b)
+        ip = getattr(b, "ip", None) if b is not None else None
+        # THE FOLDER AS IT IS NOW, not as it was when this build was made. A payload the update
+        # button just replaced, or a file dropped in while the panel is open, is in this answer.
+        # It costs one stat per catalogued file when nothing has changed.
+        cat, fsig = payload_engine.live_catalog(srv.cfg, WEB_DIR)
+        items = [dict(it) for it in (cat.get("items") or [])
+                 if not (False)]
+
+        # ONE batched probe, for this console's ports only. The PS4's :9090 is never in here: a
+        # bare connect to GoldHEN's loader stops it listening, and the POST of an ELF is the probe.
+        ports = set()
+        for it in items:
+            if str(it.get("platform") or "").upper() == plat:
+                try:
+                    p = int(it.get("port") or 0)
+                except (TypeError, ValueError):
+                    p = 0
+                if p:
+                    ports.add(p)
+        # ONE ROUND OF PROBES PER FOUR SECONDS, HOWEVER MANY VIEWERS THERE ARE. The panel polls to
+        # stay current, and every poll used to cost a port sweep plus a Payload Manager call plus a
+        # console app list - per open page. The panel is not worth that; the console's accept loop
+        # certainly is not (the PS5 answers on one). The cache is keyed on the console so a fleet
+        # does not share an answer.
+        _ck = "%s|%s" % (plat, ip or "-")
+        _now = time.time()
+        _pc = getattr(srv, "_pl_state_cache", None)
+        if _pc is None:
+            _pc = srv._pl_state_cache = {}
+        _hit = _pc.get(_ck)
+        if _hit and (_now - _hit[0]) < 4.0:
+            live, running, installed = _hit[1], _hit[2], _hit[3]
+            cst = _hit[4] if len(_hit) > 4 else None
+        else:
+            live = payload_engine.live_ports(ip, ports) if ip else set()
+            running, installed, cst = None, None, None
+            _pc[_ck] = None      # replaced below once the two console reads are done
+
+        # THE PROCESS LIST IS THE TRUTH, AND A PORT IS ONLY A SECOND OPINION. Measured on this
+        # console: ShadowMountPlus runs happily WITHOUT binding 10101, so a port probe reported it
+        # as stopped while pldmgr listed it at pid 104 - the same shape of wrong answer the 9021
+        # mix-up gave for months. Payload Manager can see kstuff and nanodns too, which nothing
+        # listens for at all, so this is the difference between the panel knowing and guessing.
+        #
+        # Only the PS5 has a Payload Manager. The PS4 has GoldHEN's loader, which cannot be asked
+        # anything - and must never be connected to just to ask.
+        try:
+            if _hit and (_now - _hit[0]) < 4.0:
+                pass
+            else:
+                # ASK THE CONSOLE FIRST. It can see things this PC cannot: a UDP service whose port
+                # is simply taken (nanodns answers nobody), and on a PS5 everything Payload Manager
+                # has in its process list. A PS4 has no process list at all, so without this its
+                # nanodns is invisible - which is exactly what the owner reported after starting it
+                # from this panel and watching the tile stay grey.
+                cst = payload_engine.console_state(ip)
+                running = (cst or {}).get("live")
+                if running is None and b is not None and plat != "PS4":
+                    pm = b.pldmgr
+                    if callable(pm):
+                        pm = pm()
+                    procs = pm.processes() if pm else []
+                    if procs:
+                        # STEMS, NOT FILENAMES. pldmgr reports the name a payload was BUILT as:
+                        # ftpsrv-ps5.elf runs as ftpsrv.elf and pldmgr_v0.5.2.elf as pldmgr.elf.
+                        running = {payload_engine.proc_stem(p.get("name"))
+                                   for p in procs if p.get("name")}
+        except Exception:
+            running = None
+
+        try:
+            if _hit and (_now - _hit[0]) < 4.0:
+                pass
+            elif b is not None:
+                got = b.installed_titles()
+                installed = {str(t).upper() for t in got} if got is not None else None
+        except Exception:
+            installed = None
+        _pc[_ck] = (_now, live, running, installed, cst)
+
+        root = payload_engine.source_root(srv.cfg)
+        # WHO COULD HAND THIS OVER. "Not on this PC" was being treated as "cannot be used", which is
+        # wrong the moment a second machine runs this exe: the console carries every payload itself,
+        # and another companion may hold the folder. The tile needs to know the difference between
+        # "nobody has it" and "this particular PC does not".
+        try:
+            _reg = getattr(srv, "peers", None)
+            _peers = _reg.known() if _reg is not None else []
+        except Exception:
+            _peers = []
+        _chave = (cst or {}).get("have") or {}
+        _ckept = (cst or {}).get("kept") or {}
+        for it in items:
+            same = str(it.get("platform") or "").upper() == plat
+            _local = payload_engine.local_path(srv.cfg, it) is not None
+            _on_console = False
+            if same:
+                if it.get("kind") == "payload":
+                    _on_console = payload_engine.proc_stem(it.get("file")) in _chave
+                else:
+                    _on_console = int(it.get("size") or 0) in _ckept
+            _peer = None if _local else payload_engine.peer_with(_peers, it)
+            it["here"] = bool(_local or _on_console or _peer)
+            it["from"] = ("pc" if _local else "console" if _on_console
+                          else ("peer" if _peer else ""))
+            it["from_name"] = (_peer or {}).get("name", "") if _peer else ""
+            try:
+                p = int(it.get("port") or 0)
+            except (TypeError, ValueError):
+                p = 0
+            # A payload loaded some other way can appear under Payload Manager's generic
+            # "payload.elf", so a name that IS in the list proves it runs, while a name that is not
+            # only means "not under its own name". That is why absence is reported as False when we
+            # actually have a list to look in, and as None - no way to tell - when we do not.
+            fn = payload_engine.proc_stem(it.get("file"))
+            if same and running is not None and fn and fn in running:
+                it["live"] = True
+            elif same and p and ip and p in live:
+                it["live"] = True
+            elif same and it.get("kind") == "payload" and (running is not None or (p and ip)):
+                it["live"] = False
+            else:
+                it["live"] = None
+            if it.get("kind") == "homebrew":
+                tid = str(it.get("title_id") or "").upper()
+                it["installed"] = ((tid in installed)
+                                   if (same and tid and installed is not None) else None)
+        # THE SIGNATURE IS WHAT MAKES AUTO-REFRESH CHEAP. It covers the folder, what is running and
+        # what is installed, so the page can repaint only when one of them actually moved instead of
+        # rebuilding a grid of live buttons every few seconds.
+        state_sig = "%s|%s|%s|%d" % (
+            fsig, ",".join(sorted(str(p) for p in live)),
+            ",".join(sorted(running or [])), len(installed or ()))
+        return self._json({"ok": True, "platform": plat,
+                           "console": (b.c.get("id") if b is not None else ""),
+                           "root": root, "source_here": os.path.isdir(root),
+                           "sig": hashlib.sha256(state_sig.encode("utf-8")).hexdigest()[:16],
+                           "items": items})
+
+    def _payloads_updates(self, q):
+        """What upstream has, for the items that name an upstream.
+
+        One call per repo, short timeout, no retry: this is the only thing in the app that leaves
+        the LAN, so a firewall that drops it costs one greyed line and never a slow panel.
+        """
+        force = (q.get("force") or [""])[0] in ("1", "true", "yes")
+        cat, _sig = payload_engine.live_catalog(self.server.cfg, WEB_DIR)
+        rels, out = {}, []
+        for it in (cat.get("items") or []):
+            repo = it.get("repo")
+            # OUR OWN ENTRY IS CHECKED NOW, and it is the point of this whole lane: the app's tile
+            # in this panel is where the owner - and anyone running the exe at home - is told a new
+            # release exists and can take it. `ours` was skipped here because our entry had no
+            # upstream to ask; it has one now (LuxGoldAI/pkg-mutant-shop), so the same machinery
+            # that offers a new ftpsrv offers a new shop, down to verifying the marker INSIDE the
+            # download before anything is replaced.
+            if not repo:
+                continue
+            if repo not in rels:
+                rels[repo] = payload_engine.github_latest(
+                    repo, force=force, token=payload_engine.gh_token(self.server.cfg))
+            rel = rels[repo]
+            asset = payload_engine.pick_asset(rel, it)
+            have = it.get("version") or ""
+            tag = rel.get("tag") or ""
+            # A VERSION WE CAN PROVE, FOR THE ONES THAT CARRY NONE. ftpsrv, nanodns and
+            # ShadowMountPlus write no version into their binaries and none into their filenames,
+            # so the catalogue honestly says "unknown" - but if the file on disk is byte-for-byte
+            # the size of the asset in a release, it IS that release. Measured: the owner's
+            # ftpsrv-ps4.elf is 166,072 bytes and so is 1.16-ng-stable's. That is evidence, not a
+            # guess, and it is reported as coming from the release rather than from the file.
+            from_release = ""
+            if not have and asset and int(asset.get("size") or 0) == int(it.get("size") or -1):
+                have = from_release = tag
+                # ...and remember it, so the next build ships the answer and a console with no PC
+                # and no internet can still name this payload's version.
+                payload_engine.remember_version(it, tag, repo, asset.get("name") or "")
+            # AN ITEM, NOT A REPO. One project can supply both consoles (ftpsrv does), and the two
+            # files update independently - so the answer is per item, with the asset that would
+            # actually replace THIS file. A release with no matching file is not an update.
+            out.append({
+                "id": it.get("id"), "platform": it.get("platform"),
+                "title": it.get("title"), "repo": repo,
+                "have": have, "tag": tag, "have_from": ("release" if from_release
+                                                        else (it.get("version_from") or "")),
+                "url": rel.get("url", ""), "published": rel.get("published", ""),
+                "error": rel.get("error", ""),
+                "asset": (asset or {}).get("name", ""),
+                "size": (asset or {}).get("size", 0),
+                # If the file we hold IS this release, there is nothing to offer - whatever the
+                # version strings look like.
+                "newer": (bool(asset) and not from_release
+                          and payload_engine.newer_than(tag, have)),
+            })
+        out.sort(key=lambda r: (not r["newer"], str(r["title"] or "").lower()))
+        return self._json({"ok": True, "items": out,
+                           "count": sum(1 for r in out if r["newer"])})
+
+    def _payloads_update(self, body):
+        """Download an upstream release and put it where the old file was.
+
+        NOTHING IS INSTALLED BY THIS. It replaces the file in the owner's folder, which is what the
+        panel then offers to send - so an update and a send stay two decisions, and a download that
+        turns out to be wrong has not touched a console.
+
+        The old file is kept as <name>.bak until the new one is proven complete: a truncated
+        download that overwrote a working payload would be the worst possible outcome of a button
+        labelled "update".
+        """
+        srv = self.server
+        ident = str(body.get("id") or "").strip()
+        plat = str(body.get("platform") or "").strip().upper()
+        cat, _sig = payload_engine.live_catalog(srv.cfg, WEB_DIR)
+        it = None
+        for c in (cat.get("items") or []):
+            if c.get("id") == ident and str(c.get("platform") or "").upper() == plat:
+                it = c
+                break
+        if not it:
+            return self._json({"ok": False, "message": "That is not in the catalogue."}, 404)
+        # "This app updates itself, not from here" WAS TRUE AND IS NOT ANY MORE. There is now a
+        # release feed for our own artifacts, and this is where a person running the exe at home is
+        # meant to take one: the same download, the same .part-then-move, the same marker check
+        # inside the bytes before the old file is touched. As for every other item, this replaces
+        # the file in the folder and installs nothing - sending it to a console stays a second,
+        # separate press.
+        repo = it.get("repo")
+        if not repo:
+            return self._json({"ok": False,
+                               "message": "There is no upstream recorded for this one."}, 400)
+        rel = payload_engine.github_latest(repo, force=True,
+                                           token=payload_engine.gh_token(srv.cfg))
+        if rel.get("error"):
+            return self._json({"ok": False,
+                               "message": "Could not reach GitHub (%s)." % rel["error"]}, 502)
+        asset = payload_engine.pick_asset(rel, it)
+        if not asset:
+            return self._json({"ok": False,
+                               "message": "That release has no file for this console."}, 400)
+        ok, msg, newver = payload_engine.download_asset(srv.cfg, it, asset,
+                                                        log=lambda m: print(m))
+        return self._json({"ok": ok, "message": msg, "version": newver,
+                           "tag": rel.get("tag", "")})
+
+    def _payloads_act(self, what, body):
+        """Send a payload, keep a homebrew on the console, or install one - at ONE named console."""
+        srv = self.server
+        b = _bridge_for(srv, self, body)
+        if b is None:
+            return self._json({"ok": False, "error": "no console configured",
+                               "message": "No console is set up yet."}, 400)
+        plat = self._pl_platform_of(b)
+        it = self._pl_find(str(body.get("id") or "").strip(), body.get("platform") or plat)
+        if not it:
+            return self._json({"ok": False, "message": "That is not in the catalogue."}, 404)
+        # A PLATFORM IS NOT A SUGGESTION. The panel filters, but a caller naming the wrong one gets
+        # a sentence rather than a PS5 payload posted at a PS4.
+        if str(it.get("platform") or "").upper() != plat:
+            return self._json({"ok": False,
+                               "message": "That one is for a %s and this console is a %s."
+                                          % (it.get("platform"), plat or "?")}, 400)
+        title = it.get("title") or it.get("id")
+
+        # THIS PC MAY NOT BE THE ONE HOLDING THE FILE. The console can start a payload it carries
+        # itself, which covers every payload on either console; anything else, another companion
+        # with the folder can do, and asking it is the honest answer for a machine that does not
+        # have the bytes. `via_peer` stops two companions bouncing one request between them.
+        if not payload_engine.local_path(srv.cfg, it) and not body.get("via_peer"):
+            _needs_bytes = (what in ("seed", "install")
+                            or (what in ("send", "run") and it.get("kind") == "payload"
+                                and not payload_engine.console_copy_is_current(b, srv.cfg, it)))
+            if _needs_bytes:
+                try:
+                    _reg = getattr(srv, "peers", None)
+                    _peers = _reg.known() if _reg is not None else []
+                except Exception:
+                    _peers = []
+                _p = payload_engine.peer_with(_peers, it)
+                if _p:
+                    print("[payloads] %s is not on this PC - asking %s"
+                          % (title, _p.get("name") or _p.get("url")))
+                    _r = payload_engine.ask_peer(_p, what, body)
+                    if _r is not None:
+                        return self._json(_r)
+
+        if what in ("send", "run"):
+            if it.get("kind") != "payload":
+                return self._json({"ok": False, "message": "That is a homebrew, not a payload."}, 400)
+            # A PAYLOAD THAT CHANGES THE JAILBREAK LAYER IS THE OWNER'S CALL, NEVER A SIDE EFFECT.
+            # payload_bundle.h states that rule in its own words, after auto-starting one next to
+            # kstuff_lite panicked a console. Enforced here, not only in the panel.
+            if it.get("layer") == "jailbreak" and not body.get("confirm"):
+                return self._json({"ok": False, "needs_confirm": True,
+                                   "message": "%s changes the jailbreak layer. Press it again to "
+                                              "send it anyway." % title})
+            # RUN MEANS USE WHAT IS ALREADY THERE. Both ELFs write the payloads they carry to
+            # /data/pkg-mutant-shop/payloads at boot, so starting one costs nothing and copies
+            # nothing - which is what "it is already on the console, just activate it" means. Only
+            # when the console does not have it does this fall back to sending the bytes, so the
+            # ordinary press does the right thing without the owner having to know which case
+            # they are in. "send" is the deliberate replace, and never takes the shortcut.
+            if what == "run":
+                # RUN MEANS "MAKE SURE IT IS THE RIGHT BYTES, THEN START IT", and when this PC has
+                # the file that is one path: send_ps5/send_ps4 already skip the copy when the
+                # console's is identical, so Run costs nothing extra and can never start a payload
+                # the update button has since replaced.
+                #
+                # Asking the CONSOLE to start its own copy is the fallback for a PC that does not
+                # have the file at all. It is not the fast path, because Payload Manager resolves
+                # /loadpayload by BASENAME against its own directory - so a file we put anywhere
+                # else can silently not be the one that runs, which is a trap this project has
+                # already paid for once.
+                _here = payload_engine.local_path(srv.cfg, it)
+                # THE PS4 HAS NO BASENAME TRAP, so when its copy is already the right bytes it can
+                # simply start its own - which saves posting the file over the LAN for nothing. Its
+                # loader has no "run the file you already have" verb, but our own ELF does: it reads
+                # PB_DIR and posts it to GoldHEN itself.
+                if plat == "PS4" and _here and payload_engine.console_copy_is_current(b, srv.cfg, it):
+                    if payload_engine.console_load(b, it):
+                        return self._json({"ok": True,
+                                           "message": "Started %s on the PS4 - it was already "
+                                                      "there." % title})
+                if not _here:
+                    if payload_engine.console_load(b, it):
+                        return self._json({"ok": True,
+                                           "message": "Started %s from the console's own copy."
+                                                      % title})
+                    return self._json({"ok": False,
+                                       "message": "The console does not have %s, and it is not on "
+                                                  "this PC either." % title})
+
+            if plat == "PS4":
+                ok, msg = payload_engine.send_ps4(getattr(b, "ip", ""), srv.cfg, it,
+                                                  log=lambda m: print(m))
+            else:
+                ok, msg = payload_engine.send_ps5(b, srv.cfg, it, log=lambda m: print(m))
+            return self._json({"ok": ok, "message": msg})
+
+        if what == "seed":
+            if it.get("kind") != "homebrew" or it.get("shape") != "pkg":
+                return self._json({"ok": False,
+                                   "message": "Only a package can be kept on the console."}, 400)
+            ok, msg = payload_engine.seed_homebrew(b, srv.cfg, it, log=lambda m: print(m))
+            return self._json({"ok": ok, "message": msg})
+
+        if what == "install":
+            if it.get("kind") != "homebrew":
+                return self._json({"ok": False, "message": "That is a payload, not a homebrew."}, 400)
+            if it.get("shape") != "pkg":
+                # RetroArch is an app FOLDER, which is what ShadowMountPlus mounts. Sending it down
+                # the package lane fails in a way that reads as a broken install engine.
+                return self._json({"ok": False,
+                                   "message": "%s is a folder, not a package - it goes on a drive "
+                                              "the console mounts." % title}, 400)
+            key = payload_engine.serve_key(it)
+            if key not in srv.library.file_registry:
+                return self._json({"ok": False, "message": "%s is not on this PC." % title}, 400)
+            # THE SAME CALL A GAME MAKES, FIELD FOR FIELD. The page sends install_key, title_id,
+            # name, kind, console AND version/content_id/size - the server uses those last three to
+            # notice the package is already on the console. Leaving them out does not break the
+            # install, it just makes that check blind, and a homebrew is a package like any other.
+            # Nothing here looks inside the file: it is handed to the engine the games use and the
+            # console's own installer decides.
+            return self._install({"install_key": key, "name": title, "kind": "base",
+                                  "title_id": it.get("title_id") or "",
+                                  "content_id": it.get("content_id") or "",
+                                  "version": it.get("version") or "",
+                                  "size": it.get("size") or 0,
+                                  "mode": (body.get("mode") or "now"),
+                                  "console": body.get("console") or (b.c.get("id") or "")})
+        return self._json({"ok": False, "message": "unknown action"}, 400)
 
     def _dpi_reload(self, body=None):
         """Manual "reload the install engine" — the dock's tag. This route did not exist: the UI
@@ -10070,10 +11251,12 @@ def start_library_watch(httpd):
 def start_cheat_sync_thread(httpd):
     """Self-repair the console's cheat library in the background - from a SOURCE checkout only.
 
-    The ELF embeds the library and writes it to the console itself; the exe bundles only web/
-    (see CHEATS_DIR at the top), so in the frozen build CHEATS_DIR is absent and this loop finds
-    nothing local to compare and sends nothing. From source it fills a wiped /data with no user
-    action. It is incremental (only files a COMPLETE listing proves missing) so the normal case
+    The PS5 ELF embeds the library and writes it to that console itself, so this loop exists for the
+    PS4 and for repair. THE FROZEN BUILD HAS A LIBRARY TOO - the exe ships cheats-library.zip and
+    _unpack_cheat_library() expands it beside the exe at startup (see CHEATS_DIR at the top) - so the
+    old claim here, that a frozen build finds nothing local and sends nothing, was wrong. What is true
+    is that it sends nothing until that expansion has finished, which is one of the reasons it waits
+    before its first pass. From source it fills a wiped /data with no user action. It is incremental (only files a COMPLETE listing proves missing) so the normal case
     costs a few directory listings and sends nothing, and it is time-budgeted so it can never
     monopolise the link that installs depend on: it stops after the budget and finishes on a
     later pass. sync_cheat_library() holds _CHEAT_SYNC_LOCK, so a manual POST cannot overlap it.
@@ -10082,15 +11265,27 @@ def start_cheat_sync_thread(httpd):
         time.sleep(25)                       # let the library scan and the first UI poll settle
         while True:
             try:
-                # Cheats are a PS5 capability - the PS4's jailbreak gives a payload no kernel
-                # access, so there is nothing to sync there. Ask for a PS5 by name rather than
-                # taking whichever console happens to sort first.
-                bridge = _bridge_for(httpd, want="ps5")
-                if bridge is not None and os.path.isdir(CHEATS_DIR) and bridge.engine_available():
+                # EVERY CONSOLE, not the PS5 by name. This used to ask for a PS5 specifically,
+                # because cheats were a PS5 capability and a PS4 had nothing to run them with.
+                # That is no longer true: the PS4 payload carries the same engine now. It is also
+                # the console that NEEDS this most - the PS5's ELF ships the whole library inside
+                # it and this sync only tops up what was added since that build, while the PS4's
+                # library arrives entirely through here.
+                #
+                # engine_available() is still the gate, so a console that cannot use them is
+                # skipped on its own say-so rather than on a guess about its platform.
+                fleet = getattr(httpd, "fleet", None)
+                blist = list(fleet.bridges.values()) if fleet else [_bridge_for(httpd)]
+                for bridge in blist:
+                    if bridge is None or not os.path.isdir(CHEATS_DIR):
+                        continue
+                    if not bridge.engine_available():
+                        continue
                     st = bridge.cheat_library_status()
                     missing = st.get("missing_total")
                     if missing:
-                        print("[cheats] console is missing %d file(s) — syncing" % missing)
+                        print("[cheats] %s is missing %d file(s) — syncing"
+                              % ((bridge.c or {}).get("name") or "console", missing))
                         r = bridge.sync_cheat_library(log=lambda m: print("[cheats] %s" % m),
                                                       budget=90.0)
                         print("[cheats] sent=%s failed=%s partial=%s in %ss"
@@ -10378,6 +11573,14 @@ def main():
     except Exception as e:
         print(" second-console check skipped: %s" % e)
 
+    # THE ADDRESSES ARE MADE TRUE BEFORE ANYTHING USES THEM. The two passes above handle "nothing
+    # configured" and "a platform I have never had"; this one handles the case they both miss and
+    # the owner actually hit - a console that is configured, switched on, and somewhere else now.
+    try:
+        track_consoles(cfg, fleet, log=lambda m: print("[consoles]%s" % m))
+    except Exception as e:
+        print(" console check skipped: %s" % e)
+
     dns = DnsBlocker(cfg)
     dns.start()
 
@@ -10443,6 +11646,9 @@ def main():
     # The single-instance guard now runs at the top of main(), before anything has side effects.
     httpd = CompanionServer((cfg["companion"]["host"], cfg["companion"]["port"]), Handler)
     httpd.cfg, httpd.library, httpd.fleet, httpd.queue = cfg, library, fleet, queue
+    # note_content_change() bumps library_gen, and the console tracker is handed the fleet rather
+    # than the server - so the library hangs off the fleet as well. One attribute, set once.
+    fleet.library = library
     httpd.transfers, httpd.engine, httpd.hashes = transfers, engine, load_hashes()
     httpd.dns = dns
     httpd.peers = PeerRegistry(cfg)
@@ -10450,6 +11656,8 @@ def main():
     sweep_temp_dbs(cfg.get("maintenance", {}).get("temp_sweep_age_sec", 3600))   # [B4] clean leftover temps
     start_library_watch(httpd)      # [B4] auto-rescan on library changes (debounced)
     start_cheat_sync_thread(httpd)  # ships the cheat library to a console that is missing it
+    start_console_tracker(httpd)    # follows a console that changes address, by its durable id
+    start_console_autostart(httpd)  # a PS4 that is switched on gets its shop back by itself
 
     start_ps5_log_listener(port=cfg.get("console", {}).get("log_port", 9097))
     start_pc_register_thread(cfg, fleet)   # announce our address to the on-console shop server
@@ -10479,6 +11687,11 @@ def main():
                          webbrowser.open("http://localhost:%d/" % port)), daemon=True).start()
     except Exception:
         pass
+    # The cheat library the exe carries, expanded beside it once. On its own thread and after the
+    # server is built, because a PS4 asking for cheats is minutes away at the earliest and nothing
+    # about starting up should wait on six thousand small file writes. From source this returns
+    # immediately - there is no archive and the repo's own folder is already the library.
+    threading.Thread(target=_unpack_cheat_library, daemon=True).start()
     # Serve in the background; a system-tray icon fronts it (hidden app, no console window).
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     if not run_tray(port):

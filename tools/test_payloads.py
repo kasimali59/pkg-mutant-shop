@@ -1,0 +1,332 @@
+# -*- coding: utf-8 -*-
+"""The Payloads & Homebrews catalogue and its rules, on a PC, with no console needed.
+
+Every check here was written because getting it wrong has a specific, nameable consequence - and
+each one was perturbed and watched to fail before it was believed.
+"""
+import io
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(ROOT, "companion"))
+import payloads as P                                             # noqa: E402
+
+CAT = os.path.join(ROOT, "web", "assets", "payloads-catalog.json")
+CURATED = os.path.join(ROOT, "assets", "payloads", "curated.json")
+
+fails = []
+n = 0
+
+
+def ok(cond, what, detail=""):
+    global n
+    n += 1
+    if not cond:
+        fails.append("%s%s" % (what, (" - " + detail) if detail else ""))
+
+
+def main():
+    cat = json.load(io.open(CAT, encoding="utf-8"))
+    items = cat["items"]
+    ok(len(items) >= 10, "the catalogue has entries", "%d" % len(items))
+
+    # ---- identity ------------------------------------------------------------------------------
+    for it in items:
+        ok(it.get("id"), "every item has an id", str(it)[:80])
+        ok(it.get("platform") in ("PS4", "PS5"), "every item names a platform", it.get("id"))
+        ok(it.get("kind") in ("payload", "homebrew"), "every item names a kind", it.get("id"))
+        ok(it.get("shape") in ("elf", "pkg", "folder"), "every item names a shape", it.get("id"))
+
+    # ---- THE PLATFORM COMES FROM THE FOLDER, NOT FROM A FILENAME -------------------------------
+    # A PS5 package handed to a PS4 comes back refused once per press, with the PS4 blamed for it.
+    ps4 = [i["id"] for i in items if i["platform"] == "PS4"]
+    ps5 = [i["id"] for i in items if i["platform"] == "PS5"]
+    # THE FOLDER IS THE RULE, AND THE OWNER MOVES THINGS. FPKGi was PS5-only until the owner split
+    # their "PKGI PS4-PS5" folder into one per console, at which point it correctly became
+    # available on both - so pinning THAT item as single-platform was pinning a decision that is
+    # theirs to change. These two are single-platform by what they are: PS4-Xplorer is a PS4
+    # package and the Internet Browser is a PS5 one.
+    ok("LAPY20009" in ps4, "the PS4-only homebrew is on the PS4 side")
+    ok("LAPY20009" not in ps5, "...and is not offered to the PS5")
+    ok("MOUU12023" in ps5, "the PS5-only homebrew is on the PS5 side")
+    ok("MOUU12023" not in ps4, "...and is not offered to the PS4")
+
+    # ---- THE SAME TITLE ON BOTH CONSOLES IS TWO ITEMS, NOT A DUPLICATE -------------------------
+    item = [i for i in items if i["id"] == "ITEM00001"]
+    ok(len(item) == 2, "Itemzflow appears once per console", "%d" % len(item))
+    ok({i["platform"] for i in item} == {"PS4", "PS5"}, "...one PS4, one PS5")
+
+    # ---- OUR OWN ARTIFACTS ARE MARKED AND NEVER EMBEDDED ---------------------------------------
+    ours = [i for i in items if i.get("ours")]
+    ok(len(ours) == 2, "both copies of our own ELF are flagged `ours`", "%d" % len(ours))
+    for i in ours:
+        ok(i["kind"] == "payload", "...and they are payloads")
+
+    # ---- A JAILBREAK-LAYER PAYLOAD NEVER AUTO-STARTS -------------------------------------------
+    # payload_bundle.h states the rule: that is the owner's call, never a side effect of ours.
+    for i in items:
+        if i.get("layer") == "jailbreak":
+            ok(not i.get("autostart"), "a jailbreak-layer payload does not auto-start", i["id"])
+    jb = {i["id"] for i in items if i.get("layer") == "jailbreak"}
+    ok({"kstuff", "onionhen", "webkit-autoloader-installer"} <= jb,
+       "the three jailbreak-layer payloads are marked", ", ".join(sorted(jb)))
+
+    # ---- A PORT OF 0 MEANS "NOTHING TO OBSERVE", NEVER "AUTO-START IT" --------------------------
+    # The 9021-vs-10101 mix-up made the "is it up?" test permanently true for months.
+    for i in items:
+        if i.get("autostart"):
+            ok(int(i.get("port") or 0) > 0,
+               "anything that auto-starts has a port to test first", i["id"])
+
+    # ---- THE FOLDER-SHAPED APP IS NOT A PACKAGE ------------------------------------------------
+    ra = [i for i in items if i["id"] == "PPSA99169"]
+    ok(len(ra) == 1 and ra[0]["shape"] == "folder",
+       "RetroArch is carried as a folder, not a package")
+    ok(ra and ra[0].get("title_id") == "PPSA99169", "...and keeps its real title id")
+
+    # ---- THE UNREADABLE PACKAGE IS CARRIED, FLAGGED, AND STILL NAMED ---------------------------
+    # The owner's call: list it and let the console decide. Its name comes from the param.json
+    # inside its \x7fFIH container, not from the filename.
+    br = [i for i in items if i["id"] == "MOUU12023"]
+    ok(len(br) == 1, "the browser package is in the catalogue")
+    if br:
+        ok(br[0].get("unreadable") is True, "...flagged as a format we do not parse")
+        ok(br[0].get("title") == "Internet Browser", "...but still correctly named",
+           br[0].get("title"))
+
+    # ---- SERVE KEYS ARE NOT LIBRARY KEYS -------------------------------------------------------
+    # Registering one of these as a game would put five homebrews on the owner's shelf, and
+    # normalise_pkg_names() would rename their files on disk.
+    for i in items:
+        if i["kind"] == "homebrew":
+            k = P.serve_key(i)
+            ok(k.startswith("PMS-HOMEBREW/"), "a homebrew serve key is namespaced", k)
+
+    # ---- STEM MATCHING, THE THING THAT MADE TWO LIVE PAYLOADS LOOK STOPPED ----------------------
+    # Payload Manager reports the name a payload was BUILT as, not the filename we ship.
+    ok(P.proc_stem("ftpsrv-ps5.elf") == P.proc_stem("ftpsrv.elf"),
+       "ftpsrv-ps5.elf matches the running ftpsrv.elf")
+    ok(P.proc_stem("pldmgr_v0.5.2.elf") == P.proc_stem("pldmgr.elf"),
+       "pldmgr_v0.5.2.elf matches the running pldmgr.elf")
+    ok(P.proc_stem("nanodns-ps4.elf") == "nanodns", "the PS4 build matches too")
+    ok(P.proc_stem("shadowmountplus.elf") == "shadowmountplus", "an exact name is left alone")
+    ok(P.proc_stem("kstuff.elf") != P.proc_stem("ftpsrv.elf"),
+       "two different payloads do not collide")
+
+    # ---- A NEWER VERSION IS ONLY EVER A COMPARISON WE COULD ACTUALLY MAKE -----------------------
+    ok(P.newer_than("1.7", "1.6") is True, "1.7 is newer than 1.6")
+    ok(P.newer_than("1.6", "1.7") is False, "1.6 is not newer than 1.7")
+    ok(P.newer_than("", "1.6") is False, "an unknown upstream is never 'newer'")
+    ok(P.newer_than("v2.0", "") is False, "an unknown local version is never 'older'")
+
+    # ---- IDENTITY COMES FROM THE FILE, NOT ITS NAME --------------------------------------------
+    # The owner renames things and said so. A payload called anything at all must keep its port,
+    # its upstream and its jailbreak warning, and a version we can read from inside beats one
+    # guessed from a filename.
+    byc = [i for i in items if i["kind"] == "payload" and i.get("identified_by") == "content"]
+    ok(len(byc) >= 7, "payloads are identified by what is inside them", "%d of them" % len(byc))
+    for i in items:
+        if i["kind"] == "payload" and not i.get("ours"):
+            ok(i.get("identified_by") == "content",
+               "every third-party payload is recognised by content", i["id"])
+    # THE VALUE IS NOT THE INVARIANT - the update button exists to change it, and pinning "0.5.0"
+    # here meant a successful update turned this test red. What must hold is that these three are
+    # read OUT OF THE BINARY and look like versions.
+    import re as _re
+    for want in ("kstuff", "pldmgr", "webkit-autoloader-installer"):
+        hit = [i for i in items if i["id"] == want]
+        ok(bool(hit), "%s is in the catalogue" % want)
+        if not hit:
+            continue
+        ok(hit[0].get("version_from") == "file",
+           "%s's version comes from inside the file" % want, hit[0].get("version_from"))
+        ok(bool(_re.match(r"^\d+\.\d+", str(hit[0].get("version") or ""))),
+           "...and reads like a version", hit[0].get("version"))
+
+    # ---- THREE IMPLEMENTATIONS OF "SAME PAYLOAD" MUST AGREE -------------------------------------
+    # The PC (payloads.proc_stem), the page (phbStem) and both consoles (pm_stem / p4_stem) each
+    # reduce a filename to a comparable stem, and they must produce the same answer or the panel
+    # reports a live payload as stopped. Observed exactly that way: the bundled copies were renamed
+    # to stable ids and three running payloads went grey because only two of the three knew.
+    web = io.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    ok("function phbStem(" in web, "the page has a stem function")
+    for src, fn in ((os.path.join(ROOT, "ps5-app", "onconsole", "server.c"), "pm_stem"),
+                    (os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c"), "p4_stem")):
+        txt = io.open(src, encoding="utf-8").read()
+        ok(("static void %s(" % fn) in txt, "%s exists in %s" % (fn, os.path.basename(src)))
+        ok(("%s(want, wstem" % fn) in txt,
+           "...and the load route matches with it, not with strcmp on the filename")
+    for name, want in (("ftpsrv-ps5.elf", "ftpsrv"), ("ftpsrv.elf", "ftpsrv"),
+                       ("pldmgr_v0.5.2.elf", "pldmgr"), ("pldmgr.elf", "pldmgr"),
+                       ("webkit-autoloader-installer_v0.5.1.elf", "webkit-autoloader-installer"),
+                       ("webkit-autoloader-installer.elf", "webkit-autoloader-installer")):
+        ok(P.proc_stem(name) == want, "the PC reduces %s correctly" % name, P.proc_stem(name))
+
+    # ---- THE BUNDLES NAME THEIR FILES BY ID, NOT BY VERSION -------------------------------------
+    # Every .incbin path is a literal, so a versioned filename there breaks the build the first
+    # time the update button takes a new release. That is not hypothetical: it happened.
+    for hdr in (os.path.join(ROOT, "ps5-app", "onconsole", "payload_bundle.h"),
+                os.path.join(ROOT, "ps4-app", "onconsole", "payload_bundle_ps4.h")):
+        txt = io.open(hdr, encoding="utf-8").read()
+        for m in re.findall(r'\.incbin \\"" file', txt) or [""]:
+            pass
+        bad = re.findall(r'INCBIN\([^,]+,\s*"payloads/([^"]+)"', txt)
+        for f in bad:
+            ok(not re.search(r"[-_]v?\d+\.\d", f),
+               "an embedded payload path carries no version", "%s in %s" % (f, os.path.basename(hdr)))
+
+    # ---- EVERY PAYLOAD NAMES ITS VERSION, AND SAYS WHERE IT GOT IT ------------------------------
+    # Some carry one in the binary; the rest are proven by being byte-for-byte the size of an asset
+    # in an upstream release, and that proof is recorded so it ships to a console with no PC and no
+    # internet. A blank where a version belongs is the thing this replaced.
+    kv = json.load(io.open(os.path.join(ROOT, "assets", "payloads", "known-versions.json"),
+                           encoding="utf-8")).get("versions") or {}
+    for i in items:
+        if i["kind"] != "payload" or i.get("ours"):
+            continue
+        ok(bool(i.get("version")), "%s names a version" % i["id"], i.get("version"))
+        ok(i.get("version_from") in ("file", "name", "release"),
+           "...and says where it came from", "%s: %r" % (i["id"], i.get("version_from")))
+        if i.get("version_from") == "release":
+            ok(i.get("sha256") in kv,
+               "a release-proven version is recorded by sha256", i["id"])
+            ok(kv.get(i.get("sha256"), {}).get("version") == i.get("version"),
+               "...and the record agrees with the catalogue", i["id"])
+    # A recorded version belongs to ONE build of one file. Keyed by anything weaker and a different
+    # build of the same project would inherit a version it never had.
+    for sha in kv:
+        ok(len(sha) == 64 and all(c in "0123456789abcdef" for c in sha),
+           "known-versions is keyed by a full sha256", sha[:20])
+
+    # ---- A UDP SERVICE IS SEEN BY TAKING ITS PORT, NOT BY CONNECTING TO IT ----------------------
+    # nanodns listens on UDP 53 and answers nothing sent to it from the LAN - measured against its
+    # own spoofing domains on both consoles - so a TCP connect and a DNS query both report "nothing
+    # there" while it is running. The owner started it from this panel and the tile stayed grey.
+    nd = [i for i in items if i["id"] == "nanodns"]
+    ok(len(nd) == 2, "nanodns is catalogued for both consoles", "%d" % len(nd))
+    for i in nd:
+        ok(int(i.get("port") or 0) == 53, "...on port 53", i.get("port"))
+        ok(i.get("probe") == "udp", "...and is probed by binding, not by connecting", i.get("probe"))
+        ok(not i.get("autostart"), "...and is still never auto-started")
+    for src, table in ((os.path.join(ROOT, "ps5-app", "onconsole", "server.c"), "PAYLOAD_BUNDLE"),
+                       (os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c"), "PS4_PAYLOAD")):
+        txt = io.open(src, encoding="utf-8").read()
+        ok("udp_port_taken" in txt, "%s tests a UDP port by binding it" % os.path.basename(src))
+        # SO_REUSEADDR would make the bind succeed beside the running server, and the test would
+        # answer "free" for ever - the same permanently-wrong shape as the 9021 port mix-up.
+        i = txt.find("static int udp_port_taken")
+        ok(i > 0 and "SO_REUSEADDR" not in txt[i:i + 1400],
+           "...without SO_REUSEADDR, which would make it always say free",
+           os.path.basename(src))
+    for hdr, ent in ((os.path.join(ROOT, "ps5-app", "onconsole", "payload_bundle.h"), "nanodns.elf"),
+                     (os.path.join(ROOT, "ps4-app", "onconsole", "payload_bundle_ps4.h"), "nanodns.elf")):
+        txt = io.open(hdr, encoding="utf-8").read()
+        line = [l for l in txt.splitlines() if '"nanodns"' in l and ent in l]
+        ok(bool(line), "nanodns is in %s" % os.path.basename(hdr))
+        if line:
+            ok(" 53," in line[0], "...at port 53", line[0].strip()[:70])
+
+    # ---- qparam() TAKES THE PATH, NOT THE REQUEST -----------------------------------------------
+    # Handing it the whole request text still finds a "?" - in the request LINE - so it parses a
+    # value with " HTTP/1.1" stuck on the end and silently matches nothing. The console then
+    # answered "this build does not carry that one" about a payload it was holding. Every other
+    # caller in both files passes rawpath; this makes sure they keep doing that.
+    for src in (os.path.join(ROOT, "ps5-app", "onconsole", "server.c"),
+                os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c")):
+        txt = io.open(src, encoding="utf-8").read()
+        bad = re.findall(r"qparam\(\s*req\s*,", txt)
+        ok(not bad, "no route reads a query parameter out of the raw request",
+           "%s: %d call(s)" % (os.path.basename(src), len(bad)))
+
+    # ---- A DEVICE WITHOUT THE FILES IS STILL PART OF THE FLEET ----------------------------------
+    # The owner put the exe on a second PC and every tile read "not on this PC" with no status at
+    # all - while the console next to it was carrying every payload and running half of them.
+    # "This PC does not have it" and "nobody has it" are different answers.
+    srv = io.open(os.path.join(ROOT, "companion", "server.py"), encoding="utf-8").read()
+    ok("fleet_summary" in srv, "a companion advertises what it can hand over to peers")
+    ok('"payloads": payloads_have' in srv, "...and it rides the federation reply")
+    ok("peer_with(" in srv, "an action can find a peer that holds the file")
+    ok("ask_peer(" in srv, "...and ask it to do the work")
+    ok('it["from"]' in srv, "the list says WHERE each item would come from")
+    for fn in ("fleet_summary", "peer_with", "ask_peer", "console_state"):
+        ok(hasattr(P, fn), "payloads.%s exists" % fn)
+    web = io.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    # The state line must not be gated on the file being local, or a payload running on the console
+    # reads as "not on this PC" from every other machine.
+    i = web.find("function phbPaintTile(")
+    j = web.find("function phbUpFor(", i)
+    seg = web[i:j if j > i else i + 4000]
+    # THE FIRST MENTION OF EACH, not any mention: a version of this check that looked for the
+    # ternary inside the payload branch still found it after a new `else if(!it.here)` was inserted
+    # in FRONT of that branch - so it passed while the regression was present. Perturbed and
+    # watched, which is how that was noticed.
+    chain = seg[seg.find("var state;"):]
+    a = chain.find("it.live===true")
+    b = chain.find("!it.here")
+    ok(a >= 0, "the tile decides a payload's running state")
+    ok(b >= 0, "...and has a case for the bytes not being reachable")
+    ok(a >= 0 and b >= 0 and a < b,
+       "the running state is decided BEFORE the where-is-the-file case",
+       "live at %d, not-here at %d" % (a, b))
+
+    # ---- THE CATALOGUE IS SMALL ENOUGH TO SHIP EVERYWHERE --------------------------------------
+    # It rides inside both ELFs through gen_web_bundle.py's assets/ allow-list.
+    sz = os.path.getsize(CAT)
+    ok(sz < 200 * 1024, "the catalogue is small enough to embed", "%d bytes" % sz)
+
+    # ---- EVERY CURATED ENTRY IS REACHED --------------------------------------------------------
+    # A curated key nothing matches is a port, an upstream and a warning that silently do nothing.
+    cur = json.load(io.open(CURATED, encoding="utf-8"))
+    for kind, table in (("payload", cur["payloads"]), ("homebrew", cur["homebrews"])):
+        for key in table:
+            hit = any(i["kind"] == kind and (i.get("title_id") == key or i["id"] == key)
+                      for i in items)
+            ok(hit, "curated entry is matched by something in the folder", "%s/%s" % (kind, key))
+
+    # ---- ONE FLEET: EVERY DEVICE, INCLUDING FOR OUR OWN ARTIFACTS ------------------------------
+    # The owner put the exe on a second PC and read "Not on this PC" on our own shop tile, in both
+    # console sections, while the console beside it was plainly running it. Three separate defects
+    # met there, and each one is pinned on its own because fixing any two still leaves a wrong tile.
+    eng = io.open(os.path.join(ROOT, "companion", "payloads.py"), encoding="utf-8").read()
+    srv = io.open(os.path.join(ROOT, "companion", "server.py"), encoding="utf-8").read()
+
+    # (1) THE EXE CARRIES THE PS4 ELF, so a PC with no source folder still holds those bytes.
+    ok("def bundled_ours(" in eng, "our own artifacts have a second home: inside the exe")
+    ok('"ps4-elf"' in eng and "_MEIPASS" in eng,
+       "...resolved from the frozen bundle server.py already ships")
+    _NXT = chr(10) + "def "
+    _lp = eng.split("def local_path(", 1)[1].split(_NXT, 1)[0]
+    ok("bundled_ours(item)" in _lp, "...and local_path falls back to it for an `ours` item")
+    ok("frozen" in eng.split("def bundled_ours(", 1)[1].split(_NXT, 1)[0],
+       "...only when frozen, so a dev checkout cannot claim a build it has not made")
+
+    # (2) WHAT WE ADVERTISE INCLUDES OUR OWN. The PS5 ELF is 34 MB and deliberately not bundled, so
+    # a second PC can only ever get it from the PC that built it - which means offering it.
+    _fs = eng.split("def fleet_summary(", 1)[1].split(_NXT, 1)[0]
+    ok('it.get("ours")' not in _fs.split("out.append", 1)[0],
+       "our own artifacts are advertised to peers, not skipped")
+    ok("not local_path(cfg, it)" in _fs, "...and what we cannot reach is still not advertised")
+
+    # (3) THE FEDERATION FLAG MUST NOT REPORT A CONFIG FIELD THAT GATES NOTHING. It said False on a
+    # fully-paired machine, which is what sent the owner looking for a pairing fault that was not
+    # there. Auto-discovery is unconditional; `enabled` now answers "are we federated?".
+    _pr = srv.split('if path == "/api/federation/peers":', 1)[1][:1200]
+    ok('"enabled": bool(_known)' in _pr,
+       "/api/federation/peers reports whether peers were actually found")
+    ok('"discovery": True' in _pr, "...and says discovery is always on")
+
+    if fails:
+        print("test_payloads: FAIL")
+        for f in fails:
+            print("   %s" % f)
+        return 1
+    print("test_payloads: OK (%d checks, %d catalogue entries)" % (n, len(items)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
