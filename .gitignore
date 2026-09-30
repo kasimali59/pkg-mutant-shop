@@ -42,3 +42,12 @@ ps5-app/onconsole/cheats.pack
 # next to the exe. It is needed only while our own repository is private (see RELEASING.md) and it
 # must never be committed.
 .github_token
+
+# THE OWNER'S LIVE CONFIG IS NOT SOURCE. It was tracked, which meant this machine's device id went
+# into the history and - the moment RELEASING.md's `updates.github_token` was used - a token would
+# have followed it. config.example.json is the template, start.cmd copies it, and the app falls back
+# to DEFAULT_CONFIG when neither exists, so nothing needs this file to be in the repo.
+# (Written as its own line: an earlier attempt checked for the substring "companion/config.json",
+# which was ALREADY here as config.json.unreadable-*, so the rule was silently never added and
+# `git add -A` put the file straight back.)
+/companion/config.json
