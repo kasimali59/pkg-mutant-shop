@@ -11,13 +11,13 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ## [3.87.0] - 2026-09-30 - "The app makes the folder, and the updates move into the header" `[VERIFIED]`
 
-### The repository is under the right account
+### The official repository
 
-It was created under **LuxGoldAI**, which is not the account this project belongs to. Every
-reference now reads **XavyProd/pkg-mutant-shop** - `assets/payloads/curated.json`, the generated
-catalogue that both ELFs and the exe embed, the issue-template links, `README.md` and
-`RELEASING.md`. The old repository is being removed; it only ever held one release and nobody had
-taken it.
+**[XavyProd/pkg-mutant-shop](https://github.com/XavyProd/pkg-mutant-shop)**, public, is the home of
+this project. Every reference points there - `assets/payloads/curated.json`, the generated catalogue
+that both ELFs and the exe embed, the issue-template links, `README.md` and `RELEASING.md`. The slug
+lives in the curated table and flows into the generated catalogue, so changing it means re-running
+`tools/gen_payload_catalog.py` and rebuilding all three artifacts.
 
 ### A missing folder is something to make, not something to announce
 
