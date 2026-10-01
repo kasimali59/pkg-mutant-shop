@@ -1199,21 +1199,53 @@ def running_exe():
 
 
 def sweep_old_exe():
-    """Remove the previous exe left behind by an update. Called once at startup.
+    """Remove what an update left beside the app. Called once at startup; finishes in the background.
 
-    It cannot be deleted at the moment of the swap, because at that moment it is the file this
-    process is executing from.
+    TWO FILES, BOTH MEASURED ON THE OWNER'S PC after a self-update:
+
+      <exe>.old   the build that was running. It cannot be deleted at the moment of the swap -
+                  that is the file the process is executing from - so it is left for the next
+                  start. But the next start is quick: this one waits only for the PORT to come
+                  free, and Windows can still hold the image for a moment after that, so a single
+                  attempt at startup loses the race and the 38 MB file simply stays. Measured
+                  exactly that: the app restarted itself correctly and the .old was still there.
+
+      <exe>.new   a download that did not finish. Nothing reads it, so it was invisible - and after
+                  a restart interrupted one, 25 MB of a half-fetched exe sat next to the app for
+                  ever.
+
+    So both are swept, and the sweep retries for a minute in the background rather than giving up
+    on the first refusal. It never touches anything else, and a failure is not worth a word to the
+    owner - it is housekeeping, and the next start tries again.
     """
     cur = running_exe()
     if not cur:
         return
-    old = cur + ".old"
-    if os.path.exists(old):
-        try:
-            os.remove(old)
-            print("[update] removed the previous build (%s)" % os.path.basename(old))
-        except OSError:
-            pass          # still mapped by something; it will go on the next start
+
+    def _try(left):
+        for ending in list(left):
+            p = cur + ending
+            try:
+                os.remove(p)
+                print("[update] cleared %s" % os.path.basename(p))
+                left.remove(ending)
+            except OSError:
+                pass              # still mapped; try again shortly
+        return left
+
+    # ONE ATTEMPT INLINE, which is all it usually takes, and only then a background retry. Doing it
+    # all in a thread would make the ordinary case racy for anything that looks straight afterwards.
+    left = _try([e for e in (".old", ".new") if os.path.exists(cur + e)])
+    if not left:
+        return
+
+    def _go():
+        for _ in range(30):
+            time.sleep(2.0)
+            if not _try(left):
+                return
+
+    threading.Thread(target=_go, daemon=True).start()
 
 
 # Releases whose exe this process has already put in place. See update_self().

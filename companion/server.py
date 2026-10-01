@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.91.1"
+VERSION = "3.91.2"
 
 _BUILD_ID = None
 
@@ -9817,6 +9817,8 @@ class Handler(BaseHTTPRequestHandler):
         labelled "update".
         """
         srv = self.server
+        # Something is still being taken, so an armed restart waits for it - see schedule_relaunch.
+        defer_relaunch()
         ident = str(body.get("id") or "").strip()
         plat = str(body.get("platform") or "").strip().upper()
         cat, _sig = payload_engine.live_catalog(srv.cfg, WEB_DIR)
@@ -9870,9 +9872,9 @@ class Handler(BaseHTTPRequestHandler):
                 # reports the update as not having worked. The new build is started here and this
                 # one stands down; `relaunched` tells the panel which sentence to show.
                 if sok and (srv.cfg.get("updates") or {}).get("auto_restart", True):
-                    if relaunch_self(srv.cfg["companion"]["port"], log=lambda m: print(m)):
+                    if schedule_relaunch(srv.cfg["companion"]["port"], log=lambda m: print(m)):
                         relaunched = True
-                        smsg = "Updated. The app is restarting itself now."
+                        smsg = "Updated. The app will restart itself in a moment."
                 # BOTH HALVES ARE REPORTED, and a failure here does not undo the ELF that was just
                 # fetched - it is on disk, it is good, and it can be sent. Saying "updated" and
                 # leaving the old companion running is the one outcome this must never produce.
@@ -11477,7 +11479,42 @@ def probe_cache_hit(cache, key, now, ttl=4.0):
 
 
 AFTER_UPDATE_FLAG = "--after-update"
+REPLACING_FLAG = "--replacing"
 _relaunching = False      # see relaunch_self(): one replacement, however many tiles ask
+_relaunch_timer = None    # see schedule_relaunch(): armed, and pushed back while work continues
+_relaunch_lock = threading.Lock()
+
+
+def _clear_replaced(argv):
+    """End the processes this build was started to replace. Only the ones it was NAMED.
+
+    Called only when we were launched with --replacing, so these are the pid of the build that
+    handed over and its bootloader parent - no enumeration, no guessing which copies of this exe
+    belong to somebody else, and nothing to do when the app was started normally.
+
+    Both are usually gone already: the one that handed over exits on its own. This is for the
+    bootloader that outlives it (see relaunch_self), because while it lives it holds <exe>.old open
+    and the next self-update cannot rename over it.
+    """
+    try:
+        i = argv.index(REPLACING_FLAG)
+        raw = argv[i + 1]
+    except (ValueError, IndexError):
+        return
+    for part in str(raw).split(","):
+        try:
+            pid = int(part)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == os.getpid():
+            continue
+        try:
+            # taskkill, not os.kill: on Windows os.kill() with any signal is TerminateProcess, and
+            # a stale pid that has been reused would be somebody else's program.
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        except Exception:
+            pass
 
 
 def _wait_for_port_release(port, secs=90.0):
@@ -11497,6 +11534,44 @@ def _wait_for_port_release(port, secs=90.0):
             return True
         time.sleep(0.5)
     return False
+
+
+def schedule_relaunch(port, log=None, delay=8.0):
+    """Restart once the owner has stopped taking updates, not in the middle of them.
+
+    "Update all" walks the list one at a time, and our own entry is one row of it. Restarting the
+    moment that row succeeds cuts the chain off: measured here, the PS5 row reported success and
+    restarted, and the PS4 row that was already in flight died with the connection. Nothing was
+    lost - the remaining updates are still offered afterwards - but the owner pressed one button
+    and had to press it again, which is not what "it updates itself" should mean.
+
+    So the restart is armed rather than performed, and every further update request pushes it back.
+    The app goes when the panel has been quiet for `delay`.
+    """
+    global _relaunch_timer
+    with _relaunch_lock:
+        if _relaunching:
+            return True
+        if _relaunch_timer is not None:
+            _relaunch_timer.cancel()
+        _relaunch_timer = threading.Timer(delay, relaunch_self, args=(port,), kwargs={"log": log})
+        _relaunch_timer.daemon = True
+        _relaunch_timer.start()
+    return True
+
+
+def defer_relaunch(delay=8.0):
+    """Push an armed restart back, because something else is happening. No-op if none is armed."""
+    global _relaunch_timer
+    with _relaunch_lock:
+        if _relaunching or _relaunch_timer is None:
+            return
+        _relaunch_timer.cancel()
+        _relaunch_timer = threading.Timer(delay, relaunch_self,
+                                          args=(_relaunch_timer.args[0],),
+                                          kwargs=_relaunch_timer.kwargs)
+        _relaunch_timer.daemon = True
+        _relaunch_timer.start()
 
 
 def relaunch_self(port, log=None):
@@ -11528,7 +11603,19 @@ def relaunch_self(port, log=None):
             # Detached and in its own process group: the child must outlive us, and must not take
             # a Ctrl-C meant for the console this one was started from.
             flags = 0x00000008 | 0x00000200      # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen([exe, AFTER_UPDATE_FLAG, str(port)],
+        # WHO TO CLEAR UP AFTER, BY NUMBER. This process exits a moment from now, but the exe is
+        # a PyInstaller bundle: a bootloader parent starts the Python child that runs all of this,
+        # and os._exit() in the child does not always take the parent with it. Measured here after
+        # a working self-update - the new build was serving on the port and the OLD build's
+        # bootloader was still in the task list, nine minutes later, holding its own image open.
+        # Nothing had gone wrong with the restart; the leftover just sat there.
+        #
+        # It matters because that image is <exe>.old: while it is held, the sweep cannot remove it
+        # AND THE NEXT SELF-UPDATE CANNOT RENAME OVER IT - which is exactly the PermissionError this
+        # whole lane exists to avoid. Enumerating processes to find it would mean guessing which
+        # ones are ours; being told the two numbers does not.
+        subprocess.Popen([exe, AFTER_UPDATE_FLAG, str(port),
+                          REPLACING_FLAG, "%d,%d" % (os.getpid(), os.getppid())],
                          cwd=os.path.dirname(exe) or None,
                          close_fds=True, creationflags=flags)
     except Exception as e:
@@ -11619,6 +11706,7 @@ def main():
             print("[boot] it has; taking over")
         else:
             print("[boot] it has not, after 90s - carrying on and letting the guard below decide")
+        _clear_replaced(sys.argv)
     _other = _already_running(cfg["companion"]["port"])
     if _other:
         print("[boot] PKG MUTANT SHOP v%s is ALREADY running on port %d - not starting a second "

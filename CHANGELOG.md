@@ -9,6 +9,32 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.91.2] - 2026-10-01 - "Restart when the pressing stops" `[VERIFIED]`
+
+### Fixed
+- **The restart no longer cuts "Update all" in half.** Our own entry is one row of that list, and
+  restarting the instant it succeeded killed whatever was already in flight. Measured here: the PS5
+  row reported success and restarted, and the PS4 row died with the connection. The restart is
+  ARMED now (`schedule_relaunch`) and every further update request pushes it back
+  (`defer_relaunch`), so the app goes when the panel has been quiet for eight seconds. Nothing was
+  ever lost - the remaining updates were still offered - but the owner pressed one button and had
+  to press it again, which is not what "it updates itself" should mean.
+- **A self-update left two files beside the app.** `<exe>.old` is the build that was running and
+  cannot be deleted at the moment of the swap - it is the image the process is executing from - so
+  it is left for the next start. But that start waits only for the PORT to come free, and Windows
+  can hold the image a moment longer, so the single attempt lost the race: measured, the app
+  restarted itself correctly and a 38 MB `.old` stayed. A `.new` from a download interrupted by the
+  restart stayed too, 25 MB that nothing reads. Both are swept, once inline and then in the
+  background for a minute.
+
+### Tests
+- `tools/test_panel_rules.py` drives the arm/defer/fire sequence over real (short) timers with
+  `relaunch_self` stubbed - it starts a second copy of the app and exits this one, which a test
+  must never do - and checks three tiles asking still restarts exactly once. Three perturbations,
+  three reds.
+
+---
+
 ## [3.91.1] - 2026-10-01 - "Updating both tiles is one update" `[VERIFIED]`
 
 ### Fixed
