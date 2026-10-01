@@ -25,7 +25,7 @@ somewhere in this repo:
     uploaded under their build names, never renamed.
   * EVERY GATE RUNS. tools/ready_check.py is the same thing CI would be.
 
-See RELEASING.md for what is worth publishing at all (not every version is).
+See internal/RELEASING.md for what is worth publishing at all (not every version is).
 """
 import argparse
 import hashlib

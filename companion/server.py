@@ -402,7 +402,7 @@ DEFAULT_CONFIG = {
     "integrity": {"enabled": True, "verify_before_install": True, "on_local_corrupt": "warn"},
     "federation": {"enabled": False, "name": "", "peers": []},
     # OUR OWN RELEASES. `channel` decides which of our releases this device is offered: "stable" is
-    # a published GitHub release, and only the big versions are published - see RELEASING.md, which
+    # a published GitHub release, and only the big versions are published - see internal/RELEASING.md,
     # is the whole reason this is a channel and not "is there a newer number anywhere".
     # `github_token` is needed ONLY while our repository is private; every third-party upstream in
     # curated.json is public and reads fine without it. It is never logged and goes nowhere except
@@ -587,7 +587,7 @@ def _ps4_bridge(srv):
     """The console that IS a PS4 - as the console itself reports it, not as config.json spells it.
 
     /api/ps4/tile used to pick its console by reading the `platform` field of each config entry. A
-    hand-written entry has no such field (SETUP-REMOTE.md documents exactly that shape) and neither
+    hand-written entry has no such field (internal/SETUP-REMOTE.md documents exactly that shape) and neither
     does one written before PS4 support, so the Settings panel hid the PS4 dashboard-app card
     entirely - console:false - while the PS4 was online, listed and installing games perfectly.
     Bridge.is_ps4() answers from /api/health and remembers it, so a configured platform still wins
@@ -1745,7 +1745,7 @@ def reconcile_consoles(cfg):
         #
         # This used to claim EVERY entry whose platform matched, which contradicts the rule written
         # above it ("every OTHER entry is left exactly as it is"). Clearing the PS5 address removed
-        # a second PS5 somebody had added by hand, and SETUP-REMOTE.md tells people to add entries
+        # a second PS5 somebody had added by hand, and internal/SETUP-REMOTE.md tells people to add entries
         # with their own ids. The id is the stable name this function created, so the id is what it
         # looks for; a config written before ids existed is matched on platform instead, and only
         # when it has no id of its own to be known by.
@@ -1784,7 +1784,7 @@ def reconcile_consoles(cfg):
     # PS5 on a machine that has both. Everything unrecognised keeps its relative order at the end.
     # THE SAME RULE THE REST OF THIS FILE USES: a console that does not say what it is, is a PS5.
     # This ranked ps5=0, ps4=1 and EVERYTHING ELSE=2, so an entry added to config.json by hand -
-    # the exact shape SETUP-REMOTE.md section 3 tells people to write, {"id":"living","ip":...}
+    # the exact shape internal/SETUP-REMOTE.md section 3 tells people to write, {"id":"living","ip":...}
     # with no platform field - sorted BEHIND the PS4 and made consoles[0] the PS4. Every place that
     # still means "the console" by consoles[0] then described the PS4: _bridge_for's final
     # fallback (so /api/storage and /api/console/apps), /api/federation, the queue's pc-copy

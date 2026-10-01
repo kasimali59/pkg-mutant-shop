@@ -109,8 +109,7 @@ old file is kept as `.bak` until the new one is proven complete. Taking an updat
 sending it to a console stays a second, separate press.
 
 Nothing needs configuring for this: the releases are public, so any device finds them. Not every
-version is published — only the ones worth interrupting someone for. See
-**[RELEASING.md](RELEASING.md)**.
+version is published — only the ones worth interrupting someone for.
 
 ---
 
@@ -158,8 +157,7 @@ PS5 **backups** take a different lane: the console copies the file to the drive 
    └─────────────────────────────────┘   └───────────────────────────────────────────┘
 ```
 
-Deeper: **[ARCHITECTURE.md](ARCHITECTURE.md)**, **[MUTANT PKG ENGINE.md](MUTANT%20PKG%20ENGINE.md)**
-(the install engine), **[PAYLOADS-AND-HOMEBREWS.md](PAYLOADS-AND-HOMEBREWS.md)**.
+Deeper: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ---
 
@@ -184,8 +182,8 @@ the console browser has both a stick cursor and D-pad focus, so the page uses `:
 Deploy a new PS5 build with `python companion/deploy.py elf`. Payload Manager resolves a load **by
 basename, from its own directory**, so the registered file is the one that has to change.
 
-Toolchains and prerequisites: **[TOOLCHAIN.md](TOOLCHAIN.md)**,
-**[BUILD-PS5-APP.md](BUILD-PS5-APP.md)**.
+Each console build needs its own SDK in WSL; the build scripts say which and where they
+expect it.
 
 ---
 
@@ -196,10 +194,8 @@ Toolchains and prerequisites: **[TOOLCHAIN.md](TOOLCHAIN.md)**,
 | [docs/FEATURES.md](docs/FEATURES.md) | The full feature list, by area. |
 | [SETUP.md](SETUP.md) | The current runbook: PC side, console side, triage. |
 | [CHANGELOG.md](CHANGELOG.md) | Every version. |
-| [RELEASING.md](RELEASING.md) | What gets published, and how a release is cut. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the pieces fit together. |
-| [MUTANT PKG ENGINE.md](MUTANT%20PKG%20ENGINE.md) | The install engine — start here when installs break. |
-| [PAYLOADS-AND-HOMEBREWS.md](PAYLOADS-AND-HOMEBREWS.md) | The payload panel's design, and its measurements. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Reporting something, and what a change has to pass. |
 | [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | Everything we ship that we did not write. |
 
 ---

@@ -9,6 +9,64 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [Unreleased] - documentation
+
+A pass over every document in the repository, splitting what a reader needs from what we wrote for
+ourselves. No code behaviour changed; the three artifacts are untouched.
+
+**Twelve documents left the repository and stayed on disk under `internal/`.** Five of them opened
+with their own **SUPERSEDED** banner - a public document whose first paragraph lists "what is no
+longer true" teaches a stranger nothing except that our docs contradict each other. The rest are
+working material: the install engine's outage runbook, the release workflow, two roadmaps, the
+payload panel's in-progress design record, and the whole `research/` folder.
+
+**`research/` also held a partial copy of etaHEN's source, and `ps5-app/onconsole/payloads/`
+held its binary.** Neither is embedded, started or spoken to - the binary had been dead weight
+since 3.33.0 - and redistributing somebody else's GPL work from a public repository carries an
+obligation there was no reason to take on for a file nothing uses. Both are out; the notice in
+`THIRD-PARTY-NOTICES.md` now says so plainly.
+
+**Things that should never have been published:**
+
+* **two PSN user ids**, in plain text in `ps4-app/onconsole/README.md`;
+* **the owner's Windows account name**, twice in `CHANGELOG.md`, once as a home path and once as a
+  machine name in a diagnostic dump;
+* a pointer at the git history telling readers where a device id could be found;
+* the owner's habits - a console used while they were asleep, and why one installed title is on the
+  cheat skip list. The skip list stays and still explains itself; it no longer names the game or
+  the reason.
+
+**And the way the work is done is not a release note.** Eleven entries described audits by how many
+readers ran them, one reported that a reviewer had crashed, and another that a usage limit cut
+verification short. What an audit *found* is worth publishing - the counts of confirmed and refuted
+findings are kept - but the machinery that produced it is ours. Nineteen first-person lines
+("What I shipped that was wrong", "My fault, and it came from 3.4.0") now read in the project's
+voice; three remain because they are quotations.
+
+### Corrections, found while reading
+
+* **`docs/FEATURES.md` said PS4 cheats could not be applied. They can.** The PS4 ELF embeds
+  `pms-agent.prx` (`agent_bundle.h`, included at `server_ps4.c:82`, six matches in the built ELF)
+  and lists it for exactly the installed titles the library covers. What is true is narrower and is
+  now stated: a payload there cannot write another process's memory *from outside*, so the helper
+  is loaded into the game instead - and because the plugin list is read when a game **starts**, a
+  game already running when the helper was listed cannot be written to.
+* **`SETUP.md` said a deploy waits until a connect to `:8710` is refused.** It does not, and could
+  not: on these consoles a port that has stopped listening **times out**, so waiting for a refusal
+  hangs for ever. `deploy.py` waits for the shop to acknowledge the quit and then for two
+  consecutive failed connects.
+* **`SETUP.md` said only ShadowMountPlus auto-starts.** ftpsrv does too (`payload_bundle.h`); six
+  of the eight are written and deliberately left alone.
+* `SETUP.md` introduced itself as 3.62.0 with "Two artifacts, nothing else" twenty lines above a
+  section naming all three.
+* `THIRD-PARTY-NOTICES.md` said "two shipped artifacts" and was stamped 3.84.0.
+
+**`ARCHITECTURE.md` is new.** The old one was a July design-and-vision note that had been
+superseded since September; it is in `internal/`. The replacement describes the system that exists.
+**`CONTRIBUTING.md` is new** and carries the engineering rules that used to be scattered through
+documents nobody outside this repo could read: perturb a test to red, measure rather than assume,
+never guess a syscall signature, and the two things the console browsers do differently.
+
 ## [3.87.0] - 2026-09-30 - "The app makes the folder, and the updates move into the header" `[VERIFIED]`
 
 ### The official repository
@@ -174,8 +232,8 @@ tokenless 404 would be served back to a caller that now has a token.
   changes nothing. The asset names are a contract - the app picks a console's file out of a release
   by name;
 * **`companion/config.json` is no longer tracked.** It is the owner's live config: this machine's
-  device id was in the history, and the moment `updates.github_token` was used a token would have
-  followed it. `config.example.json` is the template, `start.cmd` copies it, and the app falls back
+  device id does not belong in a public repository, and a token would have followed it the moment
+  `updates.github_token` was used. `config.example.json` is the template, `start.cmd` copies it, and the app falls back
   to its defaults when neither exists.
 
 ### Gates
@@ -251,7 +309,7 @@ rather than reasoning.
   which still contained leftovers from older builds under the same stem - and one of them won the
   size comparison. It reports one entry per bundled payload now: the file `/api/payloads/load`
   would actually start.
-* **`qparam()` takes the request PATH and I passed it the whole request.** It still finds a `?` -
+* **`qparam()` takes the request PATH, and it was handed the whole request.** It still finds a `?` -
   in the request line - so it parsed a value with `" HTTP/1.1"` on the end, matched nothing, and
   both consoles answered *"this build does not carry that one"* about a payload they were holding.
   Every other caller in both files passes `rawpath`; a check now makes sure they keep doing that.
@@ -645,7 +703,7 @@ executable and there are none.
 So the blind write did not introduce the fault. It made the same fault fire immediately and reliably
 instead of on a hit. **The crash was in the cheat file all along and nothing was checking.**
 
-### What I shipped that was wrong on its own terms
+### What the master engine shipped that was wrong on its own terms
 
 ```c
 if (mem_read(pid, addr, cur, (size_t)wl) != 0) { bad++; continue; }
@@ -659,7 +717,7 @@ the file did NOT fit, that would put a jump into arbitrary code. It is not what 
 console reports APP_VER 01.02 for a 01.02 file, and both hook sites hold exactly the bytes their cave
 re-executes), but it is what the code permitted, and it is gated now.
 
-**A correction, because I stated this the wrong way round first:** I initially read 0x5BCBA5 as an
+**A correction, because this was stated the wrong way round first:** 0x5BCBA5 was first read as an
 absolute address rather than base + offset, found `5D C3 48 8B 03` (`pop rbp; ret`) there, and wrote
 it up as "a jump landed on pop rbp; ret in a build the file was not for". Those bytes came from the
 wrong place. `/api/mem/read` takes an absolute address; cheat offsets are image-relative.
@@ -695,8 +753,7 @@ to do without letting it. That is why a crash was the first evidence. `cheat_app
 identical, returning before `mem_write` is ever called, with the same `detail` string - so a
 diagnostic and the real thing cannot disagree about why something was refused.
 
-**It is how this fix was proved on the owner's own console while their game was running and they were
-asleep.** All seven Dark Souls II cheats, asked:
+**It is how this fix was proved on a real console, with the game running and nobody touching it.** All seven Dark Souls II cheats, asked:
 
     mod 0 God mode              rc=-6  master_refused=5   needs a scratch space this game does not have
     mod 1 infinit Stamina       rc=-6  master_refused=5
@@ -823,13 +880,14 @@ the way `cheat_doctor.py` already does.
 
 ### The audit, and the 30 defects it found
 
-A 222-agent adversarial audit read every change 3.82.0 made - eight reviewers, then three independent
-lenses per finding with a majority needed to confirm, then a critic asked what nobody had looked at.
+A full adversarial audit of every change 3.82.0 made: each area read independently, each finding
+re-checked from three separate angles with a majority needed to confirm it, and a final pass asking
+what nobody had looked at.
 **61 findings survived verification and 10 were rejected.** Its line numbers were routinely wrong (it
 cited the signature scanner for the master engine), so every one below was re-read before it was
 believed. The ones that mattered are fixed; the rest are listed here so they are not lost.
 
-**In the master engine I had shipped hours earlier:**
+**In the master engine shipped hours earlier:**
 
 * **Only one cave-resident cheat per file could be on at a time**, and the second was blamed on the
   game's version. The idempotence test was an exact memcmp of the whole cave - but a cave is BY DESIGN
@@ -890,7 +948,7 @@ believed. The ones that mattered are fixed; the rest are listed here so they are
   category or the expected size, so the finished check looked for a game's app.pkg, which an update
   never writes. **Retry re-registered with no content id and size 0**, because it read fields only the
   queued lane filled, and it **published the previous failure's error code and percentage**.
-* **The stall detector could never fire for an update, an add-on or a reinstall** - the guard I added
+* **The stall detector could never fire for an update, an add-on or a reinstall** - the guard added
   hours earlier asked whether the console LISTS the title, which for anything but a first install is
   true before the transfer starts. It asks whether the package file has moved now.
 * **36 of the 73 Trainer files carry more than one `<StartUP>`** and only the first was converted -
@@ -1133,7 +1191,7 @@ only where it is the only way.
 
 ## [3.79.0] - 2026-09-27 - "Two traps the audit found" `[VERIFIED]`
 
-Both of these were turned up by a 20-agent read of the panel and the console tracker, after the 3.78.0
+Both of these were turned up by a full read of the panel and the console tracker, after the 3.78.0
 fixes were already in. Neither was the reported symptom; both could have produced it.
 
 ### An incomplete exe was sitting in the repo under the real name
@@ -1158,8 +1216,8 @@ skipped - a backup is supposed to hold whatever it held.
 answering. So on a PC whose only entry is a PS5, and whose PS5 answers, `quiet` is empty for ever, the
 sweep never runs, and a PS4 on the same network can never be adopted however long the app is left open.
 
-That is the right rule for "a console I know about is missing" - one that is merely switched off must
-not have this PC sweeping all day. It is the wrong rule for "a platform I have never met", which is a
+That is the right rule for "a known console is missing" - one that is merely switched off must
+not have this PC sweeping all day. It is the wrong rule for "a platform never seen before", which is a
 question that has never been asked and whose answer changes the moment a PS4 is switched on. There is
 now a second, much slower trigger for exactly that case, backing off 15 min -> 30 -> 60 while it keeps
 finding nothing, and stopping entirely once a console of that platform is adopted.
@@ -1177,7 +1235,7 @@ missing something. It was not. Both PCs ran byte-identical 3.78.0; the differenc
 saved state:
 
 ```
-PC "<user>"    ps4_ip 10.0.0.86   online true     entry HAS a console_id
+PC "PC-A"     ps4_ip 10.0.0.86   online true     entry HAS a console_id
 PC "Casita"   ps4_ip 10.0.0.87   online FALSE    entry has NO console_id
 ```
 
@@ -1274,9 +1332,9 @@ autoarm true   armed_titles 4   armed_default false
 armed_for  CUSA01589,CUSA14409,CUSA20499,CUSA42556
 ```
 
-**Four, not five** - because `CUSA23827` (Call of Duty Warzone) is on a skip list seeded on first run.
-The owner has said plainly that they never run it to avoid a ban, and injecting our code into an online
-game is precisely the risk they are avoiding. The file says why and it is theirs to edit.
+**Four, not five** - because one installed title is on a skip list seeded on first run. Injecting
+anything into a game with online services is a risk the owner of a console should choose for
+themselves, not inherit from us. The list is a plain file, it says why, and it is theirs to edit.
 
 **The purge is still the recovery path, one file away.** With autoarm off, boot behaves exactly as it
 always did - so if an agent build ever misbehaves again, the owner opens the app, switches it off, and
@@ -1548,7 +1606,7 @@ pattern catches stdio and leaves the `sceKernel*` replacements alone.
 
 ## [3.70.0] - 2026-09-26 - "Forty-six findings, and a gate that could not fail" `[VERIFIED]`
 
-A 72-agent audit of the PS4 cheat work. Everything below is fixed, and the two things it got wrong
+A full audit of the PS4 cheat work. Everything below is fixed, and the two things it got wrong
 about its own headline finding are recorded as plainly as the things it got right.
 
 ### The gate that had been checking nothing
@@ -2179,7 +2237,7 @@ renders on a single-console setup.
 
 ## [3.64.0] - 2026-09-23 - "Asking before answering" `[VERIFIED]`
 
-The rest of the 143-agent audit: the medium and low findings, re-triaged against the code as it
+The rest of that audit: the medium and low findings, re-triaged against the code as it
 stands rather than as it stood when they were raised. Everything below was measured, and where a
 finding turned out not to matter that is recorded too, with the number.
 
@@ -2480,7 +2538,7 @@ talking to both at once. The PS5's payload source changed by exactly one token -
 stamp - as every release does; the rebuilt ELF is staged but was not deployed to the owner's
 console, at their request.
 
-### Found by a 143-agent read of the whole app, then adversarially verified
+### Found by a full read of the whole app, then adversarially verified
 
 151 findings raised, 136 survived verification, 15 refuted by reading the code they described.
 Everything below is from that pass and was fixed in this release.
@@ -3144,15 +3202,14 @@ what was measured. The shop itself is unaffected either way — it has never nee
 ### Where this release came from
 
 A read-only audit of 3.60.0, end to end: the companion, the console payload, the page, the tools,
-the build and every document. Fifteen readers, one subsystem and one lens each; then an
-adversarial verifier per finding told to assume it was wrong and re-read the cited lines. 339 raw
-findings became **262 confirmed, 12 refuted, 65 left unverified** when a usage limit cut the
-verification short. The report is the audit dossier; this entry is what was done about it.
+the build and every document: one subsystem and one lens at a time, then every finding re-read by
+a verifier told to assume it was wrong. 339 raw findings became **262 confirmed, 12 refuted and 65
+left unverified**. The report is the audit dossier; this entry is what was done about it.
 
 Then a fix pass on four file lanes (companion, console, page, tools+docs), each change reviewed
 adversarially against a git baseline and re-checked by hand. **This release also starts the
 repository's history**: commit `4fe2409` is byte-identical 3.60.0, so every line below is a
-`git diff` away. A folder copy of 3.60.0 and its shipped exe/elf sits in `backups/` beside the repo.
+`git diff` away.
 
 Nothing here changes what the app does. The install lane came through the audit clean and was
 not touched where it matters - see "What was deliberately left alone" at the end.
@@ -3392,8 +3449,7 @@ dictionary - and the selector offers it, because it filters its name list agains
 
 ### The edit reviewer died, so the edits were verified by measurement instead
 
-Two workflow agents failed, one of them the adversarial reviewer meant to check every proposed edit.
-Nothing was applied on trust. A validator checked, for all 117: that the `find` text exists in the
+Part of the review tooling fell over, so nothing was applied on trust. A validator checked, for all 117: that the `find` text exists in the
 real file **verbatim and exactly once**; that every `t("key")` in the replacement exists in the
 dictionary; and that nothing introduces `title=` or a ninth `scard`/`sec_` match. It rejected 11 -
 eight referencing keys that do not exist and three with stale anchors - and 106 applied with zero
@@ -4023,7 +4079,7 @@ translatable titles, and `restOff` confirmed absent from every header.
 
 ## [3.50.0] - 2026-08-27 - "The cheat folders were unreachable on the console" `[VERIFIED]`
 
-Two defects in yesterday's Settings redesign, both found by an audit of the page I had just shipped.
+Two defects in yesterday's Settings redesign, both found by an audit of the page as just shipped.
 
 ### The chips hid their paths from the only devices that needed them
 
@@ -4958,7 +5014,7 @@ printed `repr(e)` — `<HTTPError 409: 'Conflict'>` — and nobody would have re
 
 - **The display-name passthrough.** `fixed[1300]` + `nm[300]` → `line[1750]`: worst case 1600 bytes,
   150 of margin, `snprintf` cannot truncate so the `write()` length is always real. Bounded again to
-  239 bytes in the installer. The actual payload was `Riptide GP2` — 11 ASCII characters. My prime
+  239 bytes in the installer. The actual payload was `Riptide GP2` — 11 ASCII characters. The prime
   suspect was wrong.
 - **The busy-latch auto-release race.** Real bug, but it needs `localinst_thread` running
   concurrently; the fatal attempt was companion-driven only.
@@ -5586,7 +5642,7 @@ grep -icE "dpi-cleanup|dpi-reload|12800|etahen"  pms.log   ->   0
 
 The first run after the flip reported `playable` for both games — and the bgft rows said
 **`etaHEN DPIv2`**. The frozen exe reads `config.json` from **beside itself**
-(`C:\Users\<user>\Desktop\PKG MUTANT SHOP\`), not from `companion/config.json` in the repo. The flip
+(the folder the exe sits in), not from `companion/config.json` in the repo. The flip
 had gone into the repo copy, which the running app never reads.
 
 Two green "Ready to play" rows, and the lane was unchanged. This is exactly why the `title` column
@@ -6005,7 +6061,7 @@ switched back off afterwards and verified 403.
 
 ## [3.24.9] — 2026-08-24 · "Buttons that discard what the server said" `[VERIFIED]`
 
-More of the 48-agent audit worked through. Everything here is a defect that changed what the user
+More of that audit worked through. Everything here is a defect that changed what the user
 saw or lost their work — no refactors.
 
 ### "Clear finished" deleted the queue
@@ -6281,7 +6337,7 @@ The app's own install lane was recorded state-by-state during the live etaHEN in
 
 ## [3.24.5] — 2026-08-24 · "Buttons that cannot work, and a verdict handed down one second in" `[WIRED]`
 
-Findings from a 48-agent audit that traced **every** path in the app capable of installing a
+Findings from an audit that traced **every** path in the app capable of installing a
 package — the companion's HTTP dispatch and all seven queue lanes, every endpoint on the on-console
 ELF, every fetch in the UI, and every config switch that changes routing. 40 paths were enumerated
 and each non-etaHEN or claimed-unreachable one was then re-checked by an adversary told to refute
@@ -6916,7 +6972,7 @@ PS5), zero duplicates, library JSON still valid.
 ## [3.21.1] — 2026-08-22 · "Scrolling stops throwing the library away" `[VERIFIED]`
 
 3.21.0 made console scrolling **worse** — covers visibly reloaded on the smallest scroll. That was a
-regression I introduced, and it came from fixing the wrong layer.
+regression introduced here, and it came from fixing the wrong layer.
 
 ### Fixed — the grid was rebuilt from scratch on every row crossed
 
@@ -7067,7 +7123,7 @@ compare puts "19" after "2"), then by recency. The version is captured from each
 visible rather than guessable. Verified live: with Casita on 3.19.0 and this PC on 3.20.3, the
 console now returns `"url":"http://10.0.0.76:8710"`.
 
-**Casita still needs updating by hand** — we have no self-update path and no file access to it.
+**A second PC still needed updating by hand at this point** — there was no self-update path yet. 3.86.0 added one.
 Until then the ranking keeps it out of the way.
 
 ### Added — post-install DPI cleanup, the etaHEN equivalent of the Arsenal mechanism
@@ -7684,7 +7740,7 @@ tile shows, and launching it takes the console down hard enough to need Y2JB re-
 installed that way and both are unplayable.
 
 The evidence was already in this file, in three places — including inside 0.19.0's own **Fixed**
-section, which I quoted the *other* half of:
+section, the *other* half of which was quoted:
 
     0.19.0  "sceAppInstUtilAppInstallPkg registers metadata only - it creates /user/appmeta/<TID>
              and no game data, which is what produced dashboard tiles that failed with
@@ -8490,7 +8546,7 @@ between attempts. It is not related to any of the above.
 ## [3.9.1] — 2026-07-30 · "The drive picker is a destination list again"
 
 ### Fixed — the install destination list lost the USB drives
-My fault, and it came from 3.4.0. The storage bar was changed to show only what is *actually holding
+It came from 3.4.0. The storage bar was changed to show only what is *actually holding
 games* — which was right for the bar, but the drive picker used that same list as its fallback. Two
 different questions, one list:
 
@@ -9327,7 +9383,7 @@ the console, not copied PC-to-PC. Say the word and that is the next piece.
 ## [2.6.1] — 2026-07-27 · "+ Queue actually queues"
 
 ### Fixed — queueing a USB package installed it immediately
-The console-local lane I added in 2.6.0 called the installer straight from the request handler
+The console-local lane added in 2.6.0 called the installer straight from the request handler
 and ignored `mode: "queued"` entirely, so **+ Queue** behaved exactly like **Install**.
 
 It is a proper queue lane now, the same as every other install: `+ Queue` adds it **held**
@@ -9353,7 +9409,7 @@ POST — the UI drives the queue with POST, which the console previously answere
 The USB path called `sceAppInstUtilAppInstallPkg`, which **only registers metadata**. It
 returns in seconds, creates a dashboard tile, and leaves no game data — the tile then fails
 with *"Cannot start the game"*. The download pipeline has warned about exactly this in a code
-comment for months; the USB path I added simply used the wrong call.
+comment for months; the USB path simply used the wrong call.
 
 A package already on the console now goes through the **same pipeline as a downloaded one**:
 it is served over HTTP and handed to the install daemon, which fetches and installs it for
@@ -9982,7 +10038,7 @@ fixes. `[VERIFIED]` on the PC; multi-install to re-test on-device.
 
 ## [0.17.0] — 2026-07-25 · "The overhaul — 12 batches, install path untouched"
 
-A large, blueprint-driven feature overhaul (13-agent audit+design pass → `ROADMAP-OVERHAUL.md`). Every new
+A large, blueprint-driven feature overhaul, from a full audit and design pass. Every new
 feature defaults to today's behavior; the working install handoff (`{"url":url}` → Elf Arsenal DPI v2 →
 confirm) was never altered. All PC-verified against the live server; on-device items flagged. `[WIRED]`
 
@@ -10075,7 +10131,7 @@ no message at all. Root-caused both against the SDK samples.
   (in a constructor). Added it as the first line of `main()`, linked `-lSceUserService`, and now the launch
   **return code is reported on-screen** (`Browser launch failed: 0x…`) for both auto-open and the `open`
   command — so the next test is conclusive either way. `[WIRED]`
-- **Tile installer showed nothing** — I had added `sceUserServiceInitialize(0)` *before* the first `notify()`;
+- **Tile installer showed nothing** — `sceUserServiceInitialize(0)` had been added *before* the first `notify()`;
   the SDK `install_app` sample never calls it, and it appears to fault in payload context before anything can
   display. Removed it; `notify("Installing tile…")` is now the literal first statement. `[WIRED]`
 
@@ -10140,8 +10196,8 @@ app. Same no-sudo WSL toolchain.
 
 ## [0.14.0] — 2026-07-22 · "THE .ELF IS REAL — compiled a PS5 payload"
 
-After many turns of "I can't compile a PS5 `.elf` from Windows" — **I compiled one.** Using the user's WSL2 +
-a user-space clang-18 (no sudo), the ps5-payload-dev SDK built our payload.
+After several attempts that concluded a PS5 `.elf` could not be compiled from Windows — **one was
+compiled.** Using WSL2 and a user-space clang-18 (no sudo), the ps5-payload-dev SDK built the payload.
 
 ### Added
 - **`ps5-app/payload/pkg-mutant-shop.elf`** — a real, compiled PS5 payload (113 KB, `ELF 64-bit LSB pie
@@ -10162,7 +10218,7 @@ Those are the next builds — the compile wall is gone.
 
 ## [0.13.0] — 2026-07-22 · "Install your way — Send-to-PS5 for the Debug Installer"
 
-Explored the user's console to answer "how do I install on Y2JB, not etaHEN?". Their Payload Manager repo has
+Explored the console to answer "how does an install work on Y2JB rather than etaHEN?". Payload Manager has
 **no standalone ps5-dpi-v2** — DPI v2 there comes from **etaHEN**. So added a second install path that uses their
 **proven Debug Package Installer**, no USB and no DPI host.
 
@@ -10186,8 +10242,8 @@ Explored the user's console to answer "how do I install on Y2JB, not etaHEN?". T
 - **PS5 payload source** (`ps5-app/payload/`: `main.c`, `Makefile`, `README.md`) — a real ELF for the
   ps5-payload-dev SDK that shows an **on-screen notification** on load and listens on **:9099** for the app to
   push live "mod X enabled on <game>" notifications (what CheatRunner does). Includes the mod-apply framework
-  (memory-write engine) as the documented next step. **You compile it with the SDK (WSL/Linux) — I can't from
-  the laptop; honest build steps in the README.**
+  (memory-write engine) as the documented next step. **It is compiled with the SDK under WSL/Linux, not on
+  Windows; the build steps are in the README.**
 - **Companion → payload notifications** — `Ps5Bridge.notify()` + `POST /api/notify`. Toggling a mod now pushes a
   notification to the PS5 (once the payload is loaded); Settings has a **"📣 Test PS5 notification"** button.
   Verified: endpoint works (returns `ok:false` until the payload is running). Config `console.notify_port`.
@@ -10368,7 +10424,7 @@ ShadowMount "mount lane" for compressed backups.
   right standard API, so no behavior change — just correct guidance.
 - **ELF-loader honesty:** the default loader is **localhost-only** (security) — PC→console ELF injection needs a
   LAN-enabled loader or on-console **Payload Manager**; FTP deploy + DPI install are unaffected. Documented.
-- New **[TOOLCHAIN.md](TOOLCHAIN.md)** — authoritative map of the 12.70 stack (Y2JB/P2JB, autoloader / Payload
+- New **`TOOLCHAIN.md`** — authoritative map of the 12.70 stack (Y2JB/P2JB, autoloader / Payload
   Manager, DPI v2 hosts, Kstuff Lite, ShadowMountPlus, Game Compressor): roles, ports, boot order, and how the
   app uses each. Every assumption is a configurable default.
 
@@ -10410,7 +10466,7 @@ a self-bootstrapping PC app.
 
 ### Honest boundary
 - A *loadable* fake-signed **fpkg** (system games-dashboard icon, Route B) needs the **ps5-payload-dev SDK** +
-  on-device signing — that compile step isn't done from a laptop, and I won't fake a finished binary.
+  on-device signing — that compile step is not done from Windows, and no binary is claimed that was not built.
   Everything around it (icon, manifest, UI, bundling, FTP deploy, ELF injection) is built and tested; Route A
   needs no toolchain.
 

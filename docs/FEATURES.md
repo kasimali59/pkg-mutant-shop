@@ -1,7 +1,6 @@
 # Features
 
-Everything the app does, by area. Where a line reads like a boast it is because it was measured —
-the numbers and the failure modes in here came off real hardware, not off a design document.
+Everything the app does, by area. The numbers and the limits in here came off real hardware.
 
 Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means both consoles.
 
@@ -49,7 +48,7 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
 * Move and delete backups, with a two-tier root boundary: a drive root is not a watch folder, and
   confusing the two is how four separate bugs got in.
 
-## Cheats, mods and patches *(PS5 live; PS4 browse-only)*
+## Cheats, mods and patches *(both consoles)*
 
 * **Applied to the running game**, by the app's own engine — a CR3 walk to the game's memory, an
   expect-gated write, and a revert that puts the original bytes back.
@@ -58,9 +57,12 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
 * **Matched to the exact game version.** A cheat file built for 01.00 is not offered for 01.02; the
   panel has a version picker because the library genuinely differs between them.
 * **Thousands of cheat and patch files ship inside the app**, so a console with no PC still has them.
-* On the **PS4** the library browses but cannot be applied: that jailbreak gives a payload no way to
-  write another process's memory. This was measured — `mdbg` and `ptrace` both return `EPERM`, and
-  GoldHEN's syscall gateway is caller-only — and it is documented rather than papered over.
+* **The PS4 reaches the game from the inside.** A payload there cannot write another process's
+  memory from outside — measured, not assumed: `mdbg` and `ptrace` both return `EPERM` and GoldHEN's
+  syscall gateway only ever answers for its caller. So the app ships a small helper that is loaded
+  *into* the game instead, and the payload lists it for exactly the installed titles your library
+  has cheats for. The one limit that follows: the plugin list is read when a game **starts**, so a
+  game that was already running when the helper was listed cannot be written to — start it again.
 
 ## Payloads & Homebrews *(both)*
 
@@ -110,11 +112,9 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
 
 ## How it is kept honest
 
-* **Build gates, all fatal**: the single inline UI script is parsed by Node before it can ship, every
-  language is checked for every key, every user-facing string is checked against the house style, the
-  cheat library and the payload catalogue are checked against their sources, and the exe is checked
-  for staleness.
-* **Tests that are perturbed to red.** A check that passes when the code is broken is not a check;
-  when one is added here, the code it guards is deliberately broken to prove the test fails.
-* **Measurements, not adjectives.** Where this file says something is faster or smaller, there is a
-  number behind it in `CHANGELOG.md` or one of the design documents.
+Every claim above is something the app can be held to, and the build refuses to produce an artifact
+that breaks one: the UI script is parsed before it can ship, all fifteen languages are checked for
+every string the app uses, and the cheat library and payload catalogue are checked against the
+sources they are generated from. The engineering rules behind that are in
+[CONTRIBUTING.md](../CONTRIBUTING.md); the measurements behind individual claims are in
+[CHANGELOG.md](../CHANGELOG.md).

@@ -51,3 +51,12 @@ ps5-app/onconsole/cheats.pack
 # which was ALREADY here as config.json.unreadable-*, so the rule was silently never added and
 # `git add -A` put the file straight back.)
 /companion/config.json
+
+# OUR OWN NOTES ARE NOT THE PUBLIC'S. internal/ holds the documents that exist so WE can rebuild
+# this thing: superseded design notes that still carry useful history, the install engine's outage
+# runbook, the release workflow, roadmaps, and the research folder - which also held a partial copy
+# of etaHEN's source, i.e. somebody else's GPL code that had no business in a public repository.
+# Every byte is still on disk, exactly where it was, one directory deeper. Nothing here is secret;
+# it is simply written for us, and a stranger reading "SUPERSEDED - what is no longer true" learns
+# nothing except that our docs contradict each other.
+/internal/

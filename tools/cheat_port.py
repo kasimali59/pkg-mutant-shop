@@ -19,7 +19,7 @@ WHAT IT WILL NOT DO, and this is most of the value:
   * a code cave is never ported. 8,128 of the 15,019 mods in the library install a routine into empty
     space and jump into it; the jumps carry displacements computed for one layout, and the same bytes
     at a different address refer somewhere else. Byte matching cannot move that. See
-    research/cheat-formats.md.
+    internal/research/cheat-formats.md.
   * an anchor set that does not agree on a delta produces nothing.
   * a delta of exactly +/-0x400000 is reported as what it is - one file written with absolute
     addresses and the other image-relative - and not as code having moved.

@@ -1,21 +1,26 @@
-# PKG MUTANT SHOP 3.62.0 - setup and runbook
+# PKG MUTANT SHOP 3.87.0 - setup and runbook
 
 This is the one current document for installing, running, updating and triaging the app. Every
 sentence in it was read out of the code as it is today (`companion/server.py`,
 `ps5-app/onconsole/server.c`, `ps5-app/onconsole/installer_probe.c`, `payload_bundle.h`). Where an
-older document in this repo disagrees with this one, this one is right; the older ones carry a
-SUPERSEDED banner saying so. For the install engine's internals and history see
-`MUTANT PKG ENGINE.md` section 0.
+older document disagrees with this one, this one is right. For how the pieces fit together see
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-Two artifacts, nothing else:
+Three artifacts, nothing else:
 
 | Artifact | Runs on | What it is |
 |---|---|---|
 | `PKG-MUTANT-SHOP.exe` | a Windows PC | the companion: scans your game folder, serves the packages over HTTP, runs the install queue, serves the UI |
 | `PKG-MUTANT-SHOP.elf` | the PS5 (FW 12.70, jailbroken) | the on-console server on `:8710`: the UI, the install engine, the cheat engine, the dashboard tile, and the helpers it carries inside itself |
+| `PKG-MUTANT-SHOP-PS4.elf` | the PS4 (FW 13.52, GoldHEN) | the same server and the same UI on `:8710`, plus the home-screen application it installs itself |
 
-Nothing has to be downloaded separately. The ELF embeds the UI, ShadowMountPlus, its own installer
-(`pms-installer.elf`), the dashboard tile package and the whole cheat/patch library.
+Nothing has to be downloaded separately. Each ELF embeds the UI, the helper payloads, the homebrew
+catalogue and the whole cheat/patch library; the PS5's also carries ShadowMountPlus, its own
+installer (`pms-installer.elf`) and the dashboard tile package.
+
+**The folders are made for you.** On startup the companion creates its games folders and its
+payloads folder (`Payloads/PS4`, `Payloads/PS5`, `Homebrews/PS4`, `Homebrews/PS5`) if they are not
+there. Nothing has to be created by hand.
 
 ---
 
@@ -195,15 +200,18 @@ In this order:
    files on the first boot; later boots write only what is missing);
 4. binds `:8710`. If an older copy of the shop still owns the port it asks it to quit
    (`/api/quit`) and takes over;
-5. toasts **"PKG MUTANT SHOP v3.60.0 is ready - Open it from Media, or <ip>:8710 in any browser"**.
+5. toasts **"PKG MUTANT SHOP v<version> is ready - Open it from Media, or <ip>:8710 in any browser"**.
    From this moment installs are possible: the engine needs nothing running beforehand;
 6. in the background: if the dashboard tile is missing it installs `pms-tile.pkg` (embedded; written
    to `/data/pkg-mutant-shop/pms-tile.pkg` and handed to the console's own installer) - the tile
    appears under **Media** with no reboot;
 7. still in the background, after a delay (`/data/pkg-mutant-shop/autostart-delay`, seconds,
    default 30, max 600), once Payload Manager answers and a user is signed in: writes its helper
-   payloads to `/data/pkg-mutant-shop/payloads/` and starts **ShadowMountPlus** (`shadowmountplus.elf`)
-   **only if nothing answers on `:10101` yet**. `pms-installer.elf` is written but never started here.
+   payloads to `/data/pkg-mutant-shop/payloads/` and starts the two that are marked to auto-start:
+   **ShadowMountPlus** (`shadowmountplus.elf`, only if nothing answers on `:10101` yet) and the
+   **FTP server** (`ftpsrv.elf`, only if nothing answers on `:2121`). The other six are written and
+   left alone - `pms-installer.elf` is spawned per install, and kstuff, OnionHEN and the WebKit
+   autoloader change the jailbreak layer, which is the owner's call and never a side effect.
    Create `/data/pkg-mutant-shop/no-autostart` to skip this step entirely.
 
 ### 2.4 Where things live on the console
@@ -212,7 +220,7 @@ In this order:
 /data/pkg-mutant-shop/
     web/                     the UI (rewritten every boot)
     cheats/                  json/ mc4/ shn/ patches/ ... - the cheat and patch library
-    payloads/                shadowmountplus.elf, pms-installer.elf (rewritten every boot)
+    payloads/                the eight helper payloads the ELF carries (rewritten every boot)
     install/                 staging for console-local transfers
     pms-tile.pkg             the dashboard tile package
     installer-req.txt        one install's request (URI, display name, token) - consumed by the installer
@@ -286,15 +294,17 @@ kernel, with expected-bytes checks and revert). No third-party cheat engine is i
 ### 5.1 The ELF (the console)
 
 ```
-python companion/deploy.py elf [path\to\PKG-MUTANT-SHOP.elf] [--ip 10.0.0.99] [--expect 3.60.0]
+python companion/deploy.py elf [path\to\PKG-MUTANT-SHOP.elf] [--ip <console>] [--expect 3.87.0]
 ```
 
 It first checks that Payload Manager answers on `:8084` and that the shop is not in the middle of a
 download, install hand-off or move (`--force` overrides), then uploads over FTP (2121, then 1337) to
 the registered path as `.part`, verifies the size, keeps the old copy as
-`/data/pkg-mutant-shop/PKG-MUTANT-SHOP.elf.prev`, renames, asks the running shop to quit, **waits
-until a connect to `:8710` is refused** (a timed-out request is not "stopped"), loads through
-Payload Manager, and polls
+`/data/pkg-mutant-shop/PKG-MUTANT-SHOP.elf.prev`, renames, asks the running shop to quit, **waits for the shop
+to acknowledge the quit and then for two consecutive failed connects to `:8710`** - on these
+consoles a port that has stopped listening times out rather than refusing, so waiting for a refusal
+would hang for ever, and one failed connect on its own can just be a busy accept loop - loads
+through Payload Manager, and polls
 `/api/health` until `version` is the expected one. By hand, the same four steps:
 
 1. FTP the ELF over `/data/pldmgr/payloads/PKG-MUTANT-SHOP/PKG-MUTANT-SHOP.elf` (`.part`, then rename)
@@ -305,12 +315,23 @@ Payload Manager, and polls
 
 Loading an older ELF rolls the UI back too, since the UI is rewritten from the ELF every boot.
 
-### 5.2 The exe (the PC)
+### 5.2 From inside the app
+
+Open **Payloads & Homebrews** in the top bar and use the **Updates** dropdown beside the close
+button. It checks this project's own releases as well as every bundled payload's upstream, shows
+what is newer, and updates them one at a time. A download is verified before anything is replaced:
+the size must match, the marker must be present *inside* the bytes, and the file it replaces is
+kept as `.bak` until the new one is proven complete. Taking an update replaces the file on the PC;
+sending it to a console is a second, separate press.
+
+### 5.3 The exe (the PC)
 
 Quit the tray app (right-click the tray icon - Quit), copy the new `PKG-MUTANT-SHOP.exe` over the old
-one, start it. `config.json`, `installed.json` and `.cache\` beside it are kept.
+one, start it. `config.json`, `installed.json` and `.cache\` beside it are kept. The copy silently
+does nothing if the app is still running - Windows will not replace a mapped image - so quit first
+and check the version in Settings > About afterwards.
 
-### 5.3 Building
+### 5.4 Building
 
 - exe: `build_exe.cmd` (runs `companion/PKG-MUTANT-SHOP.spec`, whose gates - version stamp, UI
   parse check, i18n, message style, storage-tile test - are all fatal). Output `companion/dist/`.
