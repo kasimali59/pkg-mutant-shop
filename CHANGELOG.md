@@ -72,6 +72,25 @@ browser, which has one. It checks this project's release and compares it against
 answering. Taking the download still needs a companion, and the row says so with a link rather than
 a button that cannot finish.
 
+### The companion had been asking a dead address for the PS4
+
+Found by a build gate, not by looking: *"the PS4 payload is the same version too - None vs 3.88.0"*
+while the PS4 was plainly answering. The companion had it saved at `10.0.0.90`; it was at
+`10.0.0.86`.
+
+Addresses are supposed to self-heal by the console's durable id. This one could not: the PS4 had
+**also regenerated its id**, so the saved pair matched nothing, the id-first lookup found no
+candidate, and the platform fallback was skipped - because it only ran for an entry with **no** id,
+and this entry had one. An id nothing on the network reports identifies nothing, which makes it
+exactly as useless as having none, and it failed the same way: permanently.
+
+That one stale address is why every PS4 tile in the panel read as unreachable from the PC, and why
+switching to the PS4 tab kept showing the PS5's payloads. After the fix the companion found it on
+its next pass, with no input: `ps4 ip=10.0.0.86 online=True`.
+
+A second console of the same platform is still refused - the fallback fires only when exactly one
+console of that platform is unaccounted for, and it announces the move.
+
 ### Also
 
 * The published binaries carried the build account's home directory in their DWARF paths.

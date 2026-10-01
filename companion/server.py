@@ -2325,8 +2325,21 @@ def track_consoles(cfg, fleet, log=None, scan=True):
                if want_id and h.get("console_id") == want_id and ip not in taken]
         how = "id matches"
 
-        if not hit and not want_id:
-            # THE ENTRY HAS NOTHING TO IDENTIFY IT BY - and that is not a rare corner. An id is only
+        # A SAVED ID THAT NOTHING ON THE NETWORK REPORTS IDENTIFIES NOTHING, which makes it exactly
+        # as useless as having none - and it fails the same way, permanently. Measured here: the
+        # owner's PS4 moved to another address AND regenerated its id (the file behind it is written
+        # once and had been re-created), so the saved pair matched nothing, the id-first lookup found
+        # no candidate, and this fallback was skipped because `want_id` was merely PRESENT. The
+        # companion went on asking a dead address for days while the console sat answering on
+        # another one, which also made every PS4 tile in the payload panel read as unreachable.
+        #
+        # The protection this guard really provides is a house with a SECOND console of the same
+        # platform, and that is untouched: it still fires only when EXACTLY ONE console of this
+        # platform is unaccounted for, and the move is announced.
+        seen_ids = {h.get("console_id") for _ip, h in seen if h.get("console_id")}
+        if not hit and (not want_id or want_id not in seen_ids):
+            # THE ENTRY HAS NOTHING USABLE TO IDENTIFY IT BY - and that is not a rare corner. An id
+            # is only
             # ever learned from a console you can already reach, so an entry whose address went stale
             # BEFORE ids existed can never learn one. Chicken and egg, and it is permanent.
             #

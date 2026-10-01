@@ -460,6 +460,17 @@ def main():
     ok('act==="install"' in _do and "phb_queued" in _do,
        "an install reports that it was queued, not that it is done")
 
+    # ---- A STALE CONSOLE ID MUST NOT PIN A DEAD ADDRESS FOR EVER ------------------------------
+    # The owner's PS4 moved address AND regenerated its id, so the saved pair matched nothing: the
+    # id-first lookup found no candidate and the platform fallback was skipped because an id was
+    # merely PRESENT. The companion asked a dead address for days while the console answered on
+    # another one - and every PS4 tile in this panel read as unreachable because of it.
+    _trk = srv.split("def track_consoles(", 1)[1].split(_NXT, 1)[0]
+    ok("want_id not in seen_ids" in _trk,
+       "an id nothing on the network reports is treated as no id at all")
+    ok("len(cands) == 1" in _trk,
+       "...while a second console of the same platform is still refused")
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:
