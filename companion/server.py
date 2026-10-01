@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.88.0"
+VERSION = "3.88.1"
 
 _BUILD_ID = None
 
@@ -9936,12 +9936,17 @@ class Handler(BaseHTTPRequestHandler):
             # install, it just makes that check blind, and a homebrew is a package like any other.
             # Nothing here looks inside the file: it is handed to the engine the games use and the
             # console's own installer decides.
+            # dry_run IS FORWARDED, and it has to be. This route builds its own body for the
+            # install lane, and it was not copying the flag across - so asking this endpoint what
+            # it WOULD do performed a real install instead. That is the exact trap /api/install
+            # grew dry_run for in the first place, reintroduced one layer up.
             return self._install({"install_key": key, "name": title, "kind": "base",
                                   "title_id": it.get("title_id") or "",
                                   "content_id": it.get("content_id") or "",
                                   "version": it.get("version") or "",
                                   "size": it.get("size") or 0,
                                   "mode": (body.get("mode") or "now"),
+                                  "dry_run": body.get("dry_run"),
                                   "console": body.get("console") or (b.c.get("id") or "")})
         return self._json({"ok": False, "message": "unknown action"}, 400)
 

@@ -471,6 +471,27 @@ def main():
     ok("len(cands) == 1" in _trk,
        "...while a second console of the same platform is still refused")
 
+    # ---- ASKING WHAT IT WOULD DO MUST NOT DO IT ------------------------------------------------
+    # /api/install grew dry_run after a test suite installed real games on the owner's console.
+    # /api/payloads/install builds its own body for that lane and was not copying the flag across,
+    # so the trap was reintroduced one layer up - a "dry run" here performed a real install.
+    _act = srv.split("def _payloads_act(", 1)[1].split(_NXT, 1)[0]
+    ok('"dry_run": body.get("dry_run")' in _act,
+       "a homebrew install forwards dry_run to the install lane")
+
+    # ---- A FINISHED JOB IS NOT A RUNNING ONE ---------------------------------------------------
+    # `active` outlives a job so its outcome can still be shown. The accept gate knew that; the
+    # engine-state route did not, so after the payload installed its own icon at boot the PS4
+    # reported "busy" for ever and read as a wedged install lane.
+    ok("static int job_running(void)" in _ps4c, "the PS4 has one definition of 'an install is running'")
+    _st = _ps4c.split('if (!strcmp(path, "/api/engine/state"))', 1)[1][:1800]
+    ok("job_running()" in _st,
+       "...and the engine state uses it instead of the bare active flag")
+    # A STATE THAT IS NEVER REFRESHED IS A STATE THAT NEVER ENDS. job_refresh() is what turns a
+    # finished transfer into "installed"; without it this route reported busy for ever even after
+    # the busy test itself was correct.
+    ok("job_refresh()" in _st, "...after asking the console what the job is actually doing")
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:

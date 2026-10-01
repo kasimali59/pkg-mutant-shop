@@ -88,7 +88,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.88.0"
+#define SHOP_VERSION "3.88.1"
 
 /* The largest POST body this console will take. Bodies here are JSON of a few hundred bytes; the
    cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */
@@ -1950,6 +1950,12 @@ static int path_ext_is(const char *path, const char *ext);
    lane waits for before it will call a job done: the title's own **app.pkg, with bytes**, under a
    root a game can actually live on. An install that was registered and never completed has no such
    file, so it no longer counts. */
+/* Is an install actually in flight? `active` outlives the job so its outcome can still be shown,
+   so "running" is active AND not in a terminal state - the same test the accept gate uses. */
+static int job_running(void) {
+    return g_job.active && strcmp(g_job.state, "installed") && strcmp(g_job.state, "error");
+}
+
 static int app_ids_json(char *out, size_t outsz) {
     int n = 0;
     out[0] = 0;
@@ -5751,6 +5757,15 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
            together: correcting one and leaving the others asserting is the exact miss that cost
            this project a follow-up release when the ShadowMount port was fixed everywhere but two. */
         int fport = ftp_live_port();
+        /* ASK THE CONSOLE BEFORE ANSWERING. job_refresh() is what turns a transfer that has ended
+           into state "installed" or "error"; without it this route reports whatever the job last
+           looked like, which is how a finished install kept reporting "busy" even after the busy
+           test was corrected. /api/engine/job has always refreshed first - these two describe the
+           same job and must not disagree. */
+        job_refresh();
+        pthread_mutex_lock(&g_job_lock);
+        int running = job_running();
+        pthread_mutex_unlock(&g_job_lock);
         char out[700];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"platform\":\"ps4\",\"mode\":\"bgft\",\"ours\":true,"
@@ -5759,15 +5774,21 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
                  "\"console_ip\":\"%s\",\"shadowmount\":false,\"ftp_port\":%d,"
                  "\"state\":\"%s\",\"detail\":\"%s\",\"how\":\"%s\"}",
                  PORT, SHOP_VERSION, g_bgft_ready ? "true" : "false",
-                 g_job.active ? "true" : "false", lan_ip_str(), fport,
+                 /* A FINISHED JOB IS NOT A RUNNING ONE. `active` stays set after a job ends so
+                    the panel can still show how it went, and the gate that accepts a new install
+                    already knows that - it tests active AND a non-terminal state (see the check
+                    beside g_job.held). This line did not, so once the payload installed its own
+                    home-screen icon at boot the engine reported "busy" for ever, which reads as a
+                    wedged install lane on a console that is perfectly free. */
+                 running ? "true" : "false", lan_ip_str(), fport,
                  /* "engine-down", NOT "shop-down". The shop is plainly up - it is serving the
                     page this sentence is read on. What did not start is the console's transfer
                     service, and saying "shop-down" sent the reader off to re-run the jailbreak
                     instead of closing and reopening the app, which is the thing that would help.
                     The page has had an engine-down branch since the engine panel learned about
                     the PS4; this route was still answering the old word. */
-                 g_bgft_ready ? (g_job.active ? "busy" : "ready") : "engine-down",
-                 g_bgft_ready ? (g_job.active ? "An install is running on the console right now."
+                 g_bgft_ready ? (running ? "busy" : "ready") : "engine-down",
+                 g_bgft_ready ? (running ? "An install is running on the console right now."
                                               : "Ready - installs can start straight away.")
                               : "The background transfer service did not start on this PS4.",
                  "The PS4 downloads and installs the package itself, straight from this PC.");

@@ -9,6 +9,39 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.88.1] - 2026-10-01 - "The PS4's install lane was reporting itself busy for ever" `[VERIFIED]`
+
+Found while testing 3.88.0 on the consoles, by trying the install the owner had reported.
+
+**A finished job is not a running one.** `active` stays set after a job ends so the panel can still
+show how it went, and the gate that accepts a new install already knew that - it tests `active` AND
+a non-terminal state. `/api/engine/state` did not, so once the PS4 payload installed its own
+home-screen icon at boot - which it does every time it loads - the engine reported **busy** for
+ever. The install lane was free the whole time; it just said it was not.
+
+**And a state nobody refreshes never ends.** Correcting the busy test alone was not enough:
+`/api/engine/state` never called `job_refresh()`, which is the thing that turns a finished transfer
+into `installed` or `error`, so it was reading whatever the job last looked like. `/api/engine/job`
+has always refreshed first - two routes describing the same job must not disagree. Verified on
+device: `state=ready busy=False` after the boot task, where it had been `busy` indefinitely.
+
+**`dry_run` was not forwarded, so asking what an install WOULD do performed one.**
+`/api/install` grew that flag after a test suite installed real games on the owner's console.
+`/api/payloads/install` builds its own body for that lane and was dropping the flag - the same trap,
+one layer up. Caught by using it: a "dry run" of FPKGi queued a real attempt.
+
+### What was checked on hardware
+
+* **Every payload**: all seven third-party payloads on the PS5 and both on the PS4 are present on
+  the console and can be started with no PC on the network.
+* **Every homebrew**: each one's install was asked (for real, with `dry_run`) on the console it
+  belongs to. The only refusal is RetroArch, which is correct and already explained - it is an app
+  **folder**, not a package, so it goes on a drive the console mounts.
+* **FPKGi is refused by both consoles.** The package is intact - the companion's own integrity check
+  reads it as *"complete (pfs image fits + tail high-entropy)"* and the file matches the catalogue
+  byte for byte - and the engine was free when it was retried. Both consoles simply decline it. That
+  is the console's decision to make, and the app now reports it as an error instead of the "Done" it
+  used to claim.
 ## [3.88.0] - 2026-10-01 - "Installed means the game is there" `[VERIFIED]`
 
 Three things the panel reported that were not true, all found from one session on the consoles.
