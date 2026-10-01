@@ -560,6 +560,43 @@ def main():
     ok("it was truncated" in _pl,
        "...and says so if it ever is, instead of sending half a document")
 
+    # ---- ONE DOWNLOAD MUST NOT EMPTY THE SHELF -------------------------------------------------
+    # A PC with no folder served the shipped catalogue, so all eighteen tiles appeared and could be
+    # pressed. The folder then started being created automatically, so an empty scan became
+    # possible - guarded by falling back to the shipped copy when the scan found NOTHING. Then the
+    # owner took an update on that PC, one file landed in the new folder, the scan was no longer
+    # empty, the guard no longer fired, and the whole panel became that single file: "Nothing here
+    # for this console" on the other tab, and no payloads or homebrews anywhere.
+    #
+    # A folder holding SOME of the items is the ordinary case - it is what every PC looks like
+    # between the first download and the last - so this builds exactly that and checks the panel
+    # still describes the whole fleet.
+    _d2 = tempfile.mkdtemp()
+    try:
+        _root2 = os.path.join(_d2, "Mutant Payloads & HomeBrews")
+        _P.ensure_source_tree({"payloads": {"root": _root2}})
+        _sub = os.path.join(_root2, "Payloads", "PS5", "pkg mutant shop")
+        os.makedirs(_sub, exist_ok=True)
+        _src = os.path.join(ROOT, "ps5-app", "onconsole", "PKG-MUTANT-SHOP.elf")
+        if os.path.exists(_src):
+            shutil.copy(_src, os.path.join(_sub, "PKG-MUTANT-SHOP.elf"))
+        _c2, _s2 = _P.live_catalog({"payloads": {"root": _root2}}, os.path.join(ROOT, "web"))
+        _i2 = _c2.get("items") or []
+        ok(len(_i2) >= len(items),
+           "a folder holding ONE file still shows the whole catalogue",
+           "%d items with one file present, %d shipped" % (len(_i2), len(items)))
+        _plats = {str(i.get("platform") or "").upper() for i in _i2}
+        ok({"PS4", "PS5"} <= _plats,
+           "...and both consoles still have something to show", "%s" % sorted(_plats))
+        # The copy that IS there must be described by the file, not by the shipped record - that is
+        # the whole reason for preferring the live entry.
+        _ours5 = [i for i in _i2 if i.get("ours") and i.get("platform") == "PS5"]
+        ok(bool(_ours5) and _ours5[0].get("version") == _P.ours_version(
+            os.path.join(_sub, "PKG-MUTANT-SHOP.elf")),
+           "...and the file that is present is described by the file")
+    finally:
+        shutil.rmtree(_d2, ignore_errors=True)
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:

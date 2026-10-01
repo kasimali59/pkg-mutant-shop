@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.89.0"
+VERSION = "3.89.1"
 
 _BUILD_ID = None
 

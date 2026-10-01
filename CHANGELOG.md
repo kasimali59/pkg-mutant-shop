@@ -9,6 +9,42 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.89.1] - 2026-10-01 - "One successful download emptied the shelf" `[VERIFIED]`
+
+Reported from the second PC, and it is a regression this changelog has to own.
+
+**Taking an update cleared the whole panel.** After updating, both tabs read *"Nothing here for this
+console"* and no payload or homebrew was listed anywhere.
+
+The chain, each step reasonable on its own:
+
+1. A PC **without** the folder served the shipped catalogue, so all eighteen tiles appeared and
+   could be pressed - that is the whole point of a second PC being part of the fleet.
+2. Then the folder started being **created automatically** (3.87.0), so "no folder" stopped
+   happening and an *empty* folder started. That was guarded: an empty scan falls back to the
+   shipped catalogue.
+3. Then the owner **took an update** on that PC. One file landed in the new folder. The scan was no
+   longer empty, so the guard no longer fired - and the catalogue became that one file.
+
+A single successful download emptied the shelf. Measured on the machine itself:
+`source_here=True, items=1` - one PS5 payload, nothing else, which is exactly "nothing here for this
+console" on the PS4 tab.
+
+**An "or" between two catalogues was always the wrong shape.** A folder holding *some* of the items
+is the ordinary case - it is what every PC looks like between the first download and the last. They
+are merged now: the live entry wherever the folder has the file (its real version, size and hash,
+which is what an update and a send need), and the shipped entry everywhere else, so the tile is
+still there and `here` can honestly say the bytes are on the console or another PC.
+
+Pinned by building exactly that folder - one file in a freshly created tree - and checking the panel
+still describes the whole fleet, both consoles included. Reverting the merge reproduces the report
+word for word: *1 item, PS5 only*.
+
+### Also
+
+The catalogue embedded in the artifacts was regenerated; our own entries move as the owner's folder
+copies are updated, which is expected and is why the tile reads its version from the running build
+rather than from the catalogue.
 ## [3.89.0] - 2026-10-01 - "One space in a folder name" `[VERIFIED]`
 
 Every homebrew in the panel installs now, on both consoles. Only one of them ever did.

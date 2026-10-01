@@ -1096,20 +1096,47 @@ def live_catalog(cfg, web_dir):
         cat = build(root, baked.get("curated") or {})
     except Exception:
         return baked, sig
-    # AN EMPTY FOLDER IS NOT AN EMPTY CATALOGUE, and this became a live hazard the moment the folder
-    # above started being created automatically. Before that, a PC without the folder fell into the
-    # "not a directory" branch and served the BAKED catalogue - which is what puts eighteen tiles in
-    # front of a second PC that holds none of the files, sourced from the console or a peer. Create
-    # the folder and that branch stops being taken: the scan succeeds, finds nothing, and the panel
-    # that used to show the whole fleet's payloads goes blank.
-    #
-    # So an empty scan falls back to what this build knows exists. The signature is still the live
-    # one, so the first file dropped into the new folder is noticed on the next poll and takes over.
-    if not (cat.get("items") or []):
-        return baked, sig
+    cat = _merged(baked, cat)
     with _live_lock:
         _live["sig"], _live["cat"] = sig, cat
     return cat, sig
+
+
+def _merged(baked, live):
+    """Everything this build knows about, with the folder's own copy winning where there is one.
+
+    THE PANEL IS NOT A DIRECTORY LISTING. It is the fleet's catalogue: eighteen things that exist,
+    each annotated with where it can be had from - this PC, the console, or another PC. Returning
+    only what is in this folder makes a second PC's panel collapse to whatever it happens to hold.
+
+    That is not hypothetical, and the way it happened is worth writing down. A PC with no folder
+    served the baked catalogue, so all eighteen tiles appeared and could be pressed. Then the folder
+    started being created automatically, so an empty scan could happen - guarded by falling back to
+    baked when the scan found NOTHING. The owner then took an update on that PC, which downloaded
+    one file into the new folder. The scan was no longer empty, the guard no longer fired, and the
+    whole panel became that single file: "Nothing here for this console" on the other tab, and no
+    payloads or homebrews anywhere. One successful download emptied the shelf.
+
+    An "or" between two catalogues was always the wrong shape. A folder that holds some of the
+    items is the ORDINARY case - it is what every PC looks like between the first download and the
+    last - so the two are merged: the live entry wherever the folder has the file (its real
+    version, size and hash, which is what an update and a send need), the shipped entry everywhere
+    else (so the tile is still there, and `here` can honestly say the bytes are elsewhere).
+
+    Keyed on id + platform, which is what the rest of this module already treats as an item's
+    identity; anything in the folder that the build has never heard of is kept as well.
+    """
+    out, seen = [], set()
+    for it in (live.get("items") or []):
+        out.append(it)
+        seen.add((it.get("id"), str(it.get("platform") or "").upper()))
+    for it in (baked.get("items") or []):
+        if (it.get("id"), str(it.get("platform") or "").upper()) not in seen:
+            out.append(it)
+    merged = dict(baked)
+    merged.update(live)
+    merged["items"] = out
+    return merged
 
 
 # --------------------------------------------------------------------------- #
