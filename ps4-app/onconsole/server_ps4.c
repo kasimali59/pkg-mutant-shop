@@ -88,7 +88,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.91.0"
+#define SHOP_VERSION "3.91.1"
 
 /* The largest POST body this console will take. Bodies here are JSON of a few hundred bytes; the
    cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */

@@ -9,6 +9,32 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.91.1] - 2026-10-01 - "Updating both tiles is one update" `[VERIFIED]`
+
+### Fixed
+- **update_self() is once per RELEASE, not once per tile.** Our own entry appears once per console,
+  so "Update all" called it twice within a second. The first swap renamed the running image aside;
+  the second found it there, could neither delete nor replace it - it is the file the process is
+  executing from - and answered "Could not set the running app aside (PermissionError)" on a PC
+  that had just updated itself perfectly. Seen live on the owner's second PC: the PS5 row reported
+  success and the PS4 row, half a second later, reported that. The tag of the release that has
+  been put in place is remembered, and relaunch_self() likewise starts one replacement however
+  many tiles ask.
+
+  The exe on disk cannot be read back to answer this instead - it is a PyInstaller archive whose
+  copy of the page is compressed, which is why tools/release.py has to extract the bundle to read
+  a version out of one.
+
+### Tests
+- The suite drives both calls and, for the second, puts a directory where `<exe>.old` goes: in the
+  real thing that path is the running image, which the filesystem refuses to hand over, and a
+  directory is the same refusal reproducibly. Perturbed: without the guard the suite reports the
+  owner's exact sentence.
+- Each download-integrity case now gets its own release tag. Sharing one made them skip the
+  download and pass for the wrong reason once the guard existed - found by perturbing it.
+
+---
+
 ## [3.91.0] - 2026-10-01 - "The panel believed one reply for ever" `[VERIFIED]`
 
 Six defects behind two reports: a deleted app that still read **Installed**, and an update that

@@ -700,8 +700,18 @@ def main():
         with io.open(_src3, "wb") as f:
             f.write(_newbytes)
 
-        def _rel_for(path, size):
-            return {"tag": "v9.9.9", "assets": [
+        # EACH CASE IS ITS OWN RELEASE. update_self() replaces the exe once per release tag - our
+        # own entry appears once per console, so "Update all" calls it twice for one release and the
+        # second call must not try to move the running image again. Reusing one tag here would make
+        # the download-integrity cases below skip the download entirely and pass for the wrong
+        # reason, which is how this file found that guard's edge in the first place.
+        _tagn = [0]
+
+        def _rel_for(path, size, tag=None):
+            if tag is None:
+                _tagn[0] += 1
+                tag = "v9.9.%d" % _tagn[0]
+            return {"tag": tag, "assets": [
                 {"name": "PKG-MUTANT-SHOP.exe",
                  "url": "file:///" + path.replace(os.sep, "/"), "size": size}]}
 
@@ -739,6 +749,43 @@ def main():
         _P.running_exe = lambda: None
         _ok6, _ = _P.update_self({}, _rel_for(_src3, len(_newbytes)))
         ok(not _ok6, "running from source, there is nothing to replace")
+
+        # TAKING BOTH OF OUR TILES IS ONE UPDATE, NOT TWO. Our own entry appears once per console,
+        # so "Update all" calls this twice within a second. The second call used to find the running
+        # image already renamed aside by the first and fail trying to move it again - so a PC that
+        # had just updated itself perfectly told the owner "Could not set the running app aside
+        # (PermissionError)". Measured on the owner's second PC, PS5 row then PS4 row.
+        _P.running_exe = lambda: _exe
+        _rel7 = _rel_for(_src3, len(_newbytes), tag="v9.9.100")
+        _P._swapped_to.clear()
+        _okA, _msgA = _P.update_self({}, _rel7)
+        # AND THE SLOT THE FIRST SWAP USED IS NOT AVAILABLE TWICE. In the real thing <exe>.old is
+        # the image this process is executing from, so it can be neither deleted nor replaced until
+        # the process ends - which is what made the second call fail. A directory in its place is
+        # the same refusal from the filesystem, and it is reproducible on any machine.
+        _oldp = _exe + ".old"
+        if os.path.exists(_oldp):
+            os.remove(_oldp)
+        os.makedirs(_oldp)
+        _okB, _msgB = _P.update_self({}, _rel7)
+        shutil.rmtree(_oldp, ignore_errors=True)
+        ok(_okA and _okB, "taking the second of our two tiles is not a failure",
+           "first=%r second=%r" % (_msgA, _msgB))
+        ok("ermission" not in _msgB and "aside" not in _msgB,
+           "...and it does not report a permission error for work already done", _msgB)
+        ok(io.open(_exe, "rb").read() == _newbytes,
+           "...and the app on disk is still the new build")
+        # A DIFFERENT release must still be taken: the guard is per release, not for ever.
+        _P._swapped_to.clear()
+        _newer = os.path.join(_d3, "newer.exe")
+        with io.open(_newer, "wb") as f:
+            f.write(b"MZ" + b"newer build" * 64)
+        _okC, _ = _P.update_self({}, {"tag": "v9.9.10", "assets": [
+            {"name": "PKG-MUTANT-SHOP.exe",
+             "url": "file:///" + _newer.replace(os.sep, "/"),
+             "size": os.path.getsize(_newer)}]})
+        ok(_okC and io.open(_exe, "rb").read().endswith(b"newer build"),
+           "...while the next release is still installed")
     finally:
         _P.running_exe = _real_running
         shutil.rmtree(_d3, ignore_errors=True)

@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.91.0"
+VERSION = "3.91.1"
 
 _BUILD_ID = None
 
@@ -11477,6 +11477,7 @@ def probe_cache_hit(cache, key, now, ttl=4.0):
 
 
 AFTER_UPDATE_FLAG = "--after-update"
+_relaunching = False      # see relaunch_self(): one replacement, however many tiles ask
 
 
 def _wait_for_port_release(port, secs=90.0):
@@ -11513,6 +11514,14 @@ def relaunch_self(port, log=None):
     exe = payload_engine.running_exe()
     if not exe:
         return False
+    # ONCE. Our own entry appears once per console, so "Update all" reaches here twice in a second;
+    # a second launch would start a replacement that then loses the race for the port to the first
+    # one and exits through the single-instance guard - harmless, and an extra window flashing up
+    # on the owner's desktop for no reason.
+    global _relaunching
+    if _relaunching:
+        return True
+    _relaunching = True
     try:
         flags = 0
         if os.name == "nt":

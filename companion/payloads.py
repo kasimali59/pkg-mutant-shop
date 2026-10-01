@@ -1216,6 +1216,11 @@ def sweep_old_exe():
             pass          # still mapped by something; it will go on the next start
 
 
+# Releases whose exe this process has already put in place. See update_self().
+_swapped_to = set()
+_swap_lock = threading.Lock()
+
+
 def update_self(cfg, rel, log=None):
     """Replace this companion's own .exe with the one in `rel`. Returns (ok, sentence).
 
@@ -1239,6 +1244,20 @@ def update_self(cfg, rel, log=None):
     cur = running_exe()
     if not cur:
         return False, "This is not the packaged app, so there is nothing to replace."
+    # ONCE PER RELEASE, NOT ONCE PER TILE. Our own entry appears twice in the catalogue - one per
+    # console - and taking both, which "Update all" does in one go, called this twice. The second
+    # call found the running image already renamed aside by the first and failed trying to move it
+    # again, so a PC that had just updated itself perfectly reported "Could not set the running app
+    # aside (PermissionError)". Measured on the owner's second PC: the PS5 row said it had updated
+    # and the PS4 row, half a second later, said that.
+    #
+    # The swap is per RELEASE, so remembering the tag is the whole guard. The exe on disk cannot be
+    # read back to answer this - it is a PyInstaller archive and its copy of the page is compressed,
+    # which is why tools/release.py has to extract the bundle to read a version out of one.
+    tag = str((rel or {}).get("tag") or "")
+    with _swap_lock:
+        if tag and tag in _swapped_to:
+            return True, "Updated. Close the app and open it again to use the new version."
     asset = None
     for a in (rel.get("assets") or []):
         if str(a.get("name") or "").lower().endswith(".exe"):
@@ -1305,6 +1324,9 @@ def update_self(cfg, rel, log=None):
         try: os.replace(old, cur)        # put it back exactly as it was
         except OSError: pass
         return False, "Could not put the new app in place (%s)." % e.__class__.__name__
+    with _swap_lock:
+        if tag:
+            _swapped_to.add(tag)
     say("[update] the app on disk is now the new build; the old one is %s" % os.path.basename(old))
     return True, "Updated. Close the app and open it again to use the new version."
 
