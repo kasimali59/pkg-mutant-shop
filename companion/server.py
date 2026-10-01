@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.90.0"
+VERSION = "3.91.0"
 
 _BUILD_ID = None
 
@@ -407,7 +407,11 @@ DEFAULT_CONFIG = {
     # `github_token` is needed ONLY while our repository is private; every third-party upstream in
     # curated.json is public and reads fine without it. It is never logged and goes nowhere except
     # api.github.com.
-    "updates": {"channel": "stable", "github_token": "", "check_on_start": True},
+    # auto_restart: after the app has replaced its OWN exe, start the new build and quit, so the
+    # owner does not have to. Set it false to be told to reopen the app instead; nothing else
+    # changes, and the update itself is already on disk either way.
+    "updates": {"channel": "stable", "github_token": "", "check_on_start": True,
+                "auto_restart": True},
     "content_ownership_ack": False,
 }
 
@@ -9604,7 +9608,21 @@ class Handler(BaseHTTPRequestHandler):
         if _pc is None:
             _pc = srv._pl_state_cache = {}
         _hit = _pc.get(_ck)
-        if _hit and (_now - _hit[0]) < 4.0:
+        # THE AGE IS THE AGE OF THE ANSWER, NOT OF THE LAST GLANCE AT IT. This stored the tuple
+        # again at the bottom with a fresh `_now` whatever had happened - including on a hit, where
+        # the values were simply copied out of the previous entry. So every poll reset the clock on
+        # data nobody had re-read, and because the panel polls every three seconds and this expires
+        # after four, the clock was reset before it could ever run out. The console was asked once,
+        # when the panel was first opened, and never again for as long as somebody kept it open.
+        #
+        # That is how the owner's PS4 tile went on saying FPKGi was "Installed" after it had been
+        # deleted: measured here, this PC answered installed=True for PKGI13337 while the console's
+        # own /api/library did not list the title at all, and the second PC - which nobody was
+        # watching, so its entry expired - answered correctly. It froze `live` and `running` and
+        # the console's reported version in exactly the same way.
+        _hit = probe_cache_hit(_pc, _ck, _now)
+        _fresh = _hit is None
+        if not _fresh:
             live, running, installed = _hit[1], _hit[2], _hit[3]
             cst = _hit[4] if len(_hit) > 4 else None
         else:
@@ -9621,7 +9639,7 @@ class Handler(BaseHTTPRequestHandler):
         # Only the PS5 has a Payload Manager. The PS4 has GoldHEN's loader, which cannot be asked
         # anything - and must never be connected to just to ask.
         try:
-            if _hit and (_now - _hit[0]) < 4.0:
+            if not _fresh:
                 pass
             else:
                 # ASK THE CONSOLE FIRST. It can see things this PC cannot: a UDP service whose port
@@ -9645,14 +9663,25 @@ class Handler(BaseHTTPRequestHandler):
             running = None
 
         try:
-            if _hit and (_now - _hit[0]) < 4.0:
+            if not _fresh:
                 pass
             elif b is not None:
-                got = b.installed_titles()
-                installed = {str(t).upper() for t in got} if got is not None else None
+                # INSTALLED HAS TO MEAN INSTALLED. installed_titles() is every title the console's
+                # app list MENTIONS, which is the right answer for the install-confirm loop that
+                # waits for a row to appear - and the wrong one here. A console lists titles it does
+                # not have: measured on the owner's PS4, 21 titles of which 5 (THE PLAYROOM, Game
+                # Streaming, Share Play, PlayStation Video, PS5 Remote Play) are not installed, and
+                # a deleted app keeps its row for a while before the console drops it. Every one of
+                # those would paint as "Installed" in this panel.
+                #
+                # install_status is 0 for a title whose data is really in place, on both consoles -
+                # the PS5 reads it from app.db and the PS4 path sets it from the payload's own
+                # `installed` flag - so it is the one field that answers the question being asked.
+                installed = installed_ids(b.console_apps())
         except Exception:
             installed = None
-        _pc[_ck] = (_now, live, running, installed, cst)
+        if _fresh:
+            _pc[_ck] = (_now, live, running, installed, cst)
 
         root = payload_engine.source_root(srv.cfg)
         # WHO COULD HAND THIS OVER. "Not on this PC" was being treated as "cannot be used", which is
@@ -9830,18 +9859,27 @@ class Handler(BaseHTTPRequestHandler):
         # renamed, which is the whole method and is why this is safe rather than clever; the
         # reasoning is written out over update_self(). Nothing restarts on its own: the sentence
         # says to reopen the app, because deciding when to close it is the owner's.
-        restart = False
+        restart = relaunched = False
         if ok and it.get("ours") and payload_engine.running_exe():
             tag = rel.get("tag", "")
             if payload_engine.newer_than(tag, VERSION):
                 sok, smsg = payload_engine.update_self(srv.cfg, rel, log=lambda m: print(m))
                 restart = sok
+                # AND FINISH THE JOB. Replacing the file still left one manual step - close the app
+                # and open it again - which is exactly the step an owner does not do, and then
+                # reports the update as not having worked. The new build is started here and this
+                # one stands down; `relaunched` tells the panel which sentence to show.
+                if sok and (srv.cfg.get("updates") or {}).get("auto_restart", True):
+                    if relaunch_self(srv.cfg["companion"]["port"], log=lambda m: print(m)):
+                        relaunched = True
+                        smsg = "Updated. The app is restarting itself now."
                 # BOTH HALVES ARE REPORTED, and a failure here does not undo the ELF that was just
                 # fetched - it is on disk, it is good, and it can be sent. Saying "updated" and
                 # leaving the old companion running is the one outcome this must never produce.
                 msg = ("%s %s" % (msg, smsg)).strip() if smsg else msg
         return self._json({"ok": ok, "message": msg, "version": newver,
-                           "restart": restart, "tag": rel.get("tag", "")})
+                           "restart": restart, "relaunched": relaunched,
+                           "tag": rel.get("tag", "")})
 
     def _payloads_act(self, what, body):
         """Send a payload, keep a homebrew on the console, or install one - at ONE named console."""
@@ -11399,6 +11437,107 @@ def start_cheat_sync_thread(httpd):
 # setting could switch off, which made it the one thing keeping the whole third-party probe alive.
 
 
+def installed_ids(apps):
+    """The title ids a console really HAS, from its app list. None when it gave no list.
+
+    INSTALLED HAS TO MEAN INSTALLED. A console lists titles it does not have - measured on the
+    owner's PS4, 21 titles of which 5 (THE PLAYROOM, Game Streaming, Share Play, PlayStation Video,
+    PS5 Remote Play) are system entries with no data on disk - and a deleted app keeps its row for a
+    while before the console drops it. installed_titles() returns every id MENTIONED, which is the
+    right answer for the install-confirm loop waiting for a row to appear and the wrong one for a
+    panel drawing the word "Installed" next to a thing.
+
+    install_status is 0 for a title whose data is really in place, and it is set on both platforms:
+    the PS5 reads it from app.db, the PS4 path sets it from the payload's own `installed` flag.
+    """
+    if apps is None:
+        return None
+    return {str(a.get("title_id") or "").upper() for a in apps if not a.get("install_status")}
+
+
+def probe_cache_hit(cache, key, now, ttl=4.0):
+    """A recent console probe to reuse, or None when it is time to ask again.
+
+    THE AGE OF A CACHED ANSWER IS THE AGE OF THE ANSWER, NOT OF THE LAST LOOK AT IT - and the
+    caller must therefore write the entry back only when it has actually re-measured. The panel's
+    cache used to be re-stored with a fresh timestamp on every request, including the ones that
+    merely copied the previous values out, so each poll reset the clock on data nobody had re-read.
+    The panel polls every three seconds and this expires after four, so the clock was reset before
+    it could ever run out: the console was asked once, when the panel was opened, and never again
+    while anybody kept looking at it.
+
+    Measured consequence: the owner deleted FPKGi from both consoles, and the PC with the panel
+    open went on reporting it installed while the console's own library did not list the title at
+    all - and a second PC, which nobody was watching, answered correctly.
+    """
+    hit = cache.get(key)
+    if hit and (now - hit[0]) < ttl:
+        return hit
+    return None
+
+
+AFTER_UPDATE_FLAG = "--after-update"
+
+
+def _wait_for_port_release(port, secs=90.0):
+    """Wait until nothing answers on `port`. True if it came free.
+
+    THE OLD PROCESS IS STILL RUNNING WHEN THIS ONE STARTS, and that is deliberate. A self-update
+    renames the running exe aside, puts the new build in its place and launches it; the two overlap
+    for as long as the old one needs to finish answering the request that triggered it and shut its
+    sockets. Without waiting here, the new build would walk straight into the single-instance guard
+    below, print "already running" and exit - leaving the owner on the old build, with the update
+    on disk and nothing to show for it. That is the same shape of silent no-op this whole lane
+    exists to stop.
+    """
+    end = time.time() + secs
+    while time.time() < end:
+        if not _already_running(port):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def relaunch_self(port, log=None):
+    """Start the replacement build and stand down. True if the new one was launched.
+
+    Only ever called after update_self() has actually put a new exe in place, so the file this
+    launches is the new one - the running image is the renamed .old, which the new build sweeps up
+    when it starts.
+
+    Nothing is killed. This process exits on its own a moment later, AFTER the reply to the request
+    that asked for the update has gone out; the new build waits for the port rather than racing for
+    it.
+    """
+    say = log or (lambda m: None)
+    exe = payload_engine.running_exe()
+    if not exe:
+        return False
+    try:
+        flags = 0
+        if os.name == "nt":
+            # Detached and in its own process group: the child must outlive us, and must not take
+            # a Ctrl-C meant for the console this one was started from.
+            flags = 0x00000008 | 0x00000200      # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([exe, AFTER_UPDATE_FLAG, str(port)],
+                         cwd=os.path.dirname(exe) or None,
+                         close_fds=True, creationflags=flags)
+    except Exception as e:
+        say("[update] could not start the new build (%s)" % e.__class__.__name__)
+        return False
+    say("[update] the new build is starting; this one is closing")
+
+    def _bye():
+        # Long enough for the HTTP reply to reach the panel that asked, short enough that the owner
+        # does not see two copies in the task list. The new build is waiting on the port, so this
+        # delay costs nothing but the wait itself.
+        time.sleep(2.5)
+        os._exit(0)
+
+    threading.Thread(target=_bye, daemon=True).start()
+    return True
+
+
 def _already_running(port):
     """Is another PKG MUTANT SHOP already serving on this port? Returns its version, or None.
 
@@ -11461,6 +11600,16 @@ def main():
     # workers had all started - so a second launch rewrote files the live copy owns before
     # deciding to exit. On Windows a second bind can also succeed while the first process keeps
     # running every background thread it owns, and both then write installed.json.
+    # STARTED BY AN UPDATE? Then the build being replaced is probably still finishing up, and the
+    # single-instance guard below would read that as "already running" and send this copy away.
+    if AFTER_UPDATE_FLAG in sys.argv[1:]:
+        _p = cfg["companion"]["port"]
+        print("[boot] started by an update - waiting for the previous build to let go of port %d"
+              % _p)
+        if _wait_for_port_release(_p):
+            print("[boot] it has; taking over")
+        else:
+            print("[boot] it has not, after 90s - carrying on and letting the guard below decide")
     _other = _already_running(cfg["companion"]["port"])
     if _other:
         print("[boot] PKG MUTANT SHOP v%s is ALREADY running on port %d - not starting a second "

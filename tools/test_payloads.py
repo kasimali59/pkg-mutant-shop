@@ -449,7 +449,95 @@ def main():
     _da = _eng.split("def download_asset(", 1)[1].split("\ndef ", 1)[0]
     ok('return False, "That file is not on this PC' not in _da,
        "an update no longer refuses because the file is absent")
-    ok("os.makedirs(dest_dir)" in _da, "...it makes somewhere to put it")
+    # ...and it lands IN THE OWNER'S FOLDER, which is the whole of the next check. Asserting the
+    # name of a local variable here said nothing about where the bytes go; this drives the real
+    # function and then looks on disk.
+    _d4 = tempfile.mkdtemp()
+    _real_bundled = _P.bundled_ours
+    try:
+        _root4 = os.path.join(_d4, "folder")
+        _P.ensure_source_tree({"payloads": {"root": _root4}})
+        _cfg4 = {"payloads": {"root": _root4}}
+        # THE EXE'S OWN COPY, somewhere else entirely - this is PyInstaller's temp extraction
+        # directory in the real thing, and it is what local_path() answers with when the folder has
+        # no copy of its own.
+        _meipass = os.path.join(_d4, "_MEI12345", "ps4-elf")
+        os.makedirs(_meipass)
+        _bund = os.path.join(_meipass, "PKG-MUTANT-SHOP-PS4.elf")
+        with io.open(_bund, "wb") as f:
+            f.write(b"ELF PKG MUTANT SHOP var APP_VERSION=\"3.90.0\" old")
+        _P.bundled_ours = lambda it: (_bund if (it or {}).get("file") ==
+                                      "PKG-MUTANT-SHOP-PS4.elf" else None)
+        _newelf = os.path.join(_d4, "release-PKG-MUTANT-SHOP-PS4.elf")
+        with io.open(_newelf, "wb") as f:
+            f.write(b"ELF PKG MUTANT SHOP var APP_VERSION=\"3.99.9\" new")
+        _item4 = {"id": "pkg-mutant-shop", "platform": "PS4", "ours": True, "kind": "payload",
+                  "file": "PKG-MUTANT-SHOP-PS4.elf", "marker": "PKG MUTANT SHOP",
+                  "title": "PKG MUTANT SHOP",
+                  "path": "Payloads/PS4/pkg mutant shop/PKG-MUTANT-SHOP-PS4.elf"}
+        _asset4 = {"name": "PKG-MUTANT-SHOP-PS4.elf", "size": os.path.getsize(_newelf),
+                   "url": "file:///" + _newelf.replace(os.sep, "/")}
+        _ok4, _msg4, _ver4 = _P.download_asset(_cfg4, _item4, _asset4)
+        _want = os.path.join(_root4, "Payloads", "PS4", "pkg mutant shop",
+                             "PKG-MUTANT-SHOP-PS4.elf")
+        ok(_ok4, "an update with no copy in the folder still downloads", _msg4)
+        ok(os.path.exists(_want), "...and the bytes land in the OWNER'S FOLDER", _want)
+        # THE BUG THIS REPLACES: the download went next to the bundled copy - inside the running
+        # exe's temp directory - so it reported the new version, vanished with the process, and the
+        # panel offered the same update for ever.
+        ok(not os.path.exists(os.path.join(_meipass, "PKG-MUTANT-SHOP-PS4.elf.part")),
+           "...and nothing was written beside the copy inside the app")
+        ok(io.open(_bund, "rb").read().endswith(b"old"),
+           "...the copy the app carries is left exactly as it was")
+        ok(_ver4 == "3.99.9", "...and the version reported is the one now in the folder", _ver4)
+
+        # AND THE FOLDER'S FINGERPRINT MOVED, which is what the panel polls. The owner's report was
+        # "it says Done and then shows the update again"; measured, the fingerprint had not changed
+        # at all, because nothing inside the scanned tree had.
+        ok(_P.folder_sig(_root4) != _P.folder_sig(os.path.join(_d4, "nope")),
+           "...so the folder the panel watches has really changed")
+    finally:
+        _P.bundled_ours = _real_bundled
+        shutil.rmtree(_d4, ignore_errors=True)
+
+    # ---- A SHIPPED ENTRY MUST NOT CLAIM IT READ A FILE ------------------------------------------
+    # The catalogue is baked by scanning the author's folder at build time, so its `version` is a
+    # release behind by construction and `version_from` says "file" about a file on another
+    # computer. On a PC that did not hold our PS4 payload that read as "3.89.0 -> v3.90.0" while
+    # the app itself was already 3.90.0 and carrying 3.90.0 inside it.
+    _d5 = tempfile.mkdtemp()
+    _real_bundled5 = _P.bundled_ours
+    try:
+        _b5 = os.path.join(_d5, "PKG-MUTANT-SHOP-PS4.elf")
+        with io.open(_b5, "wb") as f:
+            f.write(b"ELF PKG MUTANT SHOP var APP_VERSION=\"3.90.0\"")
+        _baked5 = {"items": [
+            {"id": "pkg-mutant-shop", "platform": "PS4", "ours": True,
+             "file": "PKG-MUTANT-SHOP-PS4.elf", "version": "3.89.0", "version_from": "file"},
+            {"id": "ftpsrv", "platform": "PS5", "version": "1.16", "version_from": "file"}]}
+        _P.bundled_ours = lambda it: (_b5 if (it or {}).get("file") ==
+                                      "PKG-MUTANT-SHOP-PS4.elf" else None)
+        _m5 = _P._merged(_baked5, {"items": []})
+        _by = {(i["id"], i["platform"]): i for i in _m5["items"]}
+        _mine = _by[("pkg-mutant-shop", "PS4")]
+        ok(_mine["version"] == "3.90.0",
+           "a shipped entry reports the version the app actually CARRIES", _mine["version"])
+        ok(_mine["version_from"] == "bundled",
+           "...and says the number came from the app, not from a file here",
+           _mine["version_from"])
+        ok(_by[("ftpsrv", "PS5")]["version_from"] == "shipped",
+           "...and one with nothing to read says 'shipped' rather than 'file'",
+           _by[("ftpsrv", "PS5")]["version_from"])
+        # The live entry still wins outright - that is what _merged is for.
+        _m6 = _P._merged(_baked5, {"items": [
+            {"id": "pkg-mutant-shop", "platform": "PS4", "ours": True,
+             "version": "4.0.0", "version_from": "file"}]})
+        _mine6 = [i for i in _m6["items"] if i["id"] == "pkg-mutant-shop"][0]
+        ok(_mine6["version"] == "4.0.0" and _mine6["version_from"] == "file",
+           "...while a file that IS in the folder still describes itself")
+    finally:
+        _P.bundled_ours = _real_bundled5
+        shutil.rmtree(_d5, ignore_errors=True)
     ok("had_old" in _da, "...and does not try to back up a file that was never there")
 
     # ---- A 200 {} IS NOT AN EMPTY LIST ----------------------------------------------------------
@@ -660,6 +748,52 @@ def main():
     # swap loose on whatever sys.executable happens to be - the python interpreter.
     ok(_P.running_exe() is None, "running_exe() names no exe when the build is not frozen",
        "%r" % (_P.running_exe(),))
+
+    # ---- SIZE CANNOT VOUCH FOR OUR OWN ARTIFACT ------------------------------------------------
+    # Every "already on the console" shortcut in the engine compares lengths. A build of this app
+    # differs from the last by a version string of the same width, so the length does not move -
+    # three consecutive releases of the PS4 payload are all 9,522,528 bytes. The shortcut therefore
+    # reported a freshly updated payload as already there, skipped the send, and the Run shortcut
+    # started the console's OLD copy while the panel showed the new number.
+    ok(_P.size_can_vouch({"ours": False}) is True,
+       "a third-party payload may still be vouched for by its size")
+    ok(_P.size_can_vouch({"ours": True}) is False,
+       "our own artifact may not - its length does not change between builds")
+    ok(_P.size_can_vouch({}) is True, "an item that says nothing is not ours")
+    # ...and the three shortcuts really consult it, rather than each keeping its own rule.
+    _eng2 = io.open(os.path.join(ROOT, "companion", "payloads.py"), encoding="utf-8").read()
+    ok(_eng2.count("size_can_vouch(") >= 4,
+       "every size shortcut asks size_can_vouch()", "%d use(s)" % _eng2.count("size_can_vouch("))
+    for _fn, _why in (("console_copy_is_current", "the console's own copy"),
+                      ("send_ps5", "the payload upload"),
+                      ("seed_homebrew", "the homebrew seed")):
+        if ("def %s(" % _fn) in _eng2:
+            _body = _eng2.split("def %s(" % _fn, 1)[1].split("\ndef ", 1)[0]
+            ok("size_can_vouch(" in _body, "%s asks before trusting a size" % _why)
+
+    # The evidence itself, so this cannot quietly stop being true: our own catalogue entries record
+    # the PS4 and PS5 artifacts, and a build that changed one byte of version would otherwise look
+    # like a different file.
+    _ours = [i for i in items if i.get("ours")]
+    ok(len(_ours) == 2, "the catalogue carries both of our artifacts", "%d" % len(_ours))
+
+    # ---- THE PANEL HAS THREE ANSWERS FOR "INSTALLED", NOT TWO ----------------------------------
+    # installed arrives true / false / null, and null means the reply is not about that console.
+    # Printing "Not installed" for null asserts a fact about a console nobody asked.
+    _ui2 = io.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    ok('(it.installed===false)?t("phb_notinstalled")' in _ui2,
+       "the tile prints Not installed only when the console actually said so")
+    ok('t("phb_unkinst")' in _ui2, "...and an unknown state has a word of its own")
+    ok('(it.installed===true)?t("phb_installed")' in _ui2,
+       "...and Installed only when the console actually said so")
+    # A press on an unknown must ASK, not install over the top.
+    ok('it.kind==="payload" ? it.live===true : it.installed!==false' in _ui2,
+       "a press on a homebrew whose state is unknown opens the confirm row")
+    # The badge must be re-derived from the server, never assumed.
+    ok("PHB.ups=PHB.ups.filter" not in _ui2,
+       "taking an update no longer empties the update row on trust alone")
+    _upone = _ui2.split("function phbUpOne(", 1)[1].split("\nfunction ", 1)[0]
+    ok("phbCheck(true)" in _upone, "...it re-asks the server what is still outstanding")
 
     if fails:
         print("test_payloads: FAIL")
