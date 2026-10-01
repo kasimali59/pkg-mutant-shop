@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.92.0"
+VERSION = "3.92.1"
 
 _BUILD_ID = None
 
@@ -2615,6 +2615,12 @@ def consoles_from_cfg(cfg):
         out.append({"id": c.get("id") or ("%s-%d" % ("ps4" if plat == "ps4" else "ps5", i)),
                     "name": c.get("name") or c["ip"],
                     "ip": c["ip"], "platform": plat,
+                    # THE FIRMWARE TRAVELS WITH THE ENTRY. track_consoles learns it from the
+                    # console's own health and saves it; dropping it here meant the number was in
+                    # config.json and nowhere a person could see it. It is the one fact that says
+                    # whether a build can run on that console at all - see the note in
+                    # track_consoles - so it belongs in the console list the UI reads.
+                    "fw": str(c.get("fw") or ""),
                     "ftp_port": c.get("ftp_port", cfg["ftp"].get("port", 2121))})
     return out
 

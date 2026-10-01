@@ -9,6 +9,15 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.92.1] - 2026-10-01 - "Recorded is not shown" `[VERIFIED]`
+
+### Fixed
+- `consoles_from_cfg()` rebuilds each console entry field by field, so the `fw` that
+  `track_consoles` had just learned and saved was dropped on the way to `/api/consoles`. The number
+  was in config.json and nowhere a person could read it, which is most of the point of having it.
+
+---
+
 ## [3.92.0] - 2026-10-01 - "The console moved and the toolchain did not" `[VERIFIED]`
 
 The PS5 app stopped starting entirely. It was not the build, the size, the disk, Payload Manager or
