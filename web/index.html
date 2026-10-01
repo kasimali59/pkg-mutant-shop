@@ -1645,7 +1645,7 @@ function led(on){return '<span class="led '+(on?"on":"")+'" style="display:inlin
    callback, and the whole class of bug is gone. */
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return c==="&"?"&amp;":c==="<"?"&lt;":c===">"?"&gt;":c==="'"?"&#39;":"&quot;";});}
 /* Fallback UI version if the companion /api/health version isn't reachable (e.g. on-console/demo). */
-var APP_VERSION="3.89.1";
+var APP_VERSION="3.90.0";
 function verNewer(a,b){var A=String(a).split("."),B=String(b).split(".");
   for(var i=0;i<Math.max(A.length,B.length);i++){var x=parseInt(A[i]||0,10)||0,y=parseInt(B[i]||0,10)||0;
     if(x!==y) return x>y;} return false;}
@@ -12180,7 +12180,11 @@ function toastNode(kind){
   var gone=false;
   function drop(){ if(gone) return; gone=true; t.style.transition="opacity .3s";t.style.opacity="0";setTimeout(function(){t.remove();},300); }
   t.onclick=drop;
-  setTimeout(drop,(kind==="err")?6500:3200);
+  /* A toast that ASKS FOR SOMETHING has to outlast one that only reports. "The app was replaced,
+     close it and open it again" is the whole point of a self-update, and at 3.2 seconds it is the
+     sentence most likely to be missed - which is how an owner ends up running the old build
+     believing they took the update. Same look, longer on screen. */
+  setTimeout(drop,(kind==="err")?6500:((kind==="ok hold")?12000:3200));
   return t;
 }
 function toast(msg,kind){ var t=toastNode(kind); if(t) t.textContent=String(msg==null?"":msg); }
@@ -15698,7 +15702,9 @@ function phbUpOne(u,btn){
              body:JSON.stringify({id:u.id,platform:u.platform})},600000)
   .then(function(r){
     if(r&&r.ok){
-      toast(r.message||t("phb_done"),"ok");
+      /* r.restart means the app's OWN exe was just replaced on this PC, not only the console's
+         file - so the sentence to read is the server's, and it stays up long enough to read. */
+      toast(r.message||t("phb_done"),r.restart?"ok hold":"ok");
       /* It is no longer an update once it has been taken. */
       PHB.ups=PHB.ups.filter(function(x){return !(x.id===u.id&&x.platform===u.platform);});
       PHB.sig=""; phbLoad(true); phbUpsPaint();

@@ -597,6 +597,70 @@ def main():
     finally:
         shutil.rmtree(_d2, ignore_errors=True)
 
+    # ---- THE APP CAN REPLACE ITS OWN EXE -------------------------------------------------------
+    # The panel could update every payload and every homebrew and not the one file running it, so a
+    # PC took an update, reported the new version, and stayed the old companion. This drives the
+    # real swap: a file:// "release", the actual download, the size and MZ checks, both renames.
+    _d3 = tempfile.mkdtemp()
+    _real_running = _P.running_exe
+    try:
+        _exe = os.path.join(_d3, "PKG-MUTANT-SHOP.exe")
+        with io.open(_exe, "wb") as f:
+            f.write(b"MZ" + b"old build" * 64)
+        _newbytes = b"MZ" + b"new build" * 64
+        _src3 = os.path.join(_d3, "release.exe")
+        with io.open(_src3, "wb") as f:
+            f.write(_newbytes)
+
+        def _rel_for(path, size):
+            return {"tag": "v9.9.9", "assets": [
+                {"name": "PKG-MUTANT-SHOP.exe",
+                 "url": "file:///" + path.replace(os.sep, "/"), "size": size}]}
+
+        _P.running_exe = lambda: _exe
+        _ok3, _msg3 = _P.update_self({}, _rel_for(_src3, len(_newbytes)))
+        ok(_ok3, "the app replaces its own exe", _msg3)
+        ok(io.open(_exe, "rb").read() == _newbytes,
+           "...and the file under the app's own name IS the new build")
+        # The build that was running has to survive under a name of its own: it is the file this
+        # process is still executing from, so deleting it at swap time would pull the floor out.
+        ok(os.path.exists(_exe + ".old"), "...and the running build is kept aside, not deleted")
+        ok(not os.path.exists(_exe + ".new"), "...and no half-finished download is left behind")
+        _P.sweep_old_exe()
+        ok(not os.path.exists(_exe + ".old"), "...and the next start clears the old build away")
+
+        # A TRUNCATED OR WRONG DOWNLOAD MUST NOT BECOME THE APP. Both of these used to be the way
+        # an update lane destroys a working install, and the running build has to be untouched
+        # afterwards - not restored, never moved.
+        _short = os.path.join(_d3, "short.exe")
+        with io.open(_short, "wb") as f:
+            f.write(_newbytes[:20])
+        _ok4, _msg4 = _P.update_self({}, _rel_for(_short, len(_newbytes)))
+        ok(not _ok4 and io.open(_exe, "rb").read() == _newbytes,
+           "a short download is refused and the app is left alone", _msg4)
+        _html = os.path.join(_d3, "notanexe.bin")
+        with io.open(_html, "wb") as f:
+            f.write(b"<html>rate limited</html>")
+        _ok5, _msg5 = _P.update_self({}, _rel_for(_html, os.path.getsize(_html)))
+        ok(not _ok5 and io.open(_exe, "rb").read() == _newbytes,
+           "something that is not a Windows program is refused", _msg5)
+        ok(not os.path.exists(_exe + ".new"),
+           "...and neither refusal leaves a stray file next to the app")
+
+        # Running from source, there is no exe to replace and it must say so rather than guess.
+        _P.running_exe = lambda: None
+        _ok6, _ = _P.update_self({}, _rel_for(_src3, len(_newbytes)))
+        ok(not _ok6, "running from source, there is nothing to replace")
+    finally:
+        _P.running_exe = _real_running
+        shutil.rmtree(_d3, ignore_errors=True)
+
+    # running_exe() IS THE GATE on all of the above, so it has to be honest about this process:
+    # under the test runner nothing is frozen, and a stub that returned a path anyway would let the
+    # swap loose on whatever sys.executable happens to be - the python interpreter.
+    ok(_P.running_exe() is None, "running_exe() names no exe when the build is not frozen",
+       "%r" % (_P.running_exe(),))
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:

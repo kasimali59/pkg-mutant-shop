@@ -1,4 +1,4 @@
-# PKG MUTANT SHOP 3.89.1 - setup and runbook
+# PKG MUTANT SHOP 3.90.0 - setup and runbook
 
 This is the one current document for installing, running, updating and triaging the app. Every
 sentence in it was read out of the code as it is today (`companion/server.py`,

@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.89.1"
+VERSION = "3.90.0"
 
 _BUILD_ID = None
 
@@ -9819,8 +9819,29 @@ class Handler(BaseHTTPRequestHandler):
                                "message": "That release has no file for this console."}, 400)
         ok, msg, newver = payload_engine.download_asset(srv.cfg, it, asset,
                                                         log=lambda m: print(m))
+        # AND THE APP ITSELF - THE HALF THIS LANE USED TO MISS. Above, the console's ELF is replaced
+        # in the folder, which is what the panel then offers to send. Our tile has a second file
+        # though, and it is the one running this code: pick_asset() only ever matches .elf, so a PC
+        # took the update, reported the new version for the console, and went on being the old
+        # companion. Both consoles then read as up to date from a panel that was itself out of date.
+        #
+        # The owner hit that twice - "I updated it and it still said the old version" - and was
+        # right both times. Windows will not let a running .exe be overwritten and WILL let it be
+        # renamed, which is the whole method and is why this is safe rather than clever; the
+        # reasoning is written out over update_self(). Nothing restarts on its own: the sentence
+        # says to reopen the app, because deciding when to close it is the owner's.
+        restart = False
+        if ok and it.get("ours") and payload_engine.running_exe():
+            tag = rel.get("tag", "")
+            if payload_engine.newer_than(tag, VERSION):
+                sok, smsg = payload_engine.update_self(srv.cfg, rel, log=lambda m: print(m))
+                restart = sok
+                # BOTH HALVES ARE REPORTED, and a failure here does not undo the ELF that was just
+                # fetched - it is on disk, it is good, and it can be sent. Saying "updated" and
+                # leaving the old companion running is the one outcome this must never produce.
+                msg = ("%s %s" % (msg, smsg)).strip() if smsg else msg
         return self._json({"ok": ok, "message": msg, "version": newver,
-                           "tag": rel.get("tag", "")})
+                           "restart": restart, "tag": rel.get("tag", "")})
 
     def _payloads_act(self, what, body):
         """Send a payload, keep a homebrew on the console, or install one - at ONE named console."""
@@ -11456,6 +11477,9 @@ def main():
     os.makedirs(ICON_DIR, exist_ok=True)
     cfg = _adopt_library_root(cfg)
     ensure_all_folders(cfg)              # before the scan, so the first scan sees a real tree
+    # THE PREVIOUS BUILD, IF THIS START IS THE ONE AFTER AN UPDATE. It could not be deleted at the
+    # moment of the swap, because at that moment it was the file the process was executing from.
+    payload_engine.sweep_old_exe()
     sweep_mei_leftovers()
     library = Library(cfg)
     library.scan()

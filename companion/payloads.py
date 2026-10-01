@@ -1142,6 +1142,125 @@ def _merged(baked, live):
 # --------------------------------------------------------------------------- #
 # updating a payload from its upstream release                                  #
 # --------------------------------------------------------------------------- #
+def running_exe():
+    """The .exe this process is running from, or None when it is not a frozen build."""
+    if not getattr(sys, "frozen", False):
+        return None
+    p = os.path.abspath(sys.executable or "")
+    return p if p.lower().endswith(".exe") and os.path.isfile(p) else None
+
+
+def sweep_old_exe():
+    """Remove the previous exe left behind by an update. Called once at startup.
+
+    It cannot be deleted at the moment of the swap, because at that moment it is the file this
+    process is executing from.
+    """
+    cur = running_exe()
+    if not cur:
+        return
+    old = cur + ".old"
+    if os.path.exists(old):
+        try:
+            os.remove(old)
+            print("[update] removed the previous build (%s)" % os.path.basename(old))
+        except OSError:
+            pass          # still mapped by something; it will go on the next start
+
+
+def update_self(cfg, rel, log=None):
+    """Replace this companion's own .exe with the one in `rel`. Returns (ok, sentence).
+
+    WINDOWS WILL NOT LET A RUNNING .EXE BE OVERWRITTEN - AND WILL LET IT BE RENAMED. That single
+    fact is the whole method, and it is why this is safe rather than clever:
+
+        download -> <exe>.new        nothing live is touched
+        <exe>    -> <exe>.old        allowed while running; this process keeps executing from it
+        <exe>.new -> <exe>           the next launch is the new build
+        <exe>.old                    deleted by sweep_old_exe() on that next start
+
+    If the second rename fails the first is undone, so the worst outcome is the build that was
+    already running, still running, under its own name.
+
+    THIS IS WHY IT EXISTS. The panel could update every payload and every homebrew and the one
+    thing it could not update was itself: pick_asset() only ever matches .elf, so a PC took the
+    update, reported the new version for the console, and went on running the old companion. The
+    owner hit that twice and reasonably read it as the update not having worked.
+    """
+    say = log or (lambda m: None)
+    cur = running_exe()
+    if not cur:
+        return False, "This is not the packaged app, so there is nothing to replace."
+    asset = None
+    for a in (rel.get("assets") or []):
+        if str(a.get("name") or "").lower().endswith(".exe"):
+            asset = a
+            break
+    if not asset:
+        return False, "That release has no Windows app in it."
+
+    url = asset.get("url")
+    tok = gh_token(cfg)
+    if tok and asset.get("api_url"):
+        url = asset["api_url"]
+    new, old = cur + ".new", cur + ".old"
+    try:
+        hdrs = {"User-Agent": "PKG-MUTANT-SHOP"}
+        if tok and url == asset.get("api_url"):
+            hdrs["Authorization"] = "Bearer " + tok
+            hdrs["Accept"] = "application/octet-stream"
+        req = urllib.request.Request(url, headers=hdrs)
+        got = 0
+        with urllib.request.urlopen(req, timeout=600) as r, io.open(new, "wb") as f:
+            while True:
+                chunk = r.read(1 << 18)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+    except Exception as e:
+        try: os.remove(new)
+        except OSError: pass
+        return False, "The download did not finish (%s)." % e.__class__.__name__
+
+    want = int(asset.get("size") or 0)
+    if want and got != want:
+        try: os.remove(new)
+        except OSError: pass
+        return False, "The download was %d bytes and should be %d." % (got, want)
+    # IS IT A WINDOWS PROGRAM AT ALL? A redirect to an error page is the shape this has to refuse,
+    # because the next step renames it over the app.
+    try:
+        with io.open(new, "rb") as f:
+            magic = f.read(2)
+    except Exception:
+        magic = b""
+    if magic != b"MZ":
+        try: os.remove(new)
+        except OSError: pass
+        return False, "What came down is not a Windows program, so it was not used."
+
+    try:
+        if os.path.exists(old):
+            os.remove(old)
+    except OSError:
+        pass
+    try:
+        os.replace(cur, old)
+    except Exception as e:
+        try: os.remove(new)
+        except OSError: pass
+        return False, "Could not set the running app aside (%s)." % e.__class__.__name__
+    try:
+        os.replace(new, cur)
+    except Exception as e:
+        try: os.replace(old, cur)        # put it back exactly as it was
+        except OSError: pass
+        return False, "Could not put the new app in place (%s)." % e.__class__.__name__
+    say("[update] the app on disk is now the new build; the old one is %s" % os.path.basename(old))
+    return True, "Updated. Close the app and open it again to use the new version."
+
+
 def pick_asset(rel, item):
     """The one file in a release that would replace THIS item, or None.
 

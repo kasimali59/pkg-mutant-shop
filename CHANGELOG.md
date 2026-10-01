@@ -9,6 +9,40 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.90.0] - 2026-10-01 - "The update lane could not update the app" `[VERIFIED]`
+
+### Added
+- **The companion replaces its own exe.** Payloads & Homebrews -> Updates could replace every
+  payload and every homebrew and not the one file running it: `pick_asset()` only ever matches
+  `.elf`, so taking the update on our own tile fetched the console's ELF, reported the new version,
+  and left the PC running the old companion. Both consoles then read as up to date from a panel
+  that was itself out of date - which is why "I updated it and it still said the old version"
+  happened twice and was correct both times.
+
+  Windows will not let a running `.exe` be overwritten and **will** let it be renamed, and that one
+  fact is the whole method: download to `<exe>.new`, rename `<exe>` -> `<exe>.old` (allowed while
+  running; the process keeps executing from it), rename `<exe>.new` -> `<exe>`, and delete the
+  `.old` on the next start, when it is no longer anybody's running image. If the second rename
+  fails the first is undone, so the worst outcome is the build that was already running, still
+  running, under its own name. A short download and anything that is not a Windows program (an
+  error page served in place of an asset) are refused before a rename happens. Nothing restarts
+  itself; the toast asks for it and stays up long enough to be read.
+
+  Taking the update from a build older than 3.90.0 still replaces only the console file, because
+  the code that does this has to be in the build that is running.
+
+### Fixed
+- `live_catalog()` merged, not replaced - see 3.89.1. Carried here as the behaviour a second PC
+  sees after it takes its first download.
+
+### Tests
+- `tools/test_payloads.py` drives the real swap over a `file://` release: both renames, the size
+  check, the not-a-program check, the "nothing to replace when running from source" answer, and
+  `running_exe()` naming no exe when the build is not frozen. All five were perturbed to red,
+  including one that would have let the swap loose on the Python interpreter.
+
+---
+
 ## [3.89.1] - 2026-10-01 - "One successful download emptied the shelf" `[VERIFIED]`
 
 Reported from the second PC, and it is a regression this changelog has to own.

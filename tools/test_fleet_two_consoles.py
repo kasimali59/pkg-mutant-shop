@@ -40,10 +40,10 @@ def find_consoles():
     here = socket.gethostbyname(socket.gethostname())
     base = here.rsplit(".", 1)[0]
 
-    def probe(i):
+    def probe(i, timeout=1.0):
         ip = "%s.%d" % (base, i)
         try:
-            with urllib.request.urlopen("http://%s:8710/api/health" % ip, timeout=1.0) as r:
+            with urllib.request.urlopen("http://%s:8710/api/health" % ip, timeout=timeout) as r:
                 d = json.loads(r.read().decode("utf-8", "replace"))
             if d.get("on_console"):
                 return ip, ("ps4" if str(d.get("platform") or "").lower() == "ps4" else "ps5")
@@ -51,11 +51,19 @@ def find_consoles():
             pass
         return None
 
+    # TWO SWEEPS, THE SECOND PATIENT. One pass at a second per address across 254 of them missed a
+    # console that was demonstrably awake and answering, and the suite then SKIPPED - which reads
+    # exactly like a pass. That is how a perturbation that forced a real cross-platform repoint came
+    # back green: the suite had not run at all. A sweep that decides whether anything gets tested
+    # cannot be the flakiest part of the file.
     out = {}
-    with _f.ThreadPoolExecutor(max_workers=64) as ex:
-        for got in ex.map(probe, range(1, 255)):
-            if got and got[1] not in out:
-                out[got[1]] = got[0]
+    for timeout in (1.0, 3.0):
+        with _f.ThreadPoolExecutor(max_workers=64) as ex:
+            for got in ex.map(lambda i: probe(i, timeout), range(1, 255)):
+                if got and got[1] not in out:
+                    out[got[1]] = got[0]
+        if len(out) >= 2:
+            break
     return out
 
 
@@ -140,6 +148,29 @@ def start():
     return None
 
 
+def await_discovery(want=2, secs=90):
+    """Wait until the console list has grown, or give up. Returns the list.
+
+    THIS SUITE WAS A COIN TOSS WITHOUT IT. Discovery is the expensive half of track_consoles, it is
+    rate-limited by its caller, and it runs on a background thread - so asserting as soon as
+    /api/health answers asks what the config looked like BEFORE the thing being tested happened.
+    The same code gave a pass and a failure on consecutive runs, and a perturbation that forced a
+    real cross-platform repoint came back green because the pass had not run yet. A test that only
+    sometimes exercises its subject reports on nothing.
+    """
+    cons = []
+    for _ in range(int(secs / 3)):
+        try:
+            _, c = req("/api/consoles")
+            cons = c.get("consoles") or []
+            if len(cons) >= want:
+                return cons
+        except Exception:
+            pass
+        time.sleep(3)
+    return cons
+
+
 def stop(p):
     if p and p.poll() is None:
         p.terminate()
@@ -172,16 +203,41 @@ try:
                 "ftp_port": 2121, "dpi_port": 12800}], DEAD_IP)
     proc = start()
     if proc:
-        _, c = req("/api/consoles")
-        cons = c.get("consoles") or []
+        # The PS4 appearing IS the discovery pass having run; everything below is about what that
+        # pass did and must not be asked before it.
+        cons = await_discovery(2)
         by_plat = {x.get("platform"): x for x in cons}
-        check("the configured console survived, at its own address",
-              by_plat.get("ps5", {}).get("ip") == DEAD_IP, json.dumps(cons))
+        check("discovery ran at all - the PS4 was found within the wait",
+              len(cons) >= 2, "%d console(s): %s" % (len(cons), json.dumps(cons)))
+        # WHAT THIS SUITE GUARDS IS "ADD, NEVER REPLACE" - and for a while it asserted something
+        # else: that an entry whose saved id matches nothing on the network is left on its dead
+        # address for ever. That was the behaviour once, it was measured to be wrong on the owner's
+        # own PS4 (the console had regenerated its id, so the saved pair matched nothing and the
+        # companion asked a dead address for days), and following such an entry is now deliberate -
+        # see track_consoles and test_console_tracker.py, which covers it with no network at all.
+        #
+        # Worse, the old assertion only held while the real PS5 was switched OFF: powered on, it is
+        # the one unaccounted-for PS5 and the entry is correctly followed to it. This file's own
+        # rule, written thirty lines up, is that a test whose result depends on which console is
+        # powered is not a test - and that rule applied to this check too.
+        #
+        # So these assert the part that is true however the room is arranged: discovery ADDS, it
+        # never drops an entry, and it never mixes the platforms up - which is the actual bug this
+        # suite was written for, and the shape of "discovery adopted a peer PC".
+        check("the configured PS5 entry still exists - discovery never drops one",
+              "ps5" in by_plat, json.dumps(cons))
         check("the PS4 was ADDED as a second console",
               by_plat.get("ps4", {}).get("ip") == PS4_IP, "%d console(s)" % len(cons))
+        check("the PS5 entry was never pointed at the PS4",
+              by_plat.get("ps5", {}).get("ip") != PS4_IP, json.dumps(cons))
         _, h = req("/api/health")
-        check("ps5_ip was not repointed at the discovered console",
-              h.get("ps5_ip") == DEAD_IP, str(h.get("ps5_ip")))
+        check("ps5_ip was not repointed at the PS4",
+              h.get("ps5_ip") != PS4_IP, str(h.get("ps5_ip")))
+        # An entry that IS followed must be followed to a real PS5, so the address is either the one
+        # configured or one a PS5 actually answered on. Never a PS4, never invented.
+        check("ps5_ip is either the configured address or a discovered PS5",
+              h.get("ps5_ip") in (DEAD_IP, PS5_IP) or not PS5_IP,
+              "%s (configured %s, PS5 found at %s)" % (h.get("ps5_ip"), DEAD_IP, PS5_IP))
     stop(proc)
     proc = None
 
