@@ -108,7 +108,8 @@ anything is replaced: the size must match, the marker must be present *inside* t
 old file is kept as `.bak` until the new one is proven complete. Taking an update replaces the file;
 sending it to a console stays a second, separate press.
 
-Not every version is published — only the ones worth interrupting someone for. See
+Nothing needs configuring for this: the releases are public, so any device finds them. Not every
+version is published — only the ones worth interrupting someone for. See
 **[RELEASING.md](RELEASING.md)**.
 
 ---
