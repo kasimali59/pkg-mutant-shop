@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.91.2"
+VERSION = "3.92.0"
 
 _BUILD_ID = None
 
@@ -2285,6 +2285,24 @@ def track_consoles(cfg, fleet, log=None, scan=True):
                     changed.append("%s at %s is a different console than before"
                                    % (c.get("name") or _plat_of(c).upper(), c["ip"]))
                 c["console_id"] = cid
+            # AND THE FIRMWARE, WHICH IS WORTH AN ANNOUNCEMENT OF ITS OWN. Our payload can only run
+            # on a firmware its SDK has kernel offsets for; past that it cannot establish kernel
+            # read/write and dies before its first log line, so the console simply stops having a
+            # shop and nothing anywhere says why. Measured 2026-10-01: the owner updated a PS5 from
+            # 12.70 to 13.60, the build knew up to 13.40, and the symptom was Payload Manager
+            # reporting a clean "Sent 45367592 bytes to loader" over and over while nothing started.
+            # It took an hour of elimination to reach a number the console could have volunteered.
+            #
+            # So the number is kept beside the id, and a CHANGE is news rather than a quiet field
+            # update - that line is the one that would have answered it immediately.
+            fwv = str(h.get("fw") or "").strip()
+            if fwv and fwv != "unknown" and c.get("fw") != fwv:
+                dirty[0] = True
+                if c.get("fw"):
+                    changed.append("%s is on firmware %s now - it was %s. If its payloads stop "
+                                   "starting, the build needs a newer SDK."
+                                   % (c.get("name") or _plat_of(c).upper(), fwv, c["fw"]))
+                c["fw"] = fwv
         else:
             silent.append(i)
 

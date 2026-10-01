@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.91.2"
+#define SHOP_VERSION "3.92.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the
@@ -1100,6 +1100,31 @@ static char *http_get_ip(const char *ip, int port, const char *path, long *out_l
  * Deliberately not a hash of the file: a hash means reading it, and the point of this is that it
  * costs nothing. Size plus mtime moves for every write sqlite makes to either database. */
 #define ADDCONT_DB_PATH "/system_data/priv/mms/addcont.db"
+/* The console's firmware, as "13.60", or "unknown" when the kernel will not say.
+ *
+ * THIS IS THE FACT THAT DECIDES WHETHER THIS ELF RUNS AT ALL, and until now nothing reported it.
+ * The payload SDK carries a switch on kernel_get_fw_version() that hands back the kernel offsets
+ * for each firmware it knows, and -ENOSYS for one it does not - so a console that moves to a
+ * firmware the build predates cannot establish kernel read/write and this program dies before it
+ * reaches its own first log line. No process, no boot line, no notification: Payload Manager
+ * reports a clean "Sent 45367592 bytes to loader" and nothing happens.
+ *
+ * That is exactly what the owner hit on 2026-10-01 after updating the console, and it cost an hour
+ * of elimination - two of our builds, a 118 KB one of ours, and a third-party payload, all loaded
+ * and all silent - to arrive at a number the console could simply have said. It says it now.
+ *
+ * Firmware is BCD: 0x13600000 is 13.60, so the bytes are printed as hex digits, not as decimals.
+ */
+static void fw_version_str(char *out, size_t osz) {
+    uint32_t v = kernel_get_fw_version();
+    if (!v) {
+        snprintf(out, osz, "unknown");
+        return;
+    }
+    snprintf(out, osz, "%x.%02x", (unsigned)((v >> 24) & 0xFF), (unsigned)((v >> 16) & 0xFF));
+}
+
+
 static void content_sig(char *out, size_t osz) {
     struct stat a, b;
     long long as = 0, am = 0, bs = 0, bm = 0;
@@ -8221,7 +8246,9 @@ static void handle(int fd, const char *rawpath, const char *req) {
            or an add-on from the health poll it already makes, without pulling app.db. */
         char csig[96];      /* four %lld (20 each) and three dashes is 83 - sized from the format */
         content_sig(csig, sizeof(csig));
-        char o[980];
+        char fw[16];
+        fw_version_str(fw, sizeof(fw));
+        char o[1040];       /* grew with "fw" - see the truncation guard below */
         snprintf(o, sizeof(o),
                  "{\"ok\":true,\"on_console\":true,\"server\":\"on-console\",\"connected\":true,"
                  "\"version\":\"" SHOP_VERSION "\",\"built\":\"" SHOP_BUILD "\","
@@ -8230,12 +8257,31 @@ static void handle(int fd, const char *rawpath, const char *req) {
                  "\"shadowmount\":%s,\"shadowmount_port\":%d,"
                  "\"engine\":\"pms-spawn\",\"engine_ready\":%s,\"engine_port\":8084,"
                  "\"companion_port\":8710,\"lan_ip\":\"%s\",\"console_id\":\"%s\","
-                 "\"running_title\":\"%s\",\"apps_sig\":\"%s\"}",
+                 "\"running_title\":\"%s\",\"apps_sig\":\"%s\",\"fw\":\"%s\"}",
                  lan_ip_str(),
                  ftp_up ? "true" : "false", fport,
                  smp_up ? "true" : "false", SMP_API_PORT,
                  engine_up ? "true" : "false",
-                 lan_ip_str(), console_id(), rt, csig);
+                 lan_ip_str(), console_id(), rt, csig, fw);
+        /* A HEALTH REPLY THAT GOT CUT IN HALF IS WORSE THAN A MISSING FIELD: every caller parses
+           this as JSON, so a truncation turns "the console is fine" into "the console is broken".
+           This has already happened once on this server, to /api/payloads, when its answer grew
+           past a fixed buffer - so a reply that no longer fits says so in the log instead of going
+           out malformed. */
+        if ((size_t)snprintf(NULL, 0,
+                 "{\"ok\":true,\"on_console\":true,\"server\":\"on-console\",\"connected\":true,"
+                 "\"version\":\"" SHOP_VERSION "\",\"built\":\"" SHOP_BUILD "\","
+                 "\"ps5_ip\":\"%s\",\"ftp_online\":%s,\"ftp_port\":%d,"
+                 "\"shadowmount\":%s,\"shadowmount_port\":%d,"
+                 "\"engine\":\"pms-spawn\",\"engine_ready\":%s,\"engine_port\":8084,"
+                 "\"companion_port\":8710,\"lan_ip\":\"%s\",\"console_id\":\"%s\","
+                 "\"running_title\":\"%s\",\"apps_sig\":\"%s\",\"fw\":\"%s\"}",
+                 lan_ip_str(), ftp_up ? "true" : "false", fport,
+                 smp_up ? "true" : "false", SMP_API_PORT, engine_up ? "true" : "false",
+                 lan_ip_str(), console_id(), rt, csig, fw) >= sizeof(o)) {
+            ilog("health: reply did not fit in %zu bytes - a field was added without the buffer",
+                 sizeof(o));
+        }
         send_json(fd, o);
     } else if (!strcmp(path, "/api/library")) {
         char *j = build_library_json();

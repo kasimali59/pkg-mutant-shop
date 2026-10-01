@@ -9,6 +9,48 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.92.0] - 2026-10-01 - "The console moved and the toolchain did not" `[VERIFIED]`
+
+The PS5 app stopped starting entirely. It was not the build, the size, the disk, Payload Manager or
+anything in this repository: **the console had been updated to firmware 13.60 and our SDK knew up to
+13.40.**
+
+### Fixed
+- **The PS5 ELF is built against an SDK that knows 13.60.** The payload SDK carries a switch on
+  `kernel_get_fw_version()` handing back the kernel offsets for each firmware it knows, and
+  `-ENOSYS` for one it does not - so on an unknown firmware the ELF cannot establish kernel
+  read/write and dies before `main()` reaches its own first log line. The symptom is silence:
+  pldmgr logs a clean `Sent 45367592 bytes to loader`, no process appears, nothing is written to
+  install.log, and no notification is drawn. Upstream added 13.42 on 2026-07-01 and 13.60 on
+  2026-08-02; the installed SDK was from 2026-07-21 and stopped at 13.40.
+
+  `ps5-app/payload/build-wsl.sh` fetches the SDK behind `if [ ! -d ~/sdk/ps5-payload-sdk ]`, so it
+  is pinned to whatever was current on the day the machine was set up and nothing ever says
+  otherwise. **`ps5-app/update-sdk-wsl.sh`** is new: `--check` prints the firmwares the installed
+  toolchain knows, the ones upstream has, and the difference; without it the SDK is replaced and
+  the previous one kept as `.bak-<stamp>`. It also rewrites `prospero-llvm-config`, which lives
+  INSIDE the SDK directory and is destroyed by a plain re-extract - that failure surfaces much
+  later as an unrelated linker error.
+
+### Added
+- **`/api/health` on the PS5 reports `fw`** (firmware is BCD: `0x13600000` is 13.60), and
+  `track_consoles` keeps it beside the console id and **announces a change**: *"PS5 is on firmware
+  13.60 now - it was 12.70. If its payloads stop starting, the build needs a newer SDK."* The
+  console could have volunteered that number the whole time.
+
+### What made this hard to see, recorded so it is not re-learned
+- Every other payload on the console kept working, which reads as "so the console is fine". They
+  were third-party builds that had been rebuilt for 13.60.
+- Loading an OLD third-party payload (ps5debug-NG v1.3.2) failed exactly like ours - so the test
+  "does somebody else's payload start?" answered "no" and pointed at a broken loader. It was not
+  broken; that payload was simply built for an older firmware too. **A third-party payload is only
+  a control if it is known to be current.**
+- `/data` was writable, the size was irrelevant (a 118 KB ELF of ours failed the same way), and the
+  previous release of our own ELF - which had run on that console two hours earlier, on the old
+  firmware - also failed, which looks like "the console, not the build" and is true but incomplete.
+
+---
+
 ## [3.91.2] - 2026-10-01 - "Restart when the pressing stops" `[VERIFIED]`
 
 ### Fixed
