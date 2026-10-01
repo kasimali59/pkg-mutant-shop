@@ -1135,7 +1135,27 @@ def download_asset(cfg, item, asset, log=None, timeout=180):  # noqa: C901
     say = log or (lambda m: None)
     src = local_path(cfg, item)
     if not src:
-        return False, "That file is not on this PC, so there is nothing to replace.", ""
+        # NOT HAVING IT IS A REASON TO FETCH IT, NOT A REASON TO REFUSE. This used to answer "that
+        # file is not on this PC, so there is nothing to replace", which is true and useless: the
+        # owner pressed Update on a device that had just been told an update exists, and the app
+        # knows the project, the release, the asset and exactly where the file belongs.
+        #
+        # It is also how a second PC got stuck. live_catalog() falls back to the BAKED catalogue
+        # when the folder is empty, so a companion with no folder still lists every item and still
+        # offers updates for them - then refused every one. The folder is created on startup now,
+        # so there is somewhere to put it; this makes the first download land there.
+        rel = str((item or {}).get("path") or "").replace("/", os.sep)
+        if not rel:
+            return False, "There is no recorded place for that file.", ""
+        dest_dir = os.path.dirname(os.path.join(source_root(cfg), rel))
+        try:
+            if not os.path.isdir(dest_dir):
+                os.makedirs(dest_dir)
+        except OSError as e:
+            return False, "Could not make a place to put it (%s)." % e.__class__.__name__, ""
+        src = os.path.join(dest_dir, os.path.basename(rel))
+        say("[payloads] %s is not on this PC yet - fetching it into %s" % (
+            (item or {}).get("title") or "it", dest_dir))
     # A PRIVATE RELEASE IS NOT FETCHED FROM THE BROWSER LINK. With a token we ask the API for the
     # asset itself, which is the only route that works while our own repository is private; without
     # one the public browser link is right and nothing changes for the third-party upstreams.
@@ -1194,16 +1214,22 @@ def download_asset(cfg, item, asset, log=None, timeout=180):  # noqa: C901
                 item.get("title") or item.get("id")), ""
 
     bak = src + ".bak"
+    # THERE MAY BE NOTHING TO BACK UP. Since an update can now also be a first download, `src` is
+    # a file that does not exist yet - and os.replace() on a missing source raises, which would
+    # have turned every first fetch into "could not replace the old file".
+    had_old = os.path.exists(src)
     try:
         if os.path.exists(bak):
             os.remove(bak)
-        os.replace(src, bak)          # the old one survives until the new one is in place
+        if had_old:
+            os.replace(src, bak)      # the old one survives until the new one is in place
         os.replace(part, dest)
-        os.remove(bak)
+        if had_old:
+            os.remove(bak)
     except Exception as e:
         # put it back exactly as it was
         try:
-            if not os.path.exists(src) and os.path.exists(bak):
+            if had_old and not os.path.exists(src) and os.path.exists(bak):
                 os.replace(bak, src)
         except OSError:
             pass
@@ -1287,7 +1313,11 @@ def console_state(ip, timeout=6.0):
     st = j.get("state")
     if not isinstance(st, dict):
         return None
-    out = {"live": None, "have": None, "kept": {}}
+    out = {"live": None, "have": None, "kept": {},
+           # Which build is answering. The panel needs this for OUR OWN tile: the catalogue records
+           # what the owner's folder held when the ELF was built, so it can never describe the ELF
+           # that is running.
+           "version": str(j.get("shop_version") or "").strip()}
     if st.get("live") is not None:
         out["live"] = {proc_stem(n) for n in st["live"] if n}
     if st.get("have") is not None:

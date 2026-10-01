@@ -401,6 +401,65 @@ def main():
     ok("phb_where" not in _ui,
        "the \"that folder is not on this PC\" message is gone - the folder is created instead")
 
+    # ---- "INSTALLED" MEANS THE GAME'S DATA IS THERE ---------------------------------------------
+    # The owner pressed Install on a homebrew the console did not have, was told "Done", and then
+    # saw it listed as Installed. The title list was built from /user/appmeta, which is artwork: it
+    # is written early, left behind by a failed install, and survives a database reset - the same
+    # thing that once reported 53 titles installed on a console holding none of them.
+    _ps5c = io.open(os.path.join(ROOT, "ps5-app", "onconsole", "server.c"), encoding="utf-8").read()
+    _ps4c = io.open(os.path.join(ROOT, "ps4-app", "onconsole", "server_ps4.c"), encoding="utf-8").read()
+    for _name, _src in (("PS5", _ps5c), ("PS4", _ps4c)):
+        _fn = _src.split("static int app_ids_json(char *out, size_t outsz) {", 1)[1].split("\nstatic ", 1)[0]
+        ok("APPMETA_ROOTS" not in _fn,
+           "%s: the installed-title list is not read from appmeta" % _name)
+        # THE CALL, NOT A MENTION OF IT. Testing for the bare function name passed with the guard
+        # deleted, because the comment above the guard names the function too - a check that a
+        # comment can satisfy is not a check.
+        ok("title_has_data(de->d_name)" in _fn or "installed_app_pkg(de->d_name)" in _fn,
+           "%s: ...it requires the title's own app.pkg" % _name)
+    ok("APPMETA_ROOTS" not in _ps5c and "APPMETA_ROOTS" not in _ps4c,
+       "neither console still defines the appmeta roots")
+
+    # ---- A RUNNING PROGRAM KNOWS ITS OWN VERSION ------------------------------------------------
+    # The catalogue baked into an ELF records what the owner's folder held when that ELF was built,
+    # so it is one release behind by construction: a console running 3.87.0 said "Running - 3.86.0"
+    # and was offered an update it already had.
+    for _name, _src in (("PS5", _ps5c), ("PS4", _ps4c)):
+        _blk = _src.split('on_console\\":true,\\"platform\\":\\"%s' % _name, 1)[1][:1600]
+        ok('shop_version' in _blk, "%s: /api/payloads reports the build that is answering" % _name)
+    _ps4blk = _ps4c.split('on_console\\":true,\\"platform\\":\\"PS4', 1)[1][:1600]
+    ok('\\"bundled\\":%d' in _ps4blk, "the PS4 reply carries `bundled`, like the PS5's")
+
+    _ui = io.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    ok("PHB.consoleVer" in _ui, "the page keeps the console's own version")
+    ok("it.ours && on && PHB.consoleVer" in _ui,
+       "...and our own tile shows it while the shop is running")
+
+    # ---- NOT HAVING A FILE IS A REASON TO FETCH IT ----------------------------------------------
+    # A second PC answered "that file is not on this PC, so there is nothing to replace" for every
+    # update it offered - live_catalog falls back to the baked catalogue when the folder is empty,
+    # so a companion with no folder lists everything and could take none of it.
+    _eng = io.open(os.path.join(ROOT, "companion", "payloads.py"), encoding="utf-8").read()
+    _da = _eng.split("def download_asset(", 1)[1].split("\ndef ", 1)[0]
+    ok('return False, "That file is not on this PC' not in _da,
+       "an update no longer refuses because the file is absent")
+    ok("os.makedirs(dest_dir)" in _da, "...it makes somewhere to put it")
+    ok("had_old" in _da, "...and does not try to back up a file that was never there")
+
+    # ---- A 200 {} IS NOT AN EMPTY LIST ----------------------------------------------------------
+    # Neither console implements /api/payloads/updates, and an unknown route answers 200 {}. The
+    # page read that as "checked, nothing found" and said everything was up to date.
+    ok("r.items !== undefined" in _ui,
+       "the page tells 'could not check' apart from 'nothing to update'")
+    ok("phbSelfCheck" in _ui and "api.github.com" in _ui,
+       "...and a console with no companion asks GitHub from the page, which has TLS")
+    ok("phb_upd_cantcheck" in _ui, "...and says so when even that fails")
+
+    # ---- "DONE" WAS SAID BEFORE A BYTE MOVED ----------------------------------------------------
+    _do = _ui.split("function phbDo(", 1)[1].split("\nfunction ", 1)[0]
+    ok('act==="install"' in _do and "phb_queued" in _do,
+       "an install reports that it was queued, not that it is done")
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:

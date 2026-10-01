@@ -86,7 +86,11 @@ python3 "$HERE/gen_cheat_bundle.py" "$HERE/../../assets/cheats" "$HERE/cheat_bun
 # wider system-library context, not AppInstUtil alone. -lSceRegMgr is gone: grep finds no RegMgr
 # symbol in server.c or jb.c, and the install drive is the console's own setting with no registry
 # key behind it (see memory: install drive is not selectable). -g, never -O2 - see the installer.
-"$SDK/bin/prospero-clang" -Wall -g -DPORT="$PORT" \
+# -ffile-prefix-map: the DWARF that -g emits records the ABSOLUTE path of every header the
+# SDK pulled in, which put the build account's home directory inside a 45 MB binary published
+# on a release page. This rewrites recorded paths only - it does not touch codegen, so the
+# rule above (-g, never -O2, because -O2 breaks installs) still holds.
+"$SDK/bin/prospero-clang" -Wall -g -ffile-prefix-map="$HOME"=/build -DPORT="$PORT" \
   -o "$HERE/PKG-MUTANT-SHOP.elf" "$HERE/server.c" "$HERE/jb.c" \
   -lkernel_sys -lSceNotification -lSceUserService -lSceSystemService \
   -lSceAppInstUtil -lScePad -lSceSsl -lSceHttp

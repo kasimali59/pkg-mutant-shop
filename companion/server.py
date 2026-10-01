@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.87.0"
+VERSION = "3.88.0"
 
 _BUILD_ID = None
 
@@ -9691,6 +9691,10 @@ class Handler(BaseHTTPRequestHandler):
             ",".join(sorted(running or [])), len(installed or ()))
         return self._json({"ok": True, "platform": plat,
                            "console": (b.c.get("id") if b is not None else ""),
+                           # WHICH BUILD IS ON THAT CONSOLE. Our own tile cannot read this out of
+                           # the catalogue: the catalogue records what the owner's folder held when
+                           # the ELF was built, so it is one release behind by construction.
+                           "console_version": (cst or {}).get("version", ""),
                            "root": root, "source_here": os.path.isdir(root),
                            "sig": hashlib.sha256(state_sig.encode("utf-8")).hexdigest()[:16],
                            "items": items})

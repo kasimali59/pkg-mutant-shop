@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.87.0"
+#define SHOP_VERSION "3.88.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the
@@ -7971,6 +7971,13 @@ static void handle(int fd, const char *rawpath, const char *req) {
         json_escape(g_pb_log, esc2, sizeof(esc2));
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"on_console\":true,\"platform\":\"PS5\",\"console\":\"%s\","
+                 /* THE BUILD THAT IS ANSWERING. Our own tile used to show the version recorded in
+                    the catalogue baked into this ELF - which is the version the OWNER'S FOLDER
+                    held when this ELF was built, and is therefore always one release behind by
+                    construction. The console saying "Running - 3.86.0" while running 3.87.0 is
+                    that loop, and it also made the panel offer an update that was already
+                    installed. A running program knows its own version; nothing else does. */
+                 "\"shop_version\":\"" SHOP_VERSION "\","
                  "\"source_here\":false,\"items\":null,\"hb_dir\":\"%s\","
                  "\"bundled\":%d,\"status\":\"%s\","
                  "\"state\":{\"live\":[%s],\"kept\":[%s],\"apps\":[%s],\"have\":[%s]}}",
@@ -8993,24 +9000,46 @@ static int pm_running(const char *filename) {
     return hit;
 }
 
-static const char *APPMETA_ROOTS[] = { "/user/appmeta", "/mnt/usb0/user/appmeta", NULL };
 
-/* The title ids this console already has, so the panel can say "Installed" without a PC.
+/* The title ids this console really has, so the panel can say "Installed" without a PC.
 
-   Read from the folder the console itself keeps per installed title - appmeta on the PS5, the app
-   directory on the PS4 - because that is the same evidence the library trusts. The page matches
-   these against the catalogue's title_id; nothing here needs to know what a homebrew is. */
+   APPMETA IS ARTWORK, NOT EVIDENCE. This used to list the directories under /user/appmeta, and a
+   folder there means only that the console once had the icon for a title: it is written early, it
+   is left behind by an install that failed, and it survives a database reset. That is not a
+   hypothesis - it is how 53 titles were once reported installed on a console that held none of
+   them, and it is why pressing Install on a homebrew the console did not have could answer
+   "Installed" seconds later while nothing had been downloaded.
+
+   The proof used here is the one the rest of this file already trusts, and the one the install
+   lane waits for before it will call a job done: the title's own **app.pkg, with bytes**, under a
+   root a game can actually live on. An install that was registered and never completed has no such
+   file, so it no longer counts. */
+static const char *APP_DATA_ROOTS[] = { "/user/app", "/mnt/ext0/user/app",
+                                        "/mnt/ext1/user/app", "/mnt/ext2/user/app", NULL };
+
+/* app.pkg WITH BYTES is the only honest proof. 1 when this title really has its data. */
+static int title_has_data(const char *tid) {
+    for (int i = 0; APP_DATA_ROOTS[i]; i++) {
+        char p[700];
+        struct stat st;
+        snprintf(p, sizeof(p), "%s/%s/app.pkg", APP_DATA_ROOTS[i], tid);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) return 1;
+    }
+    return 0;
+}
+
 static int app_ids_json(char *out, size_t outsz) {
     int n = 0;
     out[0] = 0;
-    for (int r = 0; APPMETA_ROOTS[r] && n < (int)outsz - 40; r++) {
-        DIR *d = opendir(APPMETA_ROOTS[r]);
+    for (int r = 0; APP_DATA_ROOTS[r] && n < (int)outsz - 40; r++) {
+        DIR *d = opendir(APP_DATA_ROOTS[r]);
         if (!d) continue;
         struct dirent *de;
         while ((de = readdir(d)) && n < (int)outsz - 40) {
             if (de->d_name[0] == '.') continue;
             size_t L = strlen(de->d_name);
             if (L < 6 || L > 12) continue;
+            if (!title_has_data(de->d_name)) continue;
             n += snprintf(out + n, outsz - (size_t)n, "%s\"%s\"", n ? "," : "", de->d_name);
         }
         closedir(d);

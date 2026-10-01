@@ -18,7 +18,9 @@ fi
 # -g, NOT -O2: these are the flags that built the binary proven on hardware. The installer is a few
 # hundred lines of straight-line code, so there is nothing to gain from optimising it and a
 # provable regression to lose if the flags ever turn out to matter.
-"$SDK/bin/prospero-clang" -Wall -g \
+# -ffile-prefix-map keeps the build account's home out of the DWARF - see the note in
+# build-wsl.sh. Paths only; -g stays, and -O2 still must not come back (it breaks installs).
+"$SDK/bin/prospero-clang" -Wall -g -ffile-prefix-map="$HOME"=/build \
   -o "$HERE/payloads/pms-installer.elf" \
   "$HERE/installer_probe.c" "$HERE/jb.c" \
   -lkernel_sys -lSceNotification -lSceUserService -lSceSystemService -lSceAppInstUtil

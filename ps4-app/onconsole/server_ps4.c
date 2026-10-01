@@ -88,7 +88,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.87.0"
+#define SHOP_VERSION "3.88.0"
 
 /* The largest POST body this console will take. Bodies here are JSON of a few hundred bytes; the
    cap exists only so a hostile Content-Length cannot ask for a gigabyte of heap. */
@@ -1931,24 +1931,38 @@ static int agent_set_enabled_locked(int want_on) {
    below needs it - the same forward-declaration the PS5 build keeps at the top of its file. */
 static int path_ext_is(const char *path, const char *ext);
 
-static const char *APPMETA_ROOTS[] = { "/user/appmeta", "/user/app", NULL };
 
 /* The title ids this console already has, so the panel can say "Installed" without a PC.
 
    Read from the folder the console itself keeps per installed title - appmeta on the PS5, the app
    directory on the PS4 - because that is the same evidence the library trusts. The page matches
    these against the catalogue's title_id; nothing here needs to know what a homebrew is. */
+/* The title ids this console really has, so the panel can say "Installed" without a PC.
+
+   APPMETA IS ARTWORK, NOT EVIDENCE. This used to list the directories under /user/appmeta, and a
+   folder there means only that the console once had the icon for a title: it is written early, it
+   is left behind by an install that failed, and it survives a database reset. That is not a
+   hypothesis - it is how 53 titles were once reported installed on a console that held none of
+   them, and it is why pressing Install on a homebrew the console did not have could answer
+   "Installed" seconds later while nothing had been downloaded.
+
+   The proof used here is the one the rest of this file already trusts, and the one the install
+   lane waits for before it will call a job done: the title's own **app.pkg, with bytes**, under a
+   root a game can actually live on. An install that was registered and never completed has no such
+   file, so it no longer counts. */
 static int app_ids_json(char *out, size_t outsz) {
     int n = 0;
     out[0] = 0;
-    for (int r = 0; APPMETA_ROOTS[r] && n < (int)outsz - 40; r++) {
-        DIR *d = opendir(APPMETA_ROOTS[r]);
+    for (int r = 0; APP_ROOTS[r] && n < (int)outsz - 40; r++) {
+        DIR *d = opendir(APP_ROOTS[r]);
         if (!d) continue;
         struct dirent *de;
         while ((de = readdir(d)) && n < (int)outsz - 40) {
             if (de->d_name[0] == '.') continue;
             size_t L = strlen(de->d_name);
             if (L < 6 || L > 12) continue;
+            /* installed_app_pkg() is this file's own definition of "really installed". */
+            if (installed_app_pkg(de->d_name) <= 0) continue;
             n += snprintf(out + n, outsz - (size_t)n, "%s\"%s\"", n ? "," : "", de->d_name);
         }
         closedir(d);
@@ -7068,9 +7082,18 @@ static void handle_get(int fd, const char *rawpath, const char *req) {
         char out[7400];
         snprintf(out, sizeof(out),
                  "{\"ok\":true,\"on_console\":true,\"platform\":\"PS4\",\"console\":\"%s\","
+                 /* THE BUILD THAT IS ANSWERING - see the matching note in the PS5's server.c. Our
+                    own tile showed the version the catalogue was baked with, which is the version
+                    the owner's folder held when this ELF was BUILT, so it is one release behind by
+                    construction and made the panel offer an update that was already installed. */
+                 "\"shop_version\":\"" SHOP_VERSION "\","
                  "\"source_here\":false,\"items\":null,\"hb_dir\":\"%s\","
+                 /* `bundled` and `status` were on the PS5's reply and not on this one, so anything
+                    reading them saw null here and could not tell "this console carries none" from
+                    "this console did not say". */
+                 "\"bundled\":%d,\"status\":\"\","
                  "\"state\":{\"live\":[%s],\"kept\":[%s],\"apps\":[%s],\"have\":[%s]}}",
-                 console_id(), HB_DIR, live, have, apps, have_p);
+                 console_id(), HB_DIR, PS4_PAYLOAD_BUNDLE_COUNT, live, have, apps, have_p);
         send_json(fd, out);
         return;
     }

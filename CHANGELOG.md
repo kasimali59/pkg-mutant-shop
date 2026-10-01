@@ -9,6 +9,77 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.88.0] - 2026-10-01 - "Installed means the game is there" `[VERIFIED]`
+
+Three things the panel reported that were not true, all found from one session on the consoles.
+
+### A title was called installed because its artwork folder existed
+
+`app_ids_json()` on both consoles listed the directories under `/user/appmeta`. **appmeta is
+artwork.** It is written early in an install, it is left behind by one that failed, and it survives
+a database reset - which is how 53 titles were once reported installed on a console holding none of
+them. Pressing Install on a homebrew the console did not have therefore answered "Done" and then
+showed it as **Installed**, with nothing downloaded and nothing installed.
+
+Both consoles now use the proof the rest of the code already trusts, and that the install lane
+already waits for: **the title's own `app.pkg`, with bytes**, under a root a game can live on. The
+PS4 even had the helper for it (`installed_app_pkg()`, *"app.pkg WITH BYTES is the only honest
+proof"*) and was not using it.
+
+Measured on the owner's consoles the moment it shipped: **PS5 117 -> 88 titles, PS4 17 -> 15**.
+Twenty-nine of those PS5 entries were folders with no game behind them.
+
+### "Done" was said before a byte moved
+
+An install is handed to the queue, which answers `{ok:true, ids:[...]}` with no message of its own -
+so the panel fell through to its default and said **Done** the instant the job was *accepted*. The
+queue is what knows how an install ended; the press now says it was queued and where to watch it.
+
+### Our own tile could never show the right version
+
+The catalogue is generated from the owner's folder at **build** time, so the copy baked into an ELF
+records what that folder held when the ELF was built: one release behind, for ever. A console
+running 3.87.0 said **"Running - 3.86.0"** and was offered an update it already had.
+
+A running program is the only thing that knows its own version, so both consoles now report theirs
+(`shop_version`), the companion passes it through, and the tile uses it whenever the shop is
+running. Verified on device: the tile reads **Running - 3.88.0**.
+
+While there: the PS4's `/api/payloads` was missing `bundled` and `status`, which the PS5's has had
+all along, so anything reading them could not tell "this console carries none" from "this console
+did not say".
+
+### A second PC refused every update it offered
+
+`live_catalog()` falls back to the shipped catalogue when the folder is empty, so a companion with
+no folder lists all eighteen items and offers updates for them - then answered **"That file is not
+on this PC, so there is nothing to replace"** for every one. That is true and useless: the app knows
+the project, the release, the asset, and exactly where the file belongs.
+
+Not having a file is now a reason to fetch it. The destination comes from the catalogue, the folder
+is created if it is missing, and the backup step is skipped when there is nothing to back up.
+
+### A console with no companion could not check for updates - and said everything was fine
+
+Neither console implements `/api/payloads/updates`, and an unknown route answers **HTTP 200 `{}`**
+on purpose so the UI does not error. The panel read that as an empty list and reported *"everything
+matches the newest release"* - a confident false negative, the one answer a check must never give.
+
+A reply with no `items` is now told apart from `items: []`. And when there is no companion to ask,
+**the page asks GitHub itself**: neither console can speak HTTPS (no TLS stack in a payload, and the
+PS5's downloader refuses any url that is not `http://`), but the page runs in the console's own
+browser, which has one. It checks this project's release and compares it against the build that is
+answering. Taking the download still needs a companion, and the row says so with a link rather than
+a button that cannot finish.
+
+### Also
+
+* The published binaries carried the build account's home directory in their DWARF paths.
+  `-ffile-prefix-map` rewrites recorded paths only - no effect on codegen, so *-g, never -O2* still
+  holds. All three artifacts verified clean.
+* `tools/test_payloads.py` is at **272 checks**. Every new one was perturbed to red, and two that
+  survived their first perturbation were rewritten: one passed because a *comment* named the
+  function it was meant to be testing.
 ## [Unreleased] - documentation
 
 A pass over every document in the repository, splitting what a reader needs from what we wrote for

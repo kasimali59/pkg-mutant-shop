@@ -134,7 +134,8 @@ echo "== syntax check"
   "$HERE/server_ps4.c" || { echo "ABORT: server_ps4.c does not compile." >&2; exit 1; }
 
 echo "== link"
-"$SDK/bin/orbis-clang" -Wall -g -DPORT="$PORT" $EXTRA \
+# -ffile-prefix-map: see the note in the PS5 build. Debug paths only; codegen is unchanged.
+"$SDK/bin/orbis-clang" -Wall -g -ffile-prefix-map="$HOME"=/build -DPORT="$PORT" $EXTRA \
   -o "$OUT" "$HERE/server_ps4.c" \
   -lSceAppInstUtil -lSceUserService -lSceSystemService
 
