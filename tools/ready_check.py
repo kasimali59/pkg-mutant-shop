@@ -140,6 +140,10 @@ def offline():
         "%s bundle=%s disk=%s" % (how, (emb_sha or "?")[:12], disk_sha[:12]))
 
     for tool, args in (("check_web.py", []), ("message_report.py", ["--check"]),
+                       # A control byte in source hides itself: a terminal prints 0x08 by
+                       # moving the cursor back, so a broken regex renders as if it were
+                       # right and the check it belongs to passes whatever the code does.
+                       ("check_control_chars.py", []),
                        ("i18n_report.py", ["--check"]), ("test_storage_tiles.py", []),
                        ("test_mods_tabs.py", []),
                        ("test_console_tracker.py", []),

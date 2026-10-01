@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.88.1"
+VERSION = "3.89.0"
 
 _BUILD_ID = None
 
@@ -3244,12 +3244,17 @@ class Library:
                 if _it.get("kind") != "homebrew":
                     continue
                 _p = payload_engine.local_path(self.cfg, _it)
-                if not _p or _it.get("shape") != "pkg":
-                    continue          # a folder-shaped app is a backup, not a package to serve
+                if not _p:
+                    continue
+                # A FOLDER-SHAPED APP IS REGISTERED TOO, and that is what makes it installable.
+                # It is not served over HTTP - the mount lane pushes it into the drive
+                # ShadowMountPlus watches, exactly as it does for a game stored unpacked, and that
+                # lane finds its source through this same registry. Skipping it here is why
+                # pressing Install on RetroArch could only ever answer "that is a folder".
                 _k = payload_engine.serve_key(_it)
                 reg[_k] = _p
                 try:
-                    sizes[_k] = os.path.getsize(_p)
+                    sizes[_k] = (_it.get("size") or 0) if os.path.isdir(_p) else os.path.getsize(_p)
                 except OSError:
                     pass
         except Exception as _e:
@@ -9921,12 +9926,17 @@ class Handler(BaseHTTPRequestHandler):
         if what == "install":
             if it.get("kind") != "homebrew":
                 return self._json({"ok": False, "message": "That is a payload, not a homebrew."}, 400)
-            if it.get("shape") != "pkg":
-                # RetroArch is an app FOLDER, which is what ShadowMountPlus mounts. Sending it down
-                # the package lane fails in a way that reads as a broken install engine.
+            # A FOLDER APP IS NOT A PACKAGE, AND IT IS NOT A REFUSAL EITHER. It goes to the
+            # drive ShadowMountPlus watches and mounts itself from there - which is exactly what a
+            # game stored unpacked already does, so it takes the same lane rather than a new one.
+            # _install() routes it on what the registered path IS: a directory goes to the mount
+            # lane, a file to the package lane, and nothing here has to tell them apart.
+            if it.get("shape") != "pkg" and str(it.get("platform") or "").upper() != "PS5":
+                # ShadowMountPlus is a PS5 payload. There is nothing on a PS4 that mounts a folder
+                # as a title, so this would copy 260 MB to a console that cannot use it.
                 return self._json({"ok": False,
-                                   "message": "%s is a folder, not a package - it goes on a drive "
-                                              "the console mounts." % title}, 400)
+                                   "message": "%s is a folder app, and only the PS5 can mount one."
+                                              % title}, 400)
             key = payload_engine.serve_key(it)
             if key not in srv.library.file_registry:
                 return self._json({"ok": False, "message": "%s is not on this PC." % title}, 400)
@@ -9940,7 +9950,12 @@ class Handler(BaseHTTPRequestHandler):
             # install lane, and it was not copying the flag across - so asking this endpoint what
             # it WOULD do performed a real install instead. That is the exact trap /api/install
             # grew dry_run for in the first place, reintroduced one layer up.
-            return self._install({"install_key": key, "name": title, "kind": "base",
+            return self._install({"install_key": key, "name": title,
+                                  "kind": "backup" if it.get("shape") != "pkg" else "base",
+                                  # Which drive a folder app lands on. The mount lane resolves
+                                  # drive-or-storage-or-ext1 itself; passing it through means the
+                                  # panel can offer a picker later without touching this route.
+                                  "drive": body.get("drive") or body.get("storage") or "",
                                   "title_id": it.get("title_id") or "",
                                   "content_id": it.get("content_id") or "",
                                   "version": it.get("version") or "",

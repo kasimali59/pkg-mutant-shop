@@ -51,7 +51,7 @@
 #ifndef PORT
 #define PORT 8710
 #endif
-#define SHOP_VERSION "3.88.1"
+#define SHOP_VERSION "3.89.0"
 /* WHICH BINARY IS THIS? SHOP_VERSION is hand-edited, so two different builds can carry the
    same number - and on 2026-08-25 two did, which is why nothing could say which one was
    answering on :8710 when the console died. __DATE__/__TIME__ are filled in by the
@@ -7967,9 +7967,15 @@ static void handle(int fd, const char *rawpath, const char *req) {
         }
         char apps[3200];
         app_ids_json(apps, sizeof(apps));
-        char esc2[400], out[2600];
+        /* BIG ENOUGH FOR ITS PARTS, WHICH out[2600] WAS NOT. This reply carries live[760] +
+           have[1400] + apps[3200] + have_p[900] + esc2[400] plus the JSON around them - close to
+           6.7 KB at worst - and snprintf truncates silently. It did: adding shop_version pushed the
+           PS5's answer to exactly 2599 bytes and the page got invalid JSON, which is the same shape
+           of failure a 900-byte buffer once caused by cutting a 117-entry title list off at 72.
+           Sized from the parts, and the truncation is reported rather than left to be discovered. */
+        char esc2[400], out[8192];
         json_escape(g_pb_log, esc2, sizeof(esc2));
-        snprintf(out, sizeof(out),
+        int _n = snprintf(out, sizeof(out),
                  "{\"ok\":true,\"on_console\":true,\"platform\":\"PS5\",\"console\":\"%s\","
                  /* THE BUILD THAT IS ANSWERING. Our own tile used to show the version recorded in
                     the catalogue baked into this ELF - which is the version the OWNER'S FOLDER
@@ -7982,6 +7988,9 @@ static void handle(int fd, const char *rawpath, const char *req) {
                  "\"bundled\":%d,\"status\":\"%s\","
                  "\"state\":{\"live\":[%s],\"kept\":[%s],\"apps\":[%s],\"have\":[%s]}}",
                  console_id(), HB_DIR, PAYLOAD_BUNDLE_COUNT, esc2, live, have, apps, have_p);
+        if (_n >= (int)sizeof(out))
+            ilog("payloads: reply needed %d bytes but the buffer is %d - it was truncated",
+                 _n, (int)sizeof(out));
         send_json(fd, out);
         return;
     }
@@ -9017,13 +9026,25 @@ static int pm_running(const char *filename) {
 static const char *APP_DATA_ROOTS[] = { "/user/app", "/mnt/ext0/user/app",
                                         "/mnt/ext1/user/app", "/mnt/ext2/user/app", NULL };
 
-/* app.pkg WITH BYTES is the only honest proof. 1 when this title really has its data. */
+/* Does this title really have its data? Two ways, and only two.
+
+   app.pkg WITH BYTES is the proof for anything the console INSTALLED - it is what the install lane
+   itself waits for before it will call a job done.
+
+   mount.lnk is the proof for a title that is MOUNTED rather than installed: a folder app sent to
+   the drive ShadowMountPlus watches has no app.pkg and never will, because nothing was installed -
+   the container is mounted in place. This file is what ShadowMount leaves for exactly that, and it
+   is what this same server already looks for when it is asked whether a container is mounted. A
+   title the owner can start from the home screen that this function called "not installed" is a
+   wrong answer, whichever of the two routes put it there. */
 static int title_has_data(const char *tid) {
     for (int i = 0; APP_DATA_ROOTS[i]; i++) {
         char p[700];
         struct stat st;
         snprintf(p, sizeof(p), "%s/%s/app.pkg", APP_DATA_ROOTS[i], tid);
         if (stat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) return 1;
+        snprintf(p, sizeof(p), "%s/%s/mount.lnk", APP_DATA_ROOTS[i], tid);
+        if (stat(p, &st) == 0) return 1;
     }
     return 0;
 }

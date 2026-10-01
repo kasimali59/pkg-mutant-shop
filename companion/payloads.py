@@ -189,8 +189,43 @@ def local_path(cfg, item):
 
 
 def serve_key(item):
-    """The /library/<key> key a homebrew is served under. Stable, and never a real title's key."""
-    return SERVE_PREFIX + (item.get("path") or item.get("id") or "").replace("\\", "/")
+    """The /library/<key> a homebrew is served under.
+
+    IT HAS TO BE CLEAN, AND THAT IS NOT TIDINESS - IT IS THE WHOLE INSTALL.
+
+    This used to be the file's path inside the owner's folder, verbatim. The console is handed that
+    as a URL and gives it to its own installer, and **BGFT cannot fetch a URL with spaces or
+    brackets in it**. Measured on the PS4, in its own install log:
+
+        install: register failed rc=0x80991400 id=ED1633-PKGI13337_00-...
+                 uri=http://10.0.0.76:8710/library/PMS-HOMEBREW/Homebrews/PS4/PKGI PS4/FPKGi_...pkg
+
+    One space, in a folder the owner named "PKGI PS4". Itemzflow installed perfectly from the next
+    folder along because that one happens to be called "Itemzflow". That is the entire difference
+    between the homebrew that worked and the ones that did not, and it caught FPKGi on both
+    consoles, PS4-Xplorer (spaces AND brackets) and the PS5's Internet Browser.
+
+    Percent-escaping does not help - the PS5's own local lane says so from its own measurements:
+    "It cannot fetch a percent-escaped URL ... the same request with a clean name returns res:0,
+    the escaped one 'install failed'." That lane solves it by serving through a token url. This is
+    the same answer for the lane where the PC does the serving.
+
+    GAMES NEVER HIT THIS because the library renames them on disk - normalise_pkg_names() rewrites
+    any stem with characters outside [A-Za-z0-9._-]. Homebrews are deliberately NOT in
+    library.local_paths (that renamer would rewrite the owner's own files), so nothing was cleaning
+    their names and nothing was meant to: the fix belongs here, on the way out, not on their disk.
+
+    Built from the title id and the platform because both are stable, so a package that is renamed
+    or moved inside the owner's folder keeps the same URL. It ends in .pkg because a url that does
+    not is refused outright with 0x80990033.
+    """
+    plat = str((item or {}).get("platform") or "").upper()
+    ident = str((item or {}).get("id") or "")
+    key = re.sub(r"[^A-Za-z0-9._-]+", "-", "%s-%s" % (plat or "ANY", ident or "item")).strip("-")
+    # Only a package gets the extension. A folder app is never fetched over HTTP by the console -
+    # it is pushed into the drive ShadowMountPlus watches - so calling its key ".pkg" would be a
+    # label that lies, and the install lane keys its routing off what the path actually is.
+    return SERVE_PREFIX + key + (".pkg" if (item or {}).get("shape") == "pkg" else "")
 
 
 def items_for(web_dir, platform=None, kind=None):

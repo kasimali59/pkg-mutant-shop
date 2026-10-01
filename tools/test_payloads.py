@@ -417,6 +417,12 @@ def main():
         # comment can satisfy is not a check.
         ok("title_has_data(de->d_name)" in _fn or "installed_app_pkg(de->d_name)" in _fn,
            "%s: ...it requires the title's own app.pkg" % _name)
+    # A MOUNTED TITLE HAS NO app.pkg AND NEVER WILL - nothing was installed, the container is
+    # mounted in place. ShadowMount leaves mount.lnk for exactly that, and this server already
+    # looks for it elsewhere. RetroArch is a folder app and would otherwise read "not installed"
+    # while sitting on the home screen.
+    _thd = _ps5c.split("static int title_has_data(", 1)[1].split(_NXT, 1)[0]
+    ok("mount.lnk" in _thd, "PS5: a MOUNTED title counts as present too")
     ok("APPMETA_ROOTS" not in _ps5c and "APPMETA_ROOTS" not in _ps4c,
        "neither console still defines the appmeta roots")
 
@@ -491,6 +497,68 @@ def main():
     # finished transfer into "installed"; without it this route reported busy for ever even after
     # the busy test itself was correct.
     ok("job_refresh()" in _st, "...after asking the console what the job is actually doing")
+
+    # ---- THE URL THE CONSOLE IS HANDED MUST BE CLEAN -------------------------------------------
+    # BGFT cannot fetch a URL with spaces or brackets in it, and percent-escaping does not help -
+    # the PS5's local lane proved that and solved it with a token url. The PC-served lane was still
+    # handing over the file's path verbatim, so one space in a folder the owner named "PKGI PS4"
+    # was the whole difference between the homebrew that installed and the ones that did not.
+    # Measured in the PS4's own log: register failed rc=0x80991400 ... uri=.../PKGI PS4/FPKGi....pkg
+    import re as _re
+    _bad = _re.compile(r"[^A-Za-z0-9._/-]")
+    for _it in items:
+        if _it.get("kind") != "homebrew":
+            continue
+        _k = _P.serve_key(_it)
+        ok(not _bad.search(_k),
+           "the serve key for %s has nothing a console installer cannot fetch" % _it["title"][:22],
+           _k)
+        if _it.get("shape") == "pkg":
+            ok(_k.endswith(".pkg"),
+               "...and a package's key ends in .pkg (a url that does not is refused outright)", _k)
+    # Distinct per item, or two homebrews would serve each other's bytes.
+    _keys = [_P.serve_key(i) for i in items if i.get("kind") == "homebrew"]
+    ok(len(_keys) == len(set(_keys)), "every homebrew serves under its own key",
+       "%d keys, %d distinct" % (len(_keys), len(set(_keys))))
+
+    # ---- A FOLDER APP IS INSTALLABLE, NOT A REFUSAL --------------------------------------------
+    # RetroArch is an app FOLDER. It goes to the drive ShadowMountPlus watches and mounts itself,
+    # which is exactly what a game stored unpacked already does - so it takes that same lane. The
+    # registry skipped folder-shaped items, so pressing Install could only ever answer "that is a
+    # folder, not a package".
+    _reg = srv.split("catalogue not registered", 1)[0]
+    _tail = _reg[-1400:]
+    ok('_it.get("shape") != "pkg"' not in _tail,
+       "folder-shaped homebrews are registered, so the mount lane can find them")
+    _act2 = srv.split("def _payloads_act(", 1)[1].split(_NXT, 1)[0]
+    ok('"PS5"' in _act2 and "folder app" in _act2,
+       "...and a folder is refused only on the console that cannot mount one")
+    ok('"backup" if it.get("shape") != "pkg" else "base"' in _act2,
+       "...and goes down the backup lane rather than the package lane")
+
+    # ---- THE REPLY BUFFER MUST FIT ITS PARTS ---------------------------------------------------
+    # snprintf truncates in silence. out[2600] held a reply whose parts total about 6.7 KB, so the
+    # PS5 answered exactly 2599 bytes of invalid JSON the moment one more field was added - the same
+    # shape of failure a 900-byte buffer once caused by cutting a 117-entry title list off at 72.
+    # COMMENTS ARE NOT CODE, and this check read one. The note above the buffer explains the bug by
+    # naming the old size, so the pattern found "out[2600]" in prose and measured that - which is
+    # why shrinking the real buffer back to 2600 left this green. Strip comments first.
+    import re as _re2
+    _pl = _ps5c.split('if (!strcmp(path, "/api/payloads"))', 1)[1][:9000]
+    _pl = _re2.sub(r"/\*.*?\*/", "", _pl, flags=_re2.S)
+    # FIRST occurrence of each, not the last. `out` shares a line with esc2 so anchoring on "char "
+    # missed it - and a dict comprehension over every match then picked up the NEXT route's own
+    # out[340] instead, which made this check pass with the buffer shrunk back to 2600. A check that
+    # survives its own perturbation is not a check.
+    _sizes = {}
+    for _m in _re2.finditer(r"\b(live|have|apps|have_p|esc2|out)\[(\d+)\]", _pl):
+        _sizes.setdefault(_m.group(1), int(_m.group(2)))
+    _need = sum(v for k, v in _sizes.items() if k != "out")
+    ok(_sizes.get("out", 0) >= _need,
+       "the /api/payloads reply buffer is at least as big as the parts it concatenates",
+       "out=%d, parts=%d %s" % (_sizes.get("out", 0), _need, _sizes))
+    ok("it was truncated" in _pl,
+       "...and says so if it ever is, instead of sending half a document")
 
     if fails:
         print("test_payloads: FAIL")

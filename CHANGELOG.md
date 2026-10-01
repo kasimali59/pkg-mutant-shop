@@ -9,6 +9,94 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.89.0] - 2026-10-01 - "One space in a folder name" `[VERIFIED]`
+
+Every homebrew in the panel installs now, on both consoles. Only one of them ever did.
+
+### The bug was a space in a URL
+
+The console is handed a URL and gives it to its own installer, and **BGFT cannot fetch a URL with
+spaces or brackets in it**. The PC was serving each homebrew under its path inside the owner's
+folder, verbatim. From the PS4's own install log:
+
+```
+install: register failed rc=0x80991400 id=ED1633-PKGI13337_00-...
+         uri=http://10.0.0.76:8710/library/PMS-HOMEBREW/Homebrews/PS4/PKGI PS4/FPKGi_v1.10.0-release.pkg
+```
+
+One space, in a folder the owner had named `PKGI PS4`. **Itemzflow installed perfectly from the
+folder next to it because that one is called `Itemzflow`.** That is the entire difference between
+the homebrew that worked and every one that did not - and it is why the owner's instinct was right:
+*"itemzflow worked normally so it has the right install path, make fpkgi use the same."*
+
+It caught FPKGi on both consoles, PS4-Xplorer (spaces **and** brackets) and the PS5's Internet
+Browser - which this project had previously written off as *"the console's decision, let the console
+decide"*. It was never the console's decision.
+
+**Games never hit it** because the library renames them on disk: `normalise_pkg_names()` rewrites
+any stem with characters outside `[A-Za-z0-9._-]`. Homebrews are deliberately **not** in
+`library.local_paths`, because that renamer would rewrite the owner's own files - so nothing was
+cleaning their names, and nothing should. The fix belongs on the way out, and that is where it is:
+`serve_key()` is now built from the title id and the platform, which are stable, so a package that
+is renamed or moved inside the folder keeps the same URL. It still ends in `.pkg`, because a URL
+that does not is refused outright with `0x80990033`.
+
+Percent-escaping is not a fix and was never an option - the PS5's own local lane measured that and
+says so: *"It cannot fetch a percent-escaped URL ... the same request with a clean name returns
+res:0, the escaped one 'install failed'."*
+
+**Installed, on hardware, in this order:** FPKGi on the PS4, then PS4-Xplorer, then FPKGi on the
+PS5, then the Internet Browser. All four reached "Ready to play". The PS4's log tells the whole
+story in two lines - `register failed rc=0x80991400 ... /PKGI PS4/FPKGi...pkg` and then
+`install: started task=338 ... /PS4-PKGI13337.pkg`.
+
+### A folder app goes to the drive that mounts it
+
+RetroArch is an app **folder** - 2,994 files, 268 MB - and the panel used to refuse it with "that is
+a folder, not a package". The owner's instruction was to send it where ShadowMountPlus picks it up,
+the same way the app already handles a game stored unpacked.
+
+It turned out that lane was already complete: `_install()` routes on what the registered path **is**
+(a directory goes to the mount lane, a file to the package lane), the recursive folder push has been
+in the queue worker all along, and the console needs no new route. The only thing missing was that
+folder-shaped homebrews were never **registered**, so the lane could not find them. They are now, and
+a press sends RetroArch to `/mnt/ext1/homebrew` and ShadowMountPlus mounts it. Verified: **"Mounted -
+ready to play"**, and the folder is on the drive.
+
+**PS5 only**, as instructed - ShadowMountPlus is a PS5 payload, and a PS4 asked for a folder app is
+told why rather than being sent 268 MB it cannot use.
+
+### A mounted title is installed
+
+`title_has_data()` required the title's own `app.pkg` with bytes. A mounted folder app has none and
+never will - nothing was installed, the container is mounted in place - so RetroArch sat on the home
+screen while the panel called it "not installed". `mount.lnk` is what ShadowMount leaves for exactly
+this, and this server already looks for it elsewhere; now the installed check does too.
+
+### Two things found while proving the rest
+
+**The PS5's reply was silently truncated.** `/api/payloads` built its JSON in `out[2600]` while its
+parts - live, have, apps, have_p and the boot log - total about 6.7 KB. Adding one field pushed it
+over, and the console answered exactly 2599 bytes of invalid JSON. snprintf does not complain. The
+buffer is sized from its parts now and says so if it is ever short, and a check compares the two.
+The same shape of failure once cut a 117-entry title list off at 72.
+
+**A gate could not fail, for the second time in this project's history, for the same reason.** A
+regex in the test suite had been written as a word boundary and reached the file as a literal
+**backspace byte**: it matched nothing, so the check passed whatever the code did - which is how it
+was found, by perturbing the code and watching it stay green. A terminal prints 0x08 by moving the
+cursor back, so the broken line renders as though it were correct.
+
+`tools/check_control_chars.py` now refuses any tracked text file carrying a control byte that is not
+a tab, newline or carriage return - 4,331 files, and it was perturbed to red by putting the
+backspace back.
+
+### Gates
+
+`tools/test_payloads.py` is at **298 checks**. The serve key is checked against every catalogue entry
+for anything a console installer cannot fetch, and for uniqueness; the folder lane is pinned at the
+registry, the refusal and the lane choice. Every new check was perturbed to red - and three that
+first passed while the fix was reverted were rewritten until they could fail.
 ## [3.88.1] - 2026-10-01 - "The PS4's install lane was reporting itself busy for ever" `[VERIFIED]`
 
 Found while testing 3.88.0 on the consoles, by trying the install the owner had reported.
