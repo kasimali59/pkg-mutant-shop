@@ -73,6 +73,16 @@ def main():
     st = read(os.path.join(HERE, "stamp_version.py"))
     ok("README" in st and "badge/version-" in st,
        "tools/stamp_version.py stamps the README, rather than leaving it to be typed")
+    # ...AND BECAUSE IT STILL FINDS THEM. Checking that the values agree is not enough: reword the
+    # text around a stamp point and the values still agree while the stamper can no longer place it,
+    # and stamp_version EXITS NON-ZERO - which aborts both console builds. That is exactly what a
+    # reworded firmware cell did here, with every value correct and check_docs green.
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(HERE, "stamp_version.py")],
+                       capture_output=True, text=True)
+    ok(r.returncode == 0,
+       "tools/stamp_version.py can still find every stamp point",
+       (r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout + r.stderr).strip() else "")
 
     # ---- THE RELEASE NOTES ---------------------------------------------------------------------
     names = sorted(f for f in os.listdir(NOTES_DIR) if f.startswith("v") and f.endswith(".md"))

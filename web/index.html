@@ -671,8 +671,19 @@ main{flex:1 1 auto;overflow-y:scroll;scrollbar-gutter:stable;padding:18px 18px 2
 #phb .phbhead > .backbtn,#phb .phbhead > .iconbtn,#phb .phbhead > .btn,
 #phb .phbhead > .seg,#phb .phbhead > .updrop{flex:0 0 auto}
 @media (max-width:760px){
+  /* TWO ROWS, NOT THREE. The title took a whole row of its own (flex:1 1 100%), which left Back,
+     the console tabs and the Updates pill to fill the second - and pushed the close button onto a
+     third, alone and left-aligned under everything, where it reads as a stray control rather than
+     the way out. Measured at 375px: a 159px header on an 812px screen, for five controls.
+
+     The title shares row one with the close button instead, which is where a close button belongs
+     and where a thumb expects it; row two is the three things you actually press. */
   #phb .phbhead{flex-wrap:wrap}
-  #phb .phbhead > h2{order:-1;flex:1 1 100%;text-align:left}
+  #phb .phbhead > h2{order:-2;flex:1 1 auto;text-align:left;font-size:13px}
+  #phb .phbhead > #closePHB{order:-1;margin-left:auto}
+  #phb .phbhead > .backbtn{order:1}
+  #phb .phbhead > .seg{order:2}
+  #phb .phbhead > .updrop{order:3;margin-left:auto}
 }
 
 /* THE UPDATES DROPDOWN. It used to be a band across the top of the panel body, which cost a strip
@@ -1114,6 +1125,27 @@ html{scroll-behavior:smooth}
     padding-left:calc(12px + env(safe-area-inset-left,0px));
     padding-right:calc(12px + env(safe-area-inset-right,0px))}
   .filtercol{flex:1 1 100%}
+  /* ---- A ROW THAT SCROLLS SIDEWAYS HAS TO LOOK LIKE ONE ------------------------------------
+     Both of these hide their scrollbar, which is right on a touch screen and leaves no sign that
+     anything is off the edge. Measured at 375px: the drive strip is 1039px wide in a 351px box, so
+     688px - four of its five tiles - were simply invisible, and the filter row cut "Add-ons" in
+     half. A tile sliced down the middle reads as a broken layout, not as "scroll me".
+     The fade says there is more; the snap makes a flick land on a tile instead of between two. */
+  /* #filter is the other sideways row - All / Installed / Not installed / Updates / Add-ons -
+     and at 375px its five chips are wider than the screen. It was not scrollable at all, so the
+     last chip was simply unreachable. */
+  .filtercol > #filter{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+    max-width:100%}
+  .filtercol > #filter::-webkit-scrollbar{display:none}
+  .filtercol > #filter > button{flex:0 0 auto}
+  .segrow,.drives,.filtercol > #filter{
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 26px),transparent);
+            mask-image:linear-gradient(90deg,#000 calc(100% - 26px),transparent);
+    scroll-snap-type:x proximity}
+  .segrow > *,.drives > *,.filtercol > #filter > *{scroll-snap-align:start}
+  /* ...and no fade once there is nothing left to show, so the last tile is never dimmed for no
+     reason. `scroll-snap-align` keeps working; only the mask is dropped. */
+  .segrow.atend,.drives.atend,.filtercol > #filter.atend{-webkit-mask-image:none;mask-image:none}
   .segrow{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .segrow::-webkit-scrollbar{display:none}
   .seg{flex:0 0 auto}
@@ -1130,29 +1162,77 @@ html{scroll-behavior:smooth}
     padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
 
 
-  /* ---- THE TOP BAR, in four deliberate rows instead of five accidental ones ----------------
-     Every child gets an explicit order, and these are the ONLY orders set for the header on a
-     phone - the earlier max-width:640px block used to set them too, and the pair resolved by
-     source position.
-       row 1  logo + console status
-       row 2  the install queue, full width
-       row 3  the three icon buttons + the search field, which takes the rest
+  /* ---- THE TOP BAR, in four deliberate rows ------------------------------------------------
+       row 1  logo + console picker + console status
+       row 2  the three icon buttons + the search field, which takes the rest
+       row 3  the install queue and the Payloads & Homebrews button, side by side
        row 4  the library summary
-     Measured at 375px: 98 + 230 fits row 1, and 3 x 44 + gaps + a 140px minimum search fits
-     row 3 (290 of 351), so nothing wraps into a fifth line. */
+
+     ORDER APPLIES TO FLEX ITEMS, SO IT MUST NAME DIRECT CHILDREN OF <header> - AND EVERY ONE OF
+     THEM. Two things broke that and the header came apart on every phone:
+
+       * `.dock{order:3}` named the queue, which is NOT a child of the header - it lives inside
+         `.qcol` (that wrapper exists so the Payloads button sits under the queue by construction).
+         A flex `order` on a grandchild does nothing at all, so the rule was dead the day .qcol was
+         added and the "row 2 = the install queue" above it was never true.
+       * `.qcol` and `#consoleSel` were never given one. An item with no order defaults to 0, which
+         sorts BEFORE order:1 - so the Payloads & Homebrews button, the whole install queue and the
+         console picker all jumped above the logo. Measured at 375px: the header was 319px of an
+         812px screen, in five ragged rows, with the icon buttons interleaved between the console
+         status and the search field.
+
+     So every direct child is listed here, in one place, and nothing is left to default. The gate
+     tools/check_web.py refuses a header child that has no order in this block. */
   .brand{order:1}
-  #conn{order:2;flex:1 1 auto;min-width:0;overflow:hidden}
+  #consoleSel{order:2;flex:0 1 auto;min-width:0;max-width:44%}
+  /* A SMALL BASIS SO IT RIDES ROW 1 INSTEAD OF CLAIMING ONE. Flex decides where to break on an
+     item's BASE size, not on the size it would shrink to - so with basis:auto the pill measured its
+     full ~192px of text, 98 + 126 + 192 overflowed 351, and it wrapped onto a row of its own: 44px
+     of a phone screen for one line of status. With a 60px basis it fits beside the logo and the
+     console picker and then grows into whatever is left, truncating its text as it always has. */
+  #conn{order:3;flex:1 1 60px;min-width:0;overflow:hidden}
   #connText{min-width:0;overflow:hidden;text-overflow:ellipsis}   /* clipped mid-word before */
-  .dock{order:3;flex:1 1 100%}
+  /* THE QUEUE AND THE BUTTON SIT SIDE BY SIDE HERE, not stacked. Stacked they were 101px of a
+     375px-wide screen for two controls that are each one line tall. */
+  /* They share a row when there is room and stack when there is not: at 320px the button left the
+     pill about 140px and the pill wrapped inside itself, which looks like a fault rather than a
+     narrow screen. A 180px basis on the queue makes the BUTTON drop to its own line instead - the
+     whole control moves, and both stay one line each. */
+  .qcol{order:8;flex:1 1 100%;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+  .qcol .dock{flex:1 1 180px;min-width:0}
+  .qcol #openPHB{flex:0 0 auto;white-space:nowrap}
+  /* THE PILL FITS ON ONE LINE BECAUSE TWO BUTTONS LEAVE IT. Measured at 375px: the head's children
+     come to 226px of content in the 193px the row can give it, so it wrapped to 77px - and
+     align-items:stretch then dragged the Payloads button to 77px alongside it, which is what made
+     the whole row look broken. Both of these are recovery actions for a PC:
+       reloadDpi  clears whatever the last install left on the console - and its own tooltip says
+                  the app already does this after every install, so it is the manual button for
+                  when something looks stuck, not part of installing.
+       clearDone  tidies finished rows out of the list; the rows are cosmetic and the queue is read
+                  far more often than it is tidied.
+     Without them the head is 165px of content and stays one 44px line, with the count, the ring and
+     the chevron - which is what the pill is for on a phone. Both are still there on a PC and on the
+     TV, where there is room for them. */
+  .dockhead #reloadDpi, .dockhead #clearDone{display:none}
   /* The pill is one nowrap line of ring + label + count + Start queue + two buttons + chevron,
      which at 375px ran past the row. It wraps here, and the label shortens before anything else. */
   .dockhead{height:auto;min-height:34px;flex-wrap:wrap;padding:4px 11px;gap:4px 9px}
   .dockhead .lbl{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
   #rescanTop{order:4} #restQuick{order:5} #openSettings{order:6}
   .search{order:7;flex:1 1 140px;min-width:140px;max-width:none;flex-basis:140px}
-  .hrow2{order:8;flex:1 1 100%;margin-top:0}
+  .hrow2{order:9;flex:1 1 100%;margin-top:0}
   .hrow2 .tag{display:none}
   .hrow2 .srcbar{justify-content:flex-start;gap:10px;font-size:11px}
+  /* THE SUMMARY KEEPS THE ONE PART A PHONE CAN USE. It is three spans: how many titles, the
+     LIBRARY FOLDER ON THE PC, and which source was picked. The last two are reference for whoever
+     is sitting at that PC - a Windows path is not something you can act on from a phone - and
+     together they wrapped the row onto a second line, 42px between the controls and the games.
+     The title count stays, because it is the one number that describes what you are looking at.
+
+     The spans and not the bar: #srcbar carries an INLINE display:flex, written by updateSrcBar()
+     every time it refreshes, and an inline style beats any rule in this sheet. Hiding the bar here
+     looked right and did nothing at all. */
+  .hrow2 .srcbar > span:nth-child(n+2){display:none}
 
   /* ---- THE QUEUE STOPS FALLING OFF THE SCREEN ----------------------------------------------
      .dockbody is absolutely positioned and centred on the PILL (left:50% + translateX(-50%)),
@@ -12662,6 +12742,35 @@ function virtOnScroll(e){
   if(window.requestAnimationFrame) _virtTick=requestAnimationFrame(run);
   _virtTimer=setTimeout(run,80);
 }
+/* ---- SIDEWAYS SCROLLERS SAY WHEN THERE IS MORE ---------------------------------------------
+   The filter row and the drive strip hide their scrollbars - right on a touch screen, and no sign
+   at all that anything is off the edge. Measured on a 375px phone: the drive strip was 1039px wide
+   in a 351px box, so four of its five tiles were invisible and the filter row cut "Add-ons" in
+   half. CSS fades the right edge to say "there is more"; this takes the fade away once there is
+   not, so the last tile is never dimmed for nothing.
+
+   Cheap on purpose: two elements, read on scroll and on resize, and a class toggled only when it
+   actually changes. 1px of slack because scrollLeft is fractional on a zoomed page. */
+function edgeFade(el){
+  if(!el) return;
+  /* classList.toggle(name, force) is not supported by the console's browser - check_web.py
+     refuses it - so this is add/remove. */
+  var more = (el.scrollWidth - el.clientWidth - el.scrollLeft) > 1;
+  if(more) el.classList.remove("atend"); else el.classList.add("atend");
+}
+function edgeFadeAll(){
+  var i, els = document.querySelectorAll(".segrow,#drives,#filter");
+  for(i=0;i<els.length;i++) edgeFade(els[i]);
+}
+document.addEventListener("scroll",function(e){
+  var t=e.target;
+  if(t&&t.classList&&(t.classList.contains("segrow")||t.id==="drives"||t.id==="filter")) edgeFade(t);
+},true);
+window.addEventListener("resize",edgeFadeAll,{passive:true});
+/* The drive strip is rebuilt whenever the library or a console answers, so re-check after a paint
+   rather than only on scroll - otherwise a strip that fits would keep a fade it does not need. */
+setInterval(edgeFadeAll,1500);
+
 /* Listen in the capture phase on the document: scroll does not bubble, and the
    container can be replaced when the view re-renders. */
 document.addEventListener("scroll",virtOnScroll,true);

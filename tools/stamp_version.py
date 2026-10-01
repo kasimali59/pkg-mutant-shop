@@ -45,7 +45,12 @@ TARGETS = (
 # version because it moves on its own clock - a console firmware, not a release of ours.
 FW_TARGETS = (
     (README, rb'(badge/PS5-)([0-9.]+)(-2a6fdb)', "README.md PS5 firmware badge"),
-    (README, rb'(\| PlayStation 5 \| )([0-9.]+)( \|)', "README.md supported-firmware table"),
+    # THE NUMBER, WHATEVER IS WRITTEN AROUND IT. This matched the cell exactly - "| PlayStation 5 |
+    # 13.60 |" - so rewording it to "up to **13.60**" left no stamp point and stamp_version refused,
+    # which ABORTS both console builds. The prose in that cell is free to change; the version in it
+    # is what is being stamped.
+    (README, rb'(\| PlayStation 5 \|[^|0-9]*)([0-9]+\.[0-9]+)([^|]*\|)',
+     "README.md supported-firmware table"),
 )
 
 
