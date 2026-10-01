@@ -243,13 +243,36 @@ def check_tree(tag, dry):
     say("  working tree is clean and %s is free" % tag)
 
 
-def changelog_section(want):
-    """This version's own section of CHANGELOG.md, as the release notes.
+NOTES_DIR = "docs/release-notes"
 
-    The notes are not written twice. If the changelog does not have a section for this version then
-    the release has no notes, and that is a reason to stop: a release nobody can read is a payload
-    people are asked to trust on the strength of a version number.
+
+def release_notes(want):
+    """The short, user-facing notes for this version.
+
+    THESE ARE NOT THE CHANGELOG. The changelog is the engineering record - long, exact, and written
+    for whoever has to understand why something is the way it is. A release note is read by someone
+    deciding whether to download 90 MB onto a console, and it should answer that in a few lines:
+    what is new, what is fixed, what they have to do. Everything else is one link away.
+
+    So the notes live in docs/release-notes/v<version>.md and are written by hand. Generating them
+    from the changelog was tried and is what put an internal note - including the name of a GitHub
+    account that has nothing to do with this project - in front of every reader of the first
+    release. A file that has to be written on purpose cannot leak a sentence nobody meant to send.
     """
+    p = os.path.join(ROOT, NOTES_DIR, "v%s.md" % want)
+    if not os.path.isfile(p):
+        die("there are no release notes for %s.\n"
+            "       Write %s/v%s.md first - a few short, user-facing lines: what is new, what is\n"
+            "       fixed, and anything they have to do. The changelog is the long version."
+            % (want, NOTES_DIR, want))
+    text = io.open(p, encoding="utf-8").read().strip()
+    if not text:
+        die("%s/v%s.md is empty." % (NOTES_DIR, want))
+    return text
+
+
+def changelog_section(want):
+    """This version's own section of CHANGELOG.md. Used only to check that one exists."""
     p = os.path.join(ROOT, "CHANGELOG.md")
     s = io.open(p, encoding="utf-8", errors="replace").read().splitlines()
     start = None
@@ -318,7 +341,7 @@ def main():
     tag = "v" + want
 
     if a.notes_only:
-        print(changelog_section(want))
+        print(release_notes(want))
         return 0
 
     say("\nRELEASE %s%s\n" % (tag, "   (dry run - nothing will be changed)" if a.dry_run else ""))
@@ -328,12 +351,17 @@ def main():
     check_version(want)
     arts = check_artifacts(want)
     gates()
-    notes = changelog_section(want)
-    say("  release notes: %d lines from CHANGELOG.md" % len(notes.splitlines()))
+    changelog_section(want)              # the long record must exist, even though it is not the notes
+    notes = release_notes(want)
+    say("  release notes: %d lines from %s/v%s.md" % (len(notes.splitlines()), NOTES_DIR, want))
     commit = run(["git", "rev-parse", "HEAD"]).stdout.strip()[:12]
     mp, sp = write_release_dir(want, arts, commit)
 
-    uploads = [p for _rel, p, _sz, _h in arts] + [mp, sp]
+    # THE THREE ARTIFACTS, AND NOTHING ELSE. A release is a download page, not a build directory:
+    # the manifest and the checksum file were ours, and nobody downloading the app needs either to
+    # use it. The hashes are still written into release/ for us, and GitHub shows its own digest
+    # for every asset.
+    uploads = [p for _rel, p, _sz, _h in arts]
     if a.dry_run:
         say("\n  would tag %s at %s and upload:" % (tag, commit))
         for u in uploads:
