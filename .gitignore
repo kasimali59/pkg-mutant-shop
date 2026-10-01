@@ -60,3 +60,8 @@ ps5-app/onconsole/cheats.pack
 # it is simply written for us, and a stranger reading "SUPERSEDED - what is no longer true" learns
 # nothing except that our docs contradict each other.
 /internal/
+
+# Scratch written by tools/test_agent_protocol.py, which runs the agent wire protocol over a
+# real file channel. It was tracked by accident, so every run of that test dirtied the tree and
+# the release tool - correctly - refused to tag.
+ps4-app/plugin/test/chan/
