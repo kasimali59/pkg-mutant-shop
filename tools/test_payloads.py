@@ -337,6 +337,70 @@ def main():
        "/api/federation/peers reports whether peers were actually found")
     ok('"discovery": True' in _pr, "...and says discovery is always on")
 
+    # ---- A MISSING FOLDER IS MADE, NOT REPORTED ------------------------------------------------
+    # The owner's complaint: "our app is not creating the folders it needs in the users pc ... our
+    # app needs to be intelligent about everything and if it doesnt find them it creates them."
+    import tempfile, shutil
+    _d = tempfile.mkdtemp()
+    try:
+        _root = os.path.join(_d, "Mutant Payloads & HomeBrews")
+        _r = _P.ensure_source_tree({"payloads": {"root": _root}})
+        ok(_r.get("ok"), "the payloads tree is created when it is missing")
+        # DERIVED, NOT HARD-CODED. scan() walks (Payloads|Homebrews) x PLATFORMS, so the folders
+        # that get CREATED and the folders that get READ are checked against each other - a test
+        # that re-listed the four names by hand would keep passing if scan() started looking
+        # somewhere else.
+        _want = set()
+        for _top in ("Payloads", "Homebrews"):
+            for _plat in _P.PLATFORMS:
+                _want.add(os.path.join(_top, _plat))
+        ok(set(_P.SOURCE_LAYOUT) == _want,
+           "...and the layout it creates is the one scan() walks",
+           "created %s" % sorted(_P.SOURCE_LAYOUT))
+        for _sub in _want:
+            ok(os.path.isdir(os.path.join(_root, _sub)), "...%s exists on disk" % _sub)
+
+        # AN EMPTY FOLDER IS NOT AN EMPTY CATALOGUE. This is the regression creating the folder
+        # introduced: a PC with no folder used to fall into the "not a directory" branch and serve
+        # the BAKED catalogue, which is what puts the whole fleet's payloads in front of a second
+        # PC that holds none of the files. Create the folder and that branch stops being taken.
+        _cat, _sig = _P.live_catalog({"payloads": {"root": _root}}, os.path.join(ROOT, "web"))
+        ok(len(_cat.get("items") or []) > 0,
+           "a freshly created, EMPTY folder still shows the fleet's payloads",
+           "%d items" % len(_cat.get("items") or []))
+    finally:
+        shutil.rmtree(_d, ignore_errors=True)
+
+    # ---- THE PANEL HEADER IS IN THE OWNER'S ORDER ----------------------------------------------
+    # Back, the console toggle, the title, the updates dropdown, the close.
+    _ui = io.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    _hd = _ui.split('<header class="sethead phbhead">', 1)[1].split("</header>", 1)[0]
+    _order = []
+    for _id, _name in (("backPHB", "back"), ("phbTabs", "tabs"), ("phb_title", "title"),
+                       ("phbUpdrop", "updates"), ("closePHB", "close")):
+        _order.append((_hd.find(_id), _name))
+    ok(all(i >= 0 for i, _n in _order), "every header control is present",
+       ", ".join("%s@%d" % (n, i) for i, n in _order))
+    ok(_order == sorted(_order), "the header row reads back, tabs, title, updates, close",
+       " -> ".join(n for _i, n in sorted(_order)))
+
+    # ---- THE DRAWER LEAVES #phb WHEN IT OPENS, SO ITS CSS MUST NOT BE SCOPED TO IT --------------
+    # placeMenu() re-parents to <body> (any transform on an ancestor breaks position:fixed, and
+    # .sheet's overflow-y:auto clips an absolute child - measured at 310px of a nine-row drawer).
+    ok("placeMenu(b,$(\"#phbUpdHead\"))" in _ui,
+       "the updates drawer is placed by placeMenu, not by CSS offsets")
+    ok(".phbups{position:fixed" in _ui, "...and is position:fixed")
+    ok("#phb .phbups" not in _ui,
+       "...and no rule scopes it to #phb, which it is no longer inside when open")
+    ok("phbUpdOpen(false)" in _ui.split("function _showPHB", 1)[1][:600],
+       "closing the panel closes the drawer, which <body> would otherwise keep showing")
+
+    # ---- TWO MESSAGES THE OWNER ASKED TO BE RID OF ---------------------------------------------
+    ok("phb_upd_private" not in _ui,
+       "the \"our releases are private for now\" message is gone, from the code and all 15 dictionaries")
+    ok("phb_where" not in _ui,
+       "the \"that folder is not on this PC\" message is gone - the folder is created instead")
+
     if fails:
         print("test_payloads: FAIL")
         for f in fails:

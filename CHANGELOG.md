@@ -9,6 +9,87 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.87.0] - 2026-09-30 - "The app makes the folder, and the updates move into the header" `[VERIFIED]`
+
+### The repository is under the right account
+
+It was created under **LuxGoldAI**, which is not the account this project belongs to. Every
+reference now reads **XavyProd/pkg-mutant-shop** - `assets/payloads/curated.json`, the generated
+catalogue that both ELFs and the exe embed, the issue-template links, `README.md` and
+`RELEASING.md`. The old repository is being removed; it only ever held one release and nobody had
+taken it.
+
+### A missing folder is something to make, not something to announce
+
+The panel used to print **"That folder is not on this PC: C:\Mutant Payloads & HomeBrews"** across
+the top and leave the owner to go and create it - on a machine that knew the path, knew the layout,
+and had just decided it could do nothing without it. The games side had had a *Create folders*
+button in Settings since early on, which is the same job with the same knowledge behind it; the only
+thing a button added was a chance not to press it.
+
+* `ensure_tree()` and `ensure_source_tree()` make `Payloads/PS4`, `Payloads/PS5`, `Homebrews/PS4`
+  and `Homebrews/PS5`. The layout is **derived from what `scan()` walks**, so the folders that get
+  created and the folders that get read cannot drift apart - and the test derives one from the other
+  rather than listing either by hand.
+* `ensure_all_folders()` runs at startup over **every** configured library root and the payloads
+  root, before the first scan. The *Create folders* button stays: pressing it on a specific root is
+  still a sensible thing to want.
+* Failures are values, never exceptions - a drive that is not plugged in must not stop the app
+  booting.
+* **The two trees stay separate, deliberately.** The payloads root is still not in
+  `library.local_paths`: `Library.scan()` registers every `.pkg` it finds as a game and
+  `normalise_pkg_names()` **renames files on disk**, which would rewrite the owner's homebrew
+  filenames and put five homebrews on their game shelf.
+
+**And the regression that creating it introduced, caught before it shipped.** A PC with no folder
+used to fall into the "not a directory" branch and serve the *baked* catalogue - which is what puts
+all eighteen tiles in front of a second PC that holds none of the files, sourced from the console or
+a peer. Create the folder and that branch stops being taken: the scan succeeds, finds nothing, and
+the panel goes blank. An empty scan now falls back to the baked catalogue, with the live signature,
+so the first file dropped in is still noticed on the next poll.
+
+### Updates moved into the panel's header, as a dropdown
+
+The header row reads **Back · PS4/PS5 · title · Updates · close**, the owner's order. The updates
+band that used to sit across the top of the panel body is now a pill beside the close button: it
+carries the count, so there is something to see without opening anything, and its drawer floats, so
+opening it never reflows the grid behind it. Inside: every item with its own button, **Update all**,
+and **Check for updates**.
+
+*Update all* runs them **one at a time and stops at the first refusal**. Six parallel downloads over
+one connection is how a 45 MB payload and a 9 MB one both arrive truncated, and a failure halfway
+through a parallel run leaves nobody able to say which files were replaced.
+
+**Three traps this file already knew about, paid attention to rather than rediscovered:**
+
+* `.sheet` is a scroll container, so an absolutely positioned drawer inside it is **clipped** -
+  measured on the PS4 tab at **310px of a nine-row drawer simply gone**. It uses the `placeMenu()`
+  helper this file already had for exactly this, which measures, clamps to the viewport, and
+  re-parents to `<body>` first because any transform on an ancestor breaks `position:fixed`. The
+  consequence is written down: once open the drawer is **not inside `#phb`**, so none of its CSS may
+  be scoped there and closing the panel has to close the drawer explicitly.
+* A drawer that is merely transparent **keeps its buttons in the D-pad focus order** - here that
+  would be an Update button pressed with no row on screen to say what it was replacing. Verified
+  live: **0 of 5 buttons focusable** once closed.
+* `:focus`, not `:focus-visible` - the console moves focus with the D-pad and never reports the
+  heuristic `:focus-visible` waits for.
+
+### "Our own releases are private for now" is gone
+
+Along with the key behind it, in all fifteen languages. A check that cannot see a release is now
+counted with everything else that could not be checked, which is all that can honestly be said
+about it.
+
+### Gates
+
+`test_payloads.py` is at **255 checks**. Seven new ones cover the folder tree, the empty-folder
+fallback, the header order, the fixed drawer, the panel-close coupling and both removed messages -
+each perturbed to red before being kept. A note for next time, learned here: **`check_web.py` cannot
+catch a deleted element id.** It proves the script parses; `$("#gone").onclick = ...` parses
+perfectly and throws at load, blanking the app on every device while the servers still answer 200.
+The panel was opened, driven and closed in a real browser with an error listener attached - zero
+errors - and that is the check that mattered.
+
 ## [3.86.0] - 2026-09-30 - "Our own GitHub, and three bugs that were wearing federation's coat" `[VERIFIED]`
 
 The owner asked why the two PCs were not pairing. They were - in both directions, the whole time.

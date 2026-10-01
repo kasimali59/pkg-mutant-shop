@@ -662,33 +662,83 @@ main{flex:1 1 auto;overflow-y:scroll;scrollbar-gutter:stable;padding:18px 18px 2
 #phb .phbnote{font-size:11.5px;color:var(--muted);margin:8px 2px 0;line-height:1.45}
 #phb .phbbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 18px 6px}
 
-/* ONE ROW: Back, the title, the console tabs, the update button, the close. The title takes the
-   slack from both sides so it sits optically centred whatever the buttons around it are called -
-   a fixed centre would drift the moment a language made "Check for updates" longer. */
+/* ONE ROW: Back, the console tabs, the title, the updates dropdown, the close - the owner's order.
+   The title takes the slack from both sides so it sits optically centred whatever the controls
+   around it are called; a fixed centre would drift the moment a language made a label longer. */
 #phb .phbhead{display:flex;align-items:center;gap:10px;padding:11px 14px;flex-wrap:nowrap}
 #phb .phbhead > h2{flex:1 1 auto;text-align:center;min-width:0;white-space:nowrap;
                    overflow:hidden;text-overflow:ellipsis}
-#phb .phbhead > .backbtn,#phb .phbhead > .iconbtn,#phb .phbhead > .btn,#phb .phbhead > .seg{flex:0 0 auto}
+#phb .phbhead > .backbtn,#phb .phbhead > .iconbtn,#phb .phbhead > .btn,
+#phb .phbhead > .seg,#phb .phbhead > .updrop{flex:0 0 auto}
 @media (max-width:760px){
   #phb .phbhead{flex-wrap:wrap}
   #phb .phbhead > h2{order:-1;flex:1 1 100%;text-align:left}
 }
 
-/* THE UPDATES BAND. Hidden until there is something to say, because a permanent empty strip is
-   just a thinner panel. Each row is one item with its own button - the owner decides per payload,
-   which is the whole point of showing them rather than a count. */
-#phb .phbups{margin:0 18px 10px;border:1px solid var(--line);border-radius:12px;
-             background:var(--surface);overflow:hidden}
-#phb .phbups .uh{display:flex;align-items:center;gap:8px;padding:9px 12px;
+/* THE UPDATES DROPDOWN. It used to be a band across the top of the panel body, which cost a strip
+   of height whenever there was anything to say and pushed the tiles down. It is a control in the
+   header now, beside the close button, and its drawer FLOATS - so opening it never reflows the
+   grid behind it, the same reason the install queue's drawer is positioned this way.
+
+   Modelled on .dock/.dockhead/.dockbody deliberately: this app has one dropdown idiom and a second
+   one that merely looked similar would drift. The pill is always present - "Check for updates"
+   lives inside it and has to be reachable when there is nothing to report - and only the count
+   badge comes and goes. */
+#phb .updrop{position:relative;z-index:40}
+#phb .uphead{height:30px;display:flex;align-items:center;gap:7px;padding:0 10px;cursor:pointer;
+             user-select:none;white-space:nowrap;border:1px solid var(--line);border-radius:999px;
+             background:var(--bg2);color:var(--muted);
+             transition:border-color .18s,box-shadow .18s,color .18s}
+#phb .uphead:hover{border-color:var(--accent);color:var(--text);box-shadow:0 6px 20px rgba(0,0,0,.30)}
+/* :focus, NOT :focus-visible - the console moves focus with the D-pad and never reports the
+   heuristic :focus-visible waits for, so a ring defined only there never appears there. The
+   outline is deliberately NOT suppressed here: the global rules give a ring on the PC and
+   the border/colour change is what makes it visible on the console. */
+#phb .uphead:focus{border-color:var(--accent);color:var(--text)}
+#phb .uphead .lbl{font-weight:700;letter-spacing:.06em;font-size:11px}
+#phb .uphead .chev{font-size:9px;transition:transform .2s}
+#phb .updrop.open .uphead{border-color:var(--accent);color:var(--text)}
+#phb .updrop.open .chev{transform:rotate(180deg)}
+/* The badge is a count, so it is hidden rather than showing a nought. .has is on the wrapper so the
+   pill itself can go gold when there is something waiting, which is the whole point of putting it
+   in the header where it is visible without opening anything. */
+#phb .uphead .n{display:none;background:var(--accent);color:#1a1608;border-radius:20px;
+                font-size:10.5px;font-weight:800;padding:1px 7px;min-width:18px;text-align:center}
+#phb .updrop.has .uphead .n{display:inline-block}
+#phb .updrop.has .uphead{border-color:var(--accent);color:var(--text)}
+/* THE DRAWER IS A FIXED MENU, NOT AN ABSOLUTE CHILD, and that is not a style choice - it was
+   MEASURED. `.sheet` is a scroll container (`overflow-y:auto`), so an absolutely positioned
+   descendant is clipped by it: on the PS4 tab, where the panel is short, nine update rows put the
+   drawer's bottom at 916px against a sheet ending at 606px - 310px of it simply gone.
+
+   This file already solved exactly this, for the overflow menu: "Fixed, and placed by measurement
+   when opened - anchored to the button it was clipped by the panel edge". So this uses the same
+   placeMenu() helper, which also re-parents to <body> first, because ANY transform on an ancestor
+   makes a position:fixed child resolve against that ancestor rather than the viewport - and this
+   panel animates with a transform.
+
+   Consequence worth stating: once open, the drawer is NOT inside #phb any more, so none of these
+   rules may be scoped to it and closing the panel has to close the drawer explicitly (_showPHB). */
+.phbups{position:fixed;left:0;top:0;z-index:9998;width:min(560px,86vw);
+        max-height:min(60vh,520px);overflow-y:auto;
+        border:1px solid var(--line);border-radius:14px;background:var(--bg2);
+        box-shadow:0 20px 54px rgba(0,0,0,.52);
+        opacity:0;transform:translateY(-6px);pointer-events:none;visibility:hidden;
+        transition:opacity .16s,transform .16s}
+.phbups.show{opacity:1;transform:none;pointer-events:auto}
+.phbups .uh{display:flex;align-items:center;gap:8px;padding:9px 12px;
                  border-bottom:1px solid var(--line);font-size:12px;font-weight:800;
                  letter-spacing:.08em;text-transform:uppercase;color:var(--muted2)}
-#phb .phbups .uh .c{color:var(--ok);font-weight:900}
-#phb .phbups .ur{display:flex;align-items:center;gap:10px;padding:8px 12px;flex-wrap:wrap}
-#phb .phbups .ur + .ur{border-top:1px solid var(--line2)}
-#phb .phbups .ur .nm{flex:1 1 200px;min-width:0;font-size:12.5px;font-weight:700}
-#phb .phbups .ur .vv{font-size:11px;color:var(--muted);white-space:nowrap}
-#phb .phbups .ur .vv b{color:var(--ok)}
-#phb .phbups .ur .msg{flex:1 1 100%;font-size:11px;color:var(--muted)}
+.phbups .uh .sp{flex:1 1 auto}
+.phbups .uh .btn{letter-spacing:0;text-transform:none}
+.phbups .uh .s{font-weight:600;letter-spacing:0;text-transform:none;color:var(--muted)}
+.phbups .uh .c{color:var(--ok);font-weight:900}
+.phbups .ur{display:flex;align-items:center;gap:10px;padding:8px 12px;flex-wrap:wrap}
+.phbups .ur + .ur{border-top:1px solid var(--line2)}
+.phbups .ur .nm{flex:1 1 200px;min-width:0;font-size:12.5px;font-weight:700}
+.phbups .ur .vv{font-size:11px;color:var(--muted);white-space:nowrap}
+.phbups .ur .vv b{color:var(--ok)}
+.phbups .ur .msg{flex:1 1 100%;font-size:11px;color:var(--muted)}
 
 /* THE CHOICE ROW. A tile that is already running or already installed does not act on one press -
    it offers what a second press could mean. Two named buttons beat "press again", which never says
@@ -1324,13 +1374,19 @@ html{scroll-behavior:smooth}
   <div class="sheet">
     <header class="sethead phbhead">
       <button class="backbtn" id="backPHB" aria-label="Back" data-i18n-aria="ui_aria_back"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg><span data-i18n="ui_back">Back</span></button>
-      <h2 data-i18n="phb_title">PAYLOADS &amp; HOMEBREWS</h2>
       <div class="seg" id="phbTabs"></div>
-      <button class="btn ghost sm" id="phbUpd" data-i18n="phb_check">Check for updates</button>
+      <h2 data-i18n="phb_title">PAYLOADS &amp; HOMEBREWS</h2>
+      <div class="updrop" id="phbUpdrop">
+        <div class="uphead" id="phbUpdHead" tabindex="0" role="button" aria-expanded="false" aria-controls="phbUps">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
+          <span class="lbl" data-i18n="phb_updates">Updates</span>
+          <span class="n" id="phbUpN">0</span>
+          <span class="chev">&#9660;</span>
+        </div>
+        <div class="phbups" id="phbUps" aria-hidden="true" inert></div>
+      </div>
       <button class="iconbtn" id="closePHB" aria-label="Close" data-i18n-aria="ui_aria_close"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </header>
-    <div class="phbups" id="phbUps" style="display:none"></div>
-    <div class="phbbar" id="phbBar" style="display:none"><span class="s" id="phbWhere"></span></div>
     <div class="body phbbody">
       <div class="phbcol"><h3 data-i18n="phb_payloads">Payloads</h3><div class="phbgrid" id="phbPay"></div></div>
       <div class="phbcol"><h3 data-i18n="phb_homebrews">Homebrews</h3><div class="phbgrid" id="phbHb"></div></div>
@@ -1589,7 +1645,7 @@ function led(on){return '<span class="led '+(on?"on":"")+'" style="display:inlin
    callback, and the whole class of bug is gone. */
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return c==="&"?"&amp;":c==="<"?"&lt;":c===">"?"&gt;":c==="'"?"&#39;":"&quot;";});}
 /* Fallback UI version if the companion /api/health version isn't reachable (e.g. on-console/demo). */
-var APP_VERSION="3.86.0";
+var APP_VERSION="3.87.0";
 function verNewer(a,b){var A=String(a).split("."),B=String(b).split(".");
   for(var i=0;i<Math.max(A.length,B.length);i++){var x=parseInt(A[i]||0,10)||0,y=parseInt(B[i]||0,10)||0;
     if(x!==y) return x>y;} return false;}
@@ -1604,7 +1660,7 @@ try{ document.addEventListener("DOMContentLoaded",function(){
 
 /* ===================== i18n (self-contained, PS5-WebKit safe) [B10] ===================== */
 var I18N={
-  en:{phb_on_console:"on the console",phb_on_peer:"another PC",phb_cancel:"Cancel",phb_notinstalled:"Not installed",phb_ratelimited:"GitHub is rate-limiting these checks — try again in a few minutes",phb_upd_private:"Our own releases are private for now, so this device cannot see them yet",phb_reinstall:"Send again",phb_run:"Run",phb_stopped:"Not running",phb_upd_problem:"{n} could not be checked",phb_update:"Update",phb_updates:"Updates",phb_nocon:"Not on this console",phb_arm_again:"Already running — press again for a second copy",phb_arm_jb:"Press again to send it",phb_arm_reinstall:"Already installed — press again to replace it",phb_check:"Check for updates",phb_done:"Done",phb_empty:"Nothing here for this console",phb_failed:"That did not work",phb_folder:"A folder app — it goes on a drive the console mounts",phb_homebrews:"Homebrews",phb_install:"Install",phb_installed:"Installed",phb_jb:"Changes the jailbreak layer",phb_nopc:"Not on this PC",phb_open:"Payloads & Homebrews",phb_payloads:"Payloads",phb_running:"Running",phb_send:"Send it",phb_tip:"Payloads and homebrew apps, for the console you have selected.",phb_title:"PAYLOADS & HOMEBREWS",phb_unknown:"Nothing listens for it, so there is no way to tell",phb_upd:"{n} have a newer release upstream",phb_upd_none:"Everything matches the newest release",phb_where:"That folder is not on this PC: {root}",phb_working:"Working…",q_installing:"installing",q_working:"Working",q_waiting:"waiting to start",q_failed:"failed",q_needslook:"needs a look",q_alldone:"All done",search:"Search library…",all:"All",installed:"Installed",updates:"Updates",notinstalled:"Not installed",
+  en:{phb_on_console:"on the console",phb_on_peer:"another PC",phb_cancel:"Cancel",phb_notinstalled:"Not installed",phb_ratelimited:"GitHub is rate-limiting these checks — try again in a few minutes",phb_upd_all:"Update all",phb_reinstall:"Send again",phb_run:"Run",phb_stopped:"Not running",phb_upd_problem:"{n} could not be checked",phb_update:"Update",phb_updates:"Updates",phb_nocon:"Not on this console",phb_arm_again:"Already running — press again for a second copy",phb_arm_jb:"Press again to send it",phb_arm_reinstall:"Already installed — press again to replace it",phb_check:"Check for updates",phb_done:"Done",phb_empty:"Nothing here for this console",phb_failed:"That did not work",phb_folder:"A folder app — it goes on a drive the console mounts",phb_homebrews:"Homebrews",phb_install:"Install",phb_installed:"Installed",phb_jb:"Changes the jailbreak layer",phb_nopc:"Not on this PC",phb_open:"Payloads & Homebrews",phb_payloads:"Payloads",phb_running:"Running",phb_send:"Send it",phb_tip:"Payloads and homebrew apps, for the console you have selected.",phb_title:"PAYLOADS & HOMEBREWS",phb_unknown:"Nothing listens for it, so there is no way to tell",phb_upd:"{n} have a newer release upstream",phb_upd_none:"Everything matches the newest release",phb_working:"Working…",q_installing:"installing",q_working:"Working",q_waiting:"waiting to start",q_failed:"failed",q_needslook:"needs a look",q_alldone:"All done",search:"Search library…",all:"All",installed:"Installed",updates:"Updates",notinstalled:"Not installed",
       sort_name:"Sort: Name",sort_size:"Sort: Size",sort_platform:"Sort: Platform",settings:"SETTINGS",
       install_queue:"INSTALL QUEUE",clear_finished:"Clear finished",back:"Back",save:"Save",
       connection:"Connection",library:"Library",about:"About",app_version:"App version",
@@ -2259,7 +2315,7 @@ var I18N={
     msg_set_cfg_unreadable:"config.json next to PKG-MUTANT-SHOP.exe cannot be read ({err}), so the app is running on its defaults and will not overwrite the file. Fix or delete it, then restart the app - nothing typed here can be saved until then.",
     msg_needs_pc_tip:"This asks the PC to do it, and no PC is answering right now. Open the shop from the PC app, or wait for one to be found.",
     msg_pc_seat_tip:"This opens a window on the PC itself. Use it from the PC."},
-  es:{phb_on_console:"en la consola",phb_on_peer:"otro PC",phb_cancel:"Cancelar",phb_notinstalled:"No instalado",phb_ratelimited:"GitHub está limitando estas consultas: inténtalo en unos minutos",phb_upd_private:"Nuestras versiones son privadas por ahora, así que este dispositivo aún no puede verlas",phb_reinstall:"Enviar de nuevo",phb_run:"Ejecutar",phb_stopped:"Parado",phb_upd_problem:"{n} no se pudieron consultar",phb_update:"Actualizar",phb_updates:"Actualizaciones",phb_nocon:"No está en esta consola",phb_arm_again:"Ya está en marcha: pulsa otra vez para una segunda copia",phb_arm_jb:"Pulsa otra vez para enviarlo",phb_arm_reinstall:"Ya está instalado: pulsa otra vez para reemplazarlo",phb_check:"Buscar actualizaciones",phb_done:"Listo",phb_empty:"Aquí no hay nada para esta consola",phb_failed:"Eso no funcionó",phb_folder:"Una app en carpeta: va en una unidad que la consola monte",phb_homebrews:"Homebrew",phb_install:"Instalar",phb_installed:"Instalado",phb_jb:"Cambia la capa del jailbreak",phb_nopc:"No está en este PC",phb_open:"Payloads y homebrew",phb_payloads:"Payloads",phb_running:"En marcha",phb_send:"Enviar",phb_tip:"Payloads y apps homebrew, para la consola que tengas seleccionada.",phb_title:"PAYLOADS Y HOMEBREW",phb_unknown:"Nada escucha por él, así que no hay forma de saberlo",phb_upd:"{n} tienen una versión más nueva",phb_upd_none:"Todo coincide con la versión más nueva",phb_where:"Esa carpeta no está en este PC: {root}",phb_working:"Trabajando…",q_installing:"instalando",q_working:"Trabajando",q_waiting:"esperando para empezar",q_failed:"con error",q_needslook:"necesitan revisión",q_alldone:"Todo listo",search:"Buscar biblioteca…",all:"Todos",installed:"Instalado",updates:"Actualizaciones",notinstalled:"No instalado",
+  es:{phb_on_console:"en la consola",phb_on_peer:"otro PC",phb_cancel:"Cancelar",phb_notinstalled:"No instalado",phb_ratelimited:"GitHub está limitando estas consultas: inténtalo en unos minutos",phb_upd_all:"Actualizar todo",phb_reinstall:"Enviar de nuevo",phb_run:"Ejecutar",phb_stopped:"Parado",phb_upd_problem:"{n} no se pudieron consultar",phb_update:"Actualizar",phb_updates:"Actualizaciones",phb_nocon:"No está en esta consola",phb_arm_again:"Ya está en marcha: pulsa otra vez para una segunda copia",phb_arm_jb:"Pulsa otra vez para enviarlo",phb_arm_reinstall:"Ya está instalado: pulsa otra vez para reemplazarlo",phb_check:"Buscar actualizaciones",phb_done:"Listo",phb_empty:"Aquí no hay nada para esta consola",phb_failed:"Eso no funcionó",phb_folder:"Una app en carpeta: va en una unidad que la consola monte",phb_homebrews:"Homebrew",phb_install:"Instalar",phb_installed:"Instalado",phb_jb:"Cambia la capa del jailbreak",phb_nopc:"No está en este PC",phb_open:"Payloads y homebrew",phb_payloads:"Payloads",phb_running:"En marcha",phb_send:"Enviar",phb_tip:"Payloads y apps homebrew, para la consola que tengas seleccionada.",phb_title:"PAYLOADS Y HOMEBREW",phb_unknown:"Nada escucha por él, así que no hay forma de saberlo",phb_upd:"{n} tienen una versión más nueva",phb_upd_none:"Todo coincide con la versión más nueva",phb_working:"Trabajando…",q_installing:"instalando",q_working:"Trabajando",q_waiting:"esperando para empezar",q_failed:"con error",q_needslook:"necesitan revisión",q_alldone:"Todo listo",search:"Buscar biblioteca…",all:"Todos",installed:"Instalado",updates:"Actualizaciones",notinstalled:"No instalado",
       sort_name:"Orden: Nombre",sort_size:"Orden: Tamaño",sort_platform:"Orden: Plataforma",settings:"AJUSTES",
       install_queue:"COLA DE INSTALACIÓN",clear_finished:"Limpiar terminados",back:"Atrás",save:"Guardar",
       connection:"Conexión",library:"Biblioteca",about:"Acerca de",app_version:"Versión",
@@ -2909,7 +2965,7 @@ var I18N={
     msg_set_cfg_unreadable:"No se puede leer config.json junto a PKG-MUTANT-SHOP.exe ({err}), así que la app funciona con sus valores por defecto y no sobrescribirá el archivo. Arréglalo o bórralo y reinicia la app - hasta entonces nada de lo que escribas aquí se puede guardar.",
     msg_needs_pc_tip:"Esto lo hace el PC, y ahora mismo ningún PC responde. Abre la tienda desde la app del PC, o espera a que se encuentre uno.",
     msg_pc_seat_tip:"Esto abre una ventana en el propio PC. Úsalo desde el PC."},
-  pt:{phb_on_console:"na consola",phb_on_peer:"outro PC",phb_cancel:"Cancelar",phb_notinstalled:"Não instalado",phb_ratelimited:"O GitHub está a limitar estas consultas: tenta daqui a uns minutos",phb_upd_private:"As nossas versões são privadas por agora, por isso este dispositivo ainda não as vê",phb_reinstall:"Enviar de novo",phb_run:"Executar",phb_stopped:"Parado",phb_upd_problem:"{n} não puderam ser consultados",phb_update:"Atualizar",phb_updates:"Atualizações",phb_nocon:"Não está nesta consola",phb_arm_again:"Já está a correr: carrega outra vez para uma segunda cópia",phb_arm_jb:"Carrega outra vez para o enviar",phb_arm_reinstall:"Já está instalado: carrega outra vez para o substituir",phb_check:"Procurar atualizações",phb_done:"Pronto",phb_empty:"Aqui não há nada para esta consola",phb_failed:"Isso não resultou",phb_folder:"Uma app em pasta: vai para um disco que a consola monte",phb_homebrews:"Homebrew",phb_install:"Instalar",phb_installed:"Instalado",phb_jb:"Altera a camada do jailbreak",phb_nopc:"Não está neste PC",phb_open:"Payloads e homebrew",phb_payloads:"Payloads",phb_running:"A correr",phb_send:"Enviar",phb_tip:"Payloads e apps homebrew, para a consola que tens selecionada.",phb_title:"PAYLOADS E HOMEBREW",phb_unknown:"Nada escuta por ele, por isso não há como saber",phb_upd:"{n} têm uma versão mais recente",phb_upd_none:"Está tudo na versão mais recente",phb_where:"Essa pasta não está neste PC: {root}",phb_working:"A trabalhar…",q_installing:"a instalar",q_working:"A trabalhar",q_waiting:"à espera de começar",q_failed:"com erro",q_needslook:"precisam de atenção",q_alldone:"Tudo pronto",search:"Pesquisar biblioteca…",all:"Todos",installed:"Instalado",updates:"Atualizações",notinstalled:"Não instalado",
+  pt:{phb_on_console:"na consola",phb_on_peer:"outro PC",phb_cancel:"Cancelar",phb_notinstalled:"Não instalado",phb_ratelimited:"O GitHub está a limitar estas consultas: tenta daqui a uns minutos",phb_upd_all:"Atualizar tudo",phb_reinstall:"Enviar de novo",phb_run:"Executar",phb_stopped:"Parado",phb_upd_problem:"{n} não puderam ser consultados",phb_update:"Atualizar",phb_updates:"Atualizações",phb_nocon:"Não está nesta consola",phb_arm_again:"Já está a correr: carrega outra vez para uma segunda cópia",phb_arm_jb:"Carrega outra vez para o enviar",phb_arm_reinstall:"Já está instalado: carrega outra vez para o substituir",phb_check:"Procurar atualizações",phb_done:"Pronto",phb_empty:"Aqui não há nada para esta consola",phb_failed:"Isso não resultou",phb_folder:"Uma app em pasta: vai para um disco que a consola monte",phb_homebrews:"Homebrew",phb_install:"Instalar",phb_installed:"Instalado",phb_jb:"Altera a camada do jailbreak",phb_nopc:"Não está neste PC",phb_open:"Payloads e homebrew",phb_payloads:"Payloads",phb_running:"A correr",phb_send:"Enviar",phb_tip:"Payloads e apps homebrew, para a consola que tens selecionada.",phb_title:"PAYLOADS E HOMEBREW",phb_unknown:"Nada escuta por ele, por isso não há como saber",phb_upd:"{n} têm uma versão mais recente",phb_upd_none:"Está tudo na versão mais recente",phb_working:"A trabalhar…",q_installing:"a instalar",q_working:"A trabalhar",q_waiting:"à espera de começar",q_failed:"com erro",q_needslook:"precisam de atenção",q_alldone:"Tudo pronto",search:"Pesquisar biblioteca…",all:"Todos",installed:"Instalado",updates:"Atualizações",notinstalled:"Não instalado",
       sort_name:"Ordem: Nome",sort_size:"Ordem: Tamanho",sort_platform:"Ordem: Plataforma",settings:"CONFIGURAÇÕES",
       install_queue:"FILA DE INSTALAÇÃO",clear_finished:"Limpar concluídos",back:"Voltar",save:"Salvar",
       connection:"Conexão",library:"Biblioteca",about:"Sobre",app_version:"Versão",
@@ -3559,7 +3615,7 @@ var I18N={
     msg_set_cfg_unreadable:"Não é possível ler o config.json ao lado de PKG-MUTANT-SHOP.exe ({err}), por isso a app usa os valores por defeito e não vai substituir o ficheiro. Corrige-o ou apaga-o e reinicia a app - até lá nada do que escreveres aqui pode ser guardado.",
     msg_needs_pc_tip:"Isto é feito pelo PC, e neste momento nenhum PC responde. Abre a loja a partir da app do PC, ou espera que seja encontrado.",
     msg_pc_seat_tip:"Isto abre uma janela no próprio PC. Usa-o a partir do PC."},
-  fr:{phb_on_console:"sur la console",phb_on_peer:"un autre PC",phb_cancel:"Annuler",phb_notinstalled:"Non installé",phb_ratelimited:"GitHub limite ces requêtes : réessayez dans quelques minutes",phb_upd_private:"Nos propres versions sont privées pour l'instant, cet appareil ne peut pas encore les voir",phb_reinstall:"Renvoyer",phb_run:"Lancer",phb_stopped:"À l'arrêt",phb_upd_problem:"{n} n'ont pas pu être vérifiés",phb_update:"Mettre à jour",phb_updates:"Mises à jour",phb_nocon:"Pas sur cette console",phb_arm_again:"Déjà en marche : appuyez encore pour une seconde copie",phb_arm_jb:"Appuyez encore pour l'envoyer",phb_arm_reinstall:"Déjà installé : appuyez encore pour le remplacer",phb_check:"Chercher des mises à jour",phb_done:"Terminé",phb_empty:"Rien ici pour cette console",phb_failed:"Ça n'a pas marché",phb_folder:"Une appli en dossier : elle va sur un disque monté par la console",phb_homebrews:"Homebrew",phb_install:"Installer",phb_installed:"Installé",phb_jb:"Modifie la couche du jailbreak",phb_nopc:"Pas sur ce PC",phb_open:"Payloads et homebrew",phb_payloads:"Payloads",phb_running:"En marche",phb_send:"Envoyer",phb_tip:"Payloads et applis homebrew, pour la console sélectionnée.",phb_title:"PAYLOADS ET HOMEBREW",phb_unknown:"Rien ne l'écoute, impossible de le savoir",phb_upd:"{n} ont une version plus récente",phb_upd_none:"Tout est à la version la plus récente",phb_where:"Ce dossier n'est pas sur ce PC : {root}",phb_working:"En cours…",q_installing:"en installation",q_working:"En cours",q_waiting:"en attente de démarrage",q_failed:"en échec",q_needslook:"à vérifier",q_alldone:"Terminé",search:"Rechercher…",all:"Tous",installed:"Installé",updates:"Mises à jour",notinstalled:"Non installé",
+  fr:{phb_on_console:"sur la console",phb_on_peer:"un autre PC",phb_cancel:"Annuler",phb_notinstalled:"Non installé",phb_ratelimited:"GitHub limite ces requêtes : réessayez dans quelques minutes",phb_upd_all:"Tout mettre à jour",phb_reinstall:"Renvoyer",phb_run:"Lancer",phb_stopped:"À l'arrêt",phb_upd_problem:"{n} n'ont pas pu être vérifiés",phb_update:"Mettre à jour",phb_updates:"Mises à jour",phb_nocon:"Pas sur cette console",phb_arm_again:"Déjà en marche : appuyez encore pour une seconde copie",phb_arm_jb:"Appuyez encore pour l'envoyer",phb_arm_reinstall:"Déjà installé : appuyez encore pour le remplacer",phb_check:"Chercher des mises à jour",phb_done:"Terminé",phb_empty:"Rien ici pour cette console",phb_failed:"Ça n'a pas marché",phb_folder:"Une appli en dossier : elle va sur un disque monté par la console",phb_homebrews:"Homebrew",phb_install:"Installer",phb_installed:"Installé",phb_jb:"Modifie la couche du jailbreak",phb_nopc:"Pas sur ce PC",phb_open:"Payloads et homebrew",phb_payloads:"Payloads",phb_running:"En marche",phb_send:"Envoyer",phb_tip:"Payloads et applis homebrew, pour la console sélectionnée.",phb_title:"PAYLOADS ET HOMEBREW",phb_unknown:"Rien ne l'écoute, impossible de le savoir",phb_upd:"{n} ont une version plus récente",phb_upd_none:"Tout est à la version la plus récente",phb_working:"En cours…",q_installing:"en installation",q_working:"En cours",q_waiting:"en attente de démarrage",q_failed:"en échec",q_needslook:"à vérifier",q_alldone:"Terminé",search:"Rechercher…",all:"Tous",installed:"Installé",updates:"Mises à jour",notinstalled:"Non installé",
       sort_name:"Tri : Nom",sort_size:"Tri : Taille",sort_platform:"Tri : Plateforme",settings:"PARAMÈTRES",
       install_queue:"FILE D'INSTALLATION",clear_finished:"Effacer terminés",back:"Retour",save:"Enregistrer",
       connection:"Connexion",library:"Bibliothèque",about:"À propos",app_version:"Version",
@@ -4209,7 +4265,7 @@ var I18N={
     msg_set_cfg_unreadable:"Impossible de lire config.json à côté de PKG-MUTANT-SHOP.exe ({err}) : l'application fonctionne avec ses valeurs par défaut et n'écrasera pas le fichier. Corrigez-le ou supprimez-le, puis relancez l'application - d'ici là, rien de ce qui est saisi ici ne peut être enregistré.",
     msg_needs_pc_tip:"C'est le PC qui s'en charge, et aucun PC ne répond pour l'instant. Ouvrez la boutique depuis l'application du PC, ou attendez qu'il soit trouvé.",
     msg_pc_seat_tip:"Ceci ouvre une fenêtre sur le PC lui-même. À utiliser depuis le PC."},
-  de:{phb_on_console:"auf der Konsole",phb_on_peer:"ein anderer PC",phb_cancel:"Abbrechen",phb_notinstalled:"Nicht installiert",phb_ratelimited:"GitHub drosselt diese Abfragen – in ein paar Minuten noch einmal versuchen",phb_upd_private:"Unsere eigenen Releases sind vorerst privat, dieses Gerät kann sie noch nicht sehen",phb_reinstall:"Erneut senden",phb_run:"Starten",phb_stopped:"Läuft nicht",phb_upd_problem:"{n} konnten nicht geprüft werden",phb_update:"Aktualisieren",phb_updates:"Updates",phb_nocon:"Nicht auf dieser Konsole",phb_arm_again:"Läuft schon – noch einmal drücken für eine zweite Kopie",phb_arm_jb:"Noch einmal drücken, um es zu senden",phb_arm_reinstall:"Schon installiert – noch einmal drücken zum Ersetzen",phb_check:"Nach Updates suchen",phb_done:"Fertig",phb_empty:"Hier ist nichts für diese Konsole",phb_failed:"Das hat nicht geklappt",phb_folder:"Eine Ordner-App: sie gehört auf ein Laufwerk, das die Konsole einbindet",phb_homebrews:"Homebrew",phb_install:"Installieren",phb_installed:"Installiert",phb_jb:"Ändert die Jailbreak-Ebene",phb_nopc:"Nicht auf diesem PC",phb_open:"Payloads & Homebrew",phb_payloads:"Payloads",phb_running:"Läuft",phb_send:"Senden",phb_tip:"Payloads und Homebrew-Apps für die ausgewählte Konsole.",phb_title:"PAYLOADS & HOMEBREW",phb_unknown:"Nichts lauscht dafür, also lässt es sich nicht sagen",phb_upd:"{n} haben eine neuere Version",phb_upd_none:"Alles ist auf der neuesten Version",phb_where:"Dieser Ordner ist nicht auf diesem PC: {root}",phb_working:"Läuft…",q_installing:"werden installiert",q_working:"Läuft",q_waiting:"warten auf den Start",q_failed:"fehlgeschlagen",q_needslook:"brauchen einen Blick",q_alldone:"Alles fertig",search:"Bibliothek suchen…",all:"Alle",installed:"Installiert",updates:"Updates",notinstalled:"Nicht installiert",
+  de:{phb_on_console:"auf der Konsole",phb_on_peer:"ein anderer PC",phb_cancel:"Abbrechen",phb_notinstalled:"Nicht installiert",phb_ratelimited:"GitHub drosselt diese Abfragen – in ein paar Minuten noch einmal versuchen",phb_upd_all:"Alle aktualisieren",phb_reinstall:"Erneut senden",phb_run:"Starten",phb_stopped:"Läuft nicht",phb_upd_problem:"{n} konnten nicht geprüft werden",phb_update:"Aktualisieren",phb_updates:"Updates",phb_nocon:"Nicht auf dieser Konsole",phb_arm_again:"Läuft schon – noch einmal drücken für eine zweite Kopie",phb_arm_jb:"Noch einmal drücken, um es zu senden",phb_arm_reinstall:"Schon installiert – noch einmal drücken zum Ersetzen",phb_check:"Nach Updates suchen",phb_done:"Fertig",phb_empty:"Hier ist nichts für diese Konsole",phb_failed:"Das hat nicht geklappt",phb_folder:"Eine Ordner-App: sie gehört auf ein Laufwerk, das die Konsole einbindet",phb_homebrews:"Homebrew",phb_install:"Installieren",phb_installed:"Installiert",phb_jb:"Ändert die Jailbreak-Ebene",phb_nopc:"Nicht auf diesem PC",phb_open:"Payloads & Homebrew",phb_payloads:"Payloads",phb_running:"Läuft",phb_send:"Senden",phb_tip:"Payloads und Homebrew-Apps für die ausgewählte Konsole.",phb_title:"PAYLOADS & HOMEBREW",phb_unknown:"Nichts lauscht dafür, also lässt es sich nicht sagen",phb_upd:"{n} haben eine neuere Version",phb_upd_none:"Alles ist auf der neuesten Version",phb_working:"Läuft…",q_installing:"werden installiert",q_working:"Läuft",q_waiting:"warten auf den Start",q_failed:"fehlgeschlagen",q_needslook:"brauchen einen Blick",q_alldone:"Alles fertig",search:"Bibliothek suchen…",all:"Alle",installed:"Installiert",updates:"Updates",notinstalled:"Nicht installiert",
       sort_name:"Sortierung: Name",sort_size:"Sortierung: Größe",sort_platform:"Sortierung: Plattform",settings:"EINSTELLUNGEN",
       install_queue:"INSTALLATIONS-WARTESCHLANGE",clear_finished:"Fertige löschen",back:"Zurück",save:"Speichern",
       connection:"Verbindung",library:"Bibliothek",about:"Über",app_version:"Version",
@@ -4859,7 +4915,7 @@ var I18N={
     msg_set_cfg_unreadable:"config.json neben PKG-MUTANT-SHOP.exe kann nicht gelesen werden ({err}); die App läuft mit Standardwerten und überschreibt die Datei nicht. Repariere oder lösche sie und starte die App neu - bis dahin kann hier nichts gespeichert werden.",
     msg_needs_pc_tip:"Das erledigt der PC, und gerade antwortet keiner. Öffne den Shop aus der PC-App, oder warte, bis einer gefunden ist.",
     msg_pc_seat_tip:"Das öffnet ein Fenster auf dem PC selbst. Vom PC aus benutzen."},
-  ja:{phb_on_console:"本体にあります",phb_on_peer:"別のPC",phb_cancel:"キャンセル",phb_notinstalled:"未インストール",phb_ratelimited:"GitHub が問い合わせを制限しています。数分後にもう一度お試しください",phb_upd_private:"当アプリのリリースは今のところ非公開のため、この機器からはまだ見えません",phb_reinstall:"送り直す",phb_run:"起動",phb_stopped:"停止中",phb_upd_problem:"{n} 件を確認できませんでした",phb_update:"更新",phb_updates:"更新",phb_nocon:"この本体にはありません",phb_arm_again:"すでに実行中です。もう一度押すと2つ目が起動します",phb_arm_jb:"もう一度押すと送ります",phb_arm_reinstall:"インストール済みです。もう一度押すと入れ替えます",phb_check:"更新を確認",phb_done:"完了",phb_empty:"この本体向けのものはありません",phb_failed:"うまくいきませんでした",phb_folder:"フォルダー形式のアプリです。本体がマウントするドライブに置きます",phb_homebrews:"ホームブリュー",phb_install:"インストール",phb_installed:"インストール済み",phb_jb:"脱獄の土台を変更します",phb_nopc:"このPCにはありません",phb_open:"ペイロードとホームブリュー",phb_payloads:"ペイロード",phb_running:"実行中",phb_send:"送る",phb_tip:"選択中の本体向けのペイロードとホームブリューアプリ。",phb_title:"ペイロードとホームブリュー",phb_unknown:"待ち受けが無いため確認できません",phb_upd:"{n} 件に新しい版があります",phb_upd_none:"すべて最新の版です",phb_where:"そのフォルダーはこのPCにありません: {root}",phb_working:"処理中…",q_installing:"インストール中",q_working:"処理中",q_waiting:"開始待ち",q_failed:"失敗",q_needslook:"要確認",q_alldone:"すべて完了",search:"ライブラリを検索…",all:"すべて",installed:"インストール済み",updates:"アップデート",notinstalled:"未インストール",
+  ja:{phb_on_console:"本体にあります",phb_on_peer:"別のPC",phb_cancel:"キャンセル",phb_notinstalled:"未インストール",phb_ratelimited:"GitHub が問い合わせを制限しています。数分後にもう一度お試しください",phb_upd_all:"すべて更新",phb_reinstall:"送り直す",phb_run:"起動",phb_stopped:"停止中",phb_upd_problem:"{n} 件を確認できませんでした",phb_update:"更新",phb_updates:"更新",phb_nocon:"この本体にはありません",phb_arm_again:"すでに実行中です。もう一度押すと2つ目が起動します",phb_arm_jb:"もう一度押すと送ります",phb_arm_reinstall:"インストール済みです。もう一度押すと入れ替えます",phb_check:"更新を確認",phb_done:"完了",phb_empty:"この本体向けのものはありません",phb_failed:"うまくいきませんでした",phb_folder:"フォルダー形式のアプリです。本体がマウントするドライブに置きます",phb_homebrews:"ホームブリュー",phb_install:"インストール",phb_installed:"インストール済み",phb_jb:"脱獄の土台を変更します",phb_nopc:"このPCにはありません",phb_open:"ペイロードとホームブリュー",phb_payloads:"ペイロード",phb_running:"実行中",phb_send:"送る",phb_tip:"選択中の本体向けのペイロードとホームブリューアプリ。",phb_title:"ペイロードとホームブリュー",phb_unknown:"待ち受けが無いため確認できません",phb_upd:"{n} 件に新しい版があります",phb_upd_none:"すべて最新の版です",phb_working:"処理中…",q_installing:"インストール中",q_working:"処理中",q_waiting:"開始待ち",q_failed:"失敗",q_needslook:"要確認",q_alldone:"すべて完了",search:"ライブラリを検索…",all:"すべて",installed:"インストール済み",updates:"アップデート",notinstalled:"未インストール",
       sort_name:"並び替え: 名前",sort_size:"並び替え: サイズ",sort_platform:"並び替え: 機種",settings:"設定",
       install_queue:"インストールキュー",clear_finished:"完了を消去",back:"戻る",save:"保存",
       connection:"接続",library:"ライブラリ",about:"情報",app_version:"バージョン",
@@ -5509,7 +5565,7 @@ var I18N={
     msg_set_cfg_unreadable:"PKG-MUTANT-SHOP.exe の隣の config.json を読み取れません ({err})。アプリは既定値で動作し、このファイルを上書きしません。修正または削除してからアプリを再起動してください - それまでここで入力した内容は保存できません。",
     msg_needs_pc_tip:"これは PC が行う操作で、いま応答している PC がありません。PC アプリからショップを開くか、PC が見つかるまでお待ちください。",
     msg_pc_seat_tip:"PC 本体にウィンドウを開きます。PC から使ってください。"},
-  ar:{phb_on_console:"على الجهاز",phb_on_peer:"حاسوب آخر",phb_cancel:"إلغاء",phb_notinstalled:"غير مثبَّت",phb_ratelimited:"يحد GitHub من هذه الطلبات — أعد المحاولة بعد دقائق",phb_upd_private:"إصداراتنا خاصة في الوقت الحالي، لذا لا يمكن لهذا الجهاز رؤيتها بعد",phb_reinstall:"أرسله مجددًا",phb_run:"تشغيل",phb_stopped:"متوقف",phb_upd_problem:"تعذّر فحص {n}",phb_update:"تحديث",phb_updates:"التحديثات",phb_nocon:"غير موجود على هذا الجهاز",phb_arm_again:"يعمل بالفعل — اضغط مرة أخرى لنسخة ثانية",phb_arm_jb:"اضغط مرة أخرى لإرساله",phb_arm_reinstall:"مثبَّت بالفعل — اضغط مرة أخرى لاستبداله",phb_check:"ابحث عن تحديثات",phb_done:"تم",phb_empty:"لا شيء هنا لهذا الجهاز",phb_failed:"لم ينجح ذلك",phb_folder:"تطبيق على شكل مجلد: يوضع على قرص يركّبه الجهاز",phb_homebrews:"البرامج المنزلية",phb_install:"ثبّت",phb_installed:"مثبَّت",phb_jb:"يغيّر طبقة كسر الحماية",phb_nopc:"غير موجود على هذا الحاسوب",phb_open:"الحمولات والبرامج المنزلية",phb_payloads:"الحمولات",phb_running:"يعمل",phb_send:"أرسله",phb_tip:"حمولات وتطبيقات منزلية، للجهاز الذي اخترته.",phb_title:"الحمولات والبرامج المنزلية",phb_unknown:"لا شيء ينصت له، فلا سبيل لمعرفة ذلك",phb_upd:"{n} لها إصدار أحدث",phb_upd_none:"كل شيء على أحدث إصدار",phb_where:"هذا المجلد غير موجود على هذا الحاسوب: {root}",phb_working:"جارٍ…",q_installing:"قيد التثبيت",q_working:"جارٍ",q_waiting:"بانتظار البدء",q_failed:"فشل",q_needslook:"تحتاج مراجعة",q_alldone:"اكتمل الكل",search:"ابحث في المكتبة…",all:"الكل",installed:"مثبَّت",updates:"تحديثات",notinstalled:"غير مثبَّت",
+  ar:{phb_on_console:"على الجهاز",phb_on_peer:"حاسوب آخر",phb_cancel:"إلغاء",phb_notinstalled:"غير مثبَّت",phb_ratelimited:"يحد GitHub من هذه الطلبات — أعد المحاولة بعد دقائق",phb_upd_all:"تحديث الكل",phb_reinstall:"أرسله مجددًا",phb_run:"تشغيل",phb_stopped:"متوقف",phb_upd_problem:"تعذّر فحص {n}",phb_update:"تحديث",phb_updates:"التحديثات",phb_nocon:"غير موجود على هذا الجهاز",phb_arm_again:"يعمل بالفعل — اضغط مرة أخرى لنسخة ثانية",phb_arm_jb:"اضغط مرة أخرى لإرساله",phb_arm_reinstall:"مثبَّت بالفعل — اضغط مرة أخرى لاستبداله",phb_check:"ابحث عن تحديثات",phb_done:"تم",phb_empty:"لا شيء هنا لهذا الجهاز",phb_failed:"لم ينجح ذلك",phb_folder:"تطبيق على شكل مجلد: يوضع على قرص يركّبه الجهاز",phb_homebrews:"البرامج المنزلية",phb_install:"ثبّت",phb_installed:"مثبَّت",phb_jb:"يغيّر طبقة كسر الحماية",phb_nopc:"غير موجود على هذا الحاسوب",phb_open:"الحمولات والبرامج المنزلية",phb_payloads:"الحمولات",phb_running:"يعمل",phb_send:"أرسله",phb_tip:"حمولات وتطبيقات منزلية، للجهاز الذي اخترته.",phb_title:"الحمولات والبرامج المنزلية",phb_unknown:"لا شيء ينصت له، فلا سبيل لمعرفة ذلك",phb_upd:"{n} لها إصدار أحدث",phb_upd_none:"كل شيء على أحدث إصدار",phb_working:"جارٍ…",q_installing:"قيد التثبيت",q_working:"جارٍ",q_waiting:"بانتظار البدء",q_failed:"فشل",q_needslook:"تحتاج مراجعة",q_alldone:"اكتمل الكل",search:"ابحث في المكتبة…",all:"الكل",installed:"مثبَّت",updates:"تحديثات",notinstalled:"غير مثبَّت",
       sort_name:"ترتيب: الاسم",sort_size:"ترتيب: الحجم",sort_platform:"ترتيب: المنصة",settings:"الإعدادات",
       install_queue:"قائمة التثبيت",clear_finished:"مسح المكتملة",back:"رجوع",save:"حفظ",
       connection:"الاتصال",library:"المكتبة",about:"حول",app_version:"الإصدار",
@@ -6160,7 +6216,7 @@ var I18N={
     msg_needs_pc_tip:"هذا يقوم به الحاسوب، ولا يوجد حاسوب يستجيب الآن. افتح المتجر من تطبيق الحاسوب، أو انتظر حتى يُعثر على واحد.",
     msg_pc_seat_tip:"هذا يفتح نافذة على الحاسوب نفسه. استخدمه من الحاسوب."}
 ,
-  zh:{phb_on_console:"在主机上",phb_on_peer:"另一台电脑",phb_cancel:"取消",phb_notinstalled:"未安装",phb_ratelimited:"GitHub 正在限制这些查询，请几分钟后再试",phb_upd_private:"我们自己的发布目前是私有的，这台设备还看不到",phb_reinstall:"重新发送",phb_run:"运行",phb_stopped:"未运行",phb_upd_problem:"{n} 个无法检查",phb_update:"更新",phb_updates:"更新",phb_nocon:"这台主机上没有",phb_arm_again:"已在运行 — 再按一次会再启动一份",phb_arm_jb:"再按一次即可发送",phb_arm_reinstall:"已安装 — 再按一次可替换",phb_check:"检查更新",phb_done:"完成",phb_empty:"这台主机没有可用项目",phb_failed:"没有成功",phb_folder:"文件夹形式的应用：放在主机会挂载的硬盘上",phb_homebrews:"自制程序",phb_install:"安装",phb_installed:"已安装",phb_jb:"会改动越狱层",phb_nopc:"这台电脑上没有",phb_open:"载荷与自制程序",phb_payloads:"载荷",phb_running:"运行中",phb_send:"发送",phb_tip:"针对你所选主机的载荷与自制应用。",phb_title:"载荷与自制程序",phb_unknown:"没有端口在监听，因此无从判断",phb_upd:"{n} 个有更新的版本",phb_upd_none:"全部都是最新版本",phb_where:"这台电脑上没有该文件夹：{root}",phb_working:"处理中…",
+  zh:{phb_on_console:"在主机上",phb_on_peer:"另一台电脑",phb_cancel:"取消",phb_notinstalled:"未安装",phb_ratelimited:"GitHub 正在限制这些查询，请几分钟后再试",phb_upd_all:"全部更新",phb_reinstall:"重新发送",phb_run:"运行",phb_stopped:"未运行",phb_upd_problem:"{n} 个无法检查",phb_update:"更新",phb_updates:"更新",phb_nocon:"这台主机上没有",phb_arm_again:"已在运行 — 再按一次会再启动一份",phb_arm_jb:"再按一次即可发送",phb_arm_reinstall:"已安装 — 再按一次可替换",phb_check:"检查更新",phb_done:"完成",phb_empty:"这台主机没有可用项目",phb_failed:"没有成功",phb_folder:"文件夹形式的应用：放在主机会挂载的硬盘上",phb_homebrews:"自制程序",phb_install:"安装",phb_installed:"已安装",phb_jb:"会改动越狱层",phb_nopc:"这台电脑上没有",phb_open:"载荷与自制程序",phb_payloads:"载荷",phb_running:"运行中",phb_send:"发送",phb_tip:"针对你所选主机的载荷与自制应用。",phb_title:"载荷与自制程序",phb_unknown:"没有端口在监听，因此无从判断",phb_upd:"{n} 个有更新的版本",phb_upd_none:"全部都是最新版本",phb_working:"处理中…",
     all:"全部",
     gp_addons_dlc_count:"{n} 个 DLC",
     gp_aria_back:"返回",
@@ -6851,7 +6907,7 @@ var I18N={
     ui_aria_save_settings:"保存设置",
     ui_tip_rescan:"立即重新读取游戏文件夹。它会自动监视，所以只有刚复制进文件时才需要。",
     ui_btn_stop_homebrew:"立即停止所有自制程序"},
-  hi:{phb_on_console:"कंसोल पर",phb_on_peer:"दूसरा पीसी",phb_cancel:"रद्द करें",phb_notinstalled:"इंस्टॉल नहीं है",phb_ratelimited:"GitHub इन जाँचों को सीमित कर रहा है — कुछ मिनट बाद फिर देखें",phb_upd_private:"हमारे अपने रिलीज़ अभी निजी हैं, इसलिए यह डिवाइस उन्हें अभी नहीं देख सकता",phb_reinstall:"फिर भेजें",phb_run:"चलाएँ",phb_stopped:"चल नहीं रहा",phb_upd_problem:"{n} की जाँच नहीं हो सकी",phb_update:"अपडेट",phb_updates:"अपडेट",phb_nocon:"इस कंसोल पर नहीं है",phb_arm_again:"पहले से चल रहा है — दूसरी प्रति के लिए फिर दबाएँ",phb_arm_jb:"भेजने के लिए फिर दबाएँ",phb_arm_reinstall:"पहले से इंस्टॉल है — बदलने के लिए फिर दबाएँ",phb_check:"अपडेट देखें",phb_done:"हो गया",phb_empty:"इस कंसोल के लिए यहाँ कुछ नहीं",phb_failed:"यह नहीं हुआ",phb_folder:"फ़ोल्डर वाला ऐप: यह उस ड्राइव पर जाता है जिसे कंसोल माउंट करता है",phb_homebrews:"होमब्रू",phb_install:"इंस्टॉल करें",phb_installed:"इंस्टॉल है",phb_jb:"जेलब्रेक की परत बदलता है",phb_nopc:"इस पीसी पर नहीं है",phb_open:"पेलोड और होमब्रू",phb_payloads:"पेलोड",phb_running:"चल रहा है",phb_send:"भेजें",phb_tip:"आपके चुने हुए कंसोल के लिए पेलोड और होमब्रू ऐप।",phb_title:"पेलोड और होमब्रू",phb_unknown:"इसके लिए कुछ भी सुन नहीं रहा, इसलिए बताना संभव नहीं",phb_upd:"{n} का नया रिलीज़ है",phb_upd_none:"सब कुछ नवीनतम रिलीज़ पर है",phb_where:"वह फ़ोल्डर इस पीसी पर नहीं है: {root}",phb_working:"काम चल रहा है…",
+  hi:{phb_on_console:"कंसोल पर",phb_on_peer:"दूसरा पीसी",phb_cancel:"रद्द करें",phb_notinstalled:"इंस्टॉल नहीं है",phb_ratelimited:"GitHub इन जाँचों को सीमित कर रहा है — कुछ मिनट बाद फिर देखें",phb_upd_all:"सभी अपडेट करें",phb_reinstall:"फिर भेजें",phb_run:"चलाएँ",phb_stopped:"चल नहीं रहा",phb_upd_problem:"{n} की जाँच नहीं हो सकी",phb_update:"अपडेट",phb_updates:"अपडेट",phb_nocon:"इस कंसोल पर नहीं है",phb_arm_again:"पहले से चल रहा है — दूसरी प्रति के लिए फिर दबाएँ",phb_arm_jb:"भेजने के लिए फिर दबाएँ",phb_arm_reinstall:"पहले से इंस्टॉल है — बदलने के लिए फिर दबाएँ",phb_check:"अपडेट देखें",phb_done:"हो गया",phb_empty:"इस कंसोल के लिए यहाँ कुछ नहीं",phb_failed:"यह नहीं हुआ",phb_folder:"फ़ोल्डर वाला ऐप: यह उस ड्राइव पर जाता है जिसे कंसोल माउंट करता है",phb_homebrews:"होमब्रू",phb_install:"इंस्टॉल करें",phb_installed:"इंस्टॉल है",phb_jb:"जेलब्रेक की परत बदलता है",phb_nopc:"इस पीसी पर नहीं है",phb_open:"पेलोड और होमब्रू",phb_payloads:"पेलोड",phb_running:"चल रहा है",phb_send:"भेजें",phb_tip:"आपके चुने हुए कंसोल के लिए पेलोड और होमब्रू ऐप।",phb_title:"पेलोड और होमब्रू",phb_unknown:"इसके लिए कुछ भी सुन नहीं रहा, इसलिए बताना संभव नहीं",phb_upd:"{n} का नया रिलीज़ है",phb_upd_none:"सब कुछ नवीनतम रिलीज़ पर है",phb_working:"काम चल रहा है…",
     all:"सभी",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"वापस",
@@ -7542,7 +7598,7 @@ var I18N={
     ui_aria_save_settings:"सेटिंग सहेजें",
     ui_tip_rescan:"गेम फ़ोल्डर को अभी दोबारा पढ़ें। उस पर अपने आप नज़र रखी जाती है, इसलिए यह तभी ज़रूरी है जब आपने अभी-अभी फ़ाइलें कॉपी की हों।",
     ui_btn_stop_homebrew:"सारा होमब्रू अभी रोकें"},
-  ru:{phb_on_console:"на консоли",phb_on_peer:"другой ПК",phb_cancel:"Отмена",phb_notinstalled:"Не установлено",phb_ratelimited:"GitHub ограничивает эти запросы — попробуйте через несколько минут",phb_upd_private:"Наши собственные выпуски пока закрыты, поэтому это устройство их ещё не видит",phb_reinstall:"Отправить снова",phb_run:"Запустить",phb_stopped:"Не работает",phb_upd_problem:"{n} не удалось проверить",phb_update:"Обновить",phb_updates:"Обновления",phb_nocon:"Нет на этой консоли",phb_arm_again:"Уже работает — нажмите ещё раз для второй копии",phb_arm_jb:"Нажмите ещё раз, чтобы отправить",phb_arm_reinstall:"Уже установлено — нажмите ещё раз, чтобы заменить",phb_check:"Проверить обновления",phb_done:"Готово",phb_empty:"Для этой консоли здесь ничего нет",phb_failed:"Не получилось",phb_folder:"Приложение-папка: его место на диске, который монтирует консоль",phb_homebrews:"Homebrew",phb_install:"Установить",phb_installed:"Установлено",phb_jb:"Меняет слой взлома",phb_nopc:"Нет на этом ПК",phb_open:"Пейлоады и homebrew",phb_payloads:"Пейлоады",phb_running:"Работает",phb_send:"Отправить",phb_tip:"Пейлоады и homebrew-приложения для выбранной консоли.",phb_title:"ПЕЙЛОАДЫ И HOMEBREW",phb_unknown:"Ничего его не слушает, поэтому узнать нельзя",phb_upd:"{n} имеют более новый выпуск",phb_upd_none:"Всё соответствует последнему выпуску",phb_where:"Этой папки нет на этом ПК: {root}",phb_working:"Выполняется…",
+  ru:{phb_on_console:"на консоли",phb_on_peer:"другой ПК",phb_cancel:"Отмена",phb_notinstalled:"Не установлено",phb_ratelimited:"GitHub ограничивает эти запросы — попробуйте через несколько минут",phb_upd_all:"Обновить всё",phb_reinstall:"Отправить снова",phb_run:"Запустить",phb_stopped:"Не работает",phb_upd_problem:"{n} не удалось проверить",phb_update:"Обновить",phb_updates:"Обновления",phb_nocon:"Нет на этой консоли",phb_arm_again:"Уже работает — нажмите ещё раз для второй копии",phb_arm_jb:"Нажмите ещё раз, чтобы отправить",phb_arm_reinstall:"Уже установлено — нажмите ещё раз, чтобы заменить",phb_check:"Проверить обновления",phb_done:"Готово",phb_empty:"Для этой консоли здесь ничего нет",phb_failed:"Не получилось",phb_folder:"Приложение-папка: его место на диске, который монтирует консоль",phb_homebrews:"Homebrew",phb_install:"Установить",phb_installed:"Установлено",phb_jb:"Меняет слой взлома",phb_nopc:"Нет на этом ПК",phb_open:"Пейлоады и homebrew",phb_payloads:"Пейлоады",phb_running:"Работает",phb_send:"Отправить",phb_tip:"Пейлоады и homebrew-приложения для выбранной консоли.",phb_title:"ПЕЙЛОАДЫ И HOMEBREW",phb_unknown:"Ничего его не слушает, поэтому узнать нельзя",phb_upd:"{n} имеют более новый выпуск",phb_upd_none:"Всё соответствует последнему выпуску",phb_working:"Выполняется…",
     all:"Все",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"Назад",
@@ -8233,7 +8289,7 @@ var I18N={
     ui_aria_save_settings:"Сохранить настройки",
     ui_tip_rescan:"Перечитать папку с играми сейчас. За ней следят автоматически, так что это нужно только если вы только что скопировали файлы.",
     ui_btn_stop_homebrew:"Остановить весь homebrew сейчас"},
-  it:{phb_on_console:"sulla console",phb_on_peer:"un altro PC",phb_cancel:"Annulla",phb_notinstalled:"Non installato",phb_ratelimited:"GitHub sta limitando queste richieste: riprova fra qualche minuto",phb_upd_private:"Le nostre versioni sono private per ora, quindi questo dispositivo non le vede ancora",phb_reinstall:"Invia di nuovo",phb_run:"Avvia",phb_stopped:"Non in esecuzione",phb_upd_problem:"{n} non è stato possibile controllarli",phb_update:"Aggiorna",phb_updates:"Aggiornamenti",phb_nocon:"Non è su questa console",phb_arm_again:"Già in esecuzione: premi di nuovo per una seconda copia",phb_arm_jb:"Premi di nuovo per inviarlo",phb_arm_reinstall:"Già installato: premi di nuovo per sostituirlo",phb_check:"Cerca aggiornamenti",phb_done:"Fatto",phb_empty:"Qui non c'è nulla per questa console",phb_failed:"Non ha funzionato",phb_folder:"Un'app a cartella: va su un disco che la console monta",phb_homebrews:"Homebrew",phb_install:"Installa",phb_installed:"Installato",phb_jb:"Cambia lo strato del jailbreak",phb_nopc:"Non è su questo PC",phb_open:"Payload e homebrew",phb_payloads:"Payload",phb_running:"In esecuzione",phb_send:"Invia",phb_tip:"Payload e app homebrew, per la console che hai selezionato.",phb_title:"PAYLOAD E HOMEBREW",phb_unknown:"Niente è in ascolto per lui, quindi non è possibile saperlo",phb_upd:"{n} hanno una versione più recente",phb_upd_none:"Tutto è alla versione più recente",phb_where:"Quella cartella non è su questo PC: {root}",phb_working:"In corso…",
+  it:{phb_on_console:"sulla console",phb_on_peer:"un altro PC",phb_cancel:"Annulla",phb_notinstalled:"Non installato",phb_ratelimited:"GitHub sta limitando queste richieste: riprova fra qualche minuto",phb_upd_all:"Aggiorna tutto",phb_reinstall:"Invia di nuovo",phb_run:"Avvia",phb_stopped:"Non in esecuzione",phb_upd_problem:"{n} non è stato possibile controllarli",phb_update:"Aggiorna",phb_updates:"Aggiornamenti",phb_nocon:"Non è su questa console",phb_arm_again:"Già in esecuzione: premi di nuovo per una seconda copia",phb_arm_jb:"Premi di nuovo per inviarlo",phb_arm_reinstall:"Già installato: premi di nuovo per sostituirlo",phb_check:"Cerca aggiornamenti",phb_done:"Fatto",phb_empty:"Qui non c'è nulla per questa console",phb_failed:"Non ha funzionato",phb_folder:"Un'app a cartella: va su un disco che la console monta",phb_homebrews:"Homebrew",phb_install:"Installa",phb_installed:"Installato",phb_jb:"Cambia lo strato del jailbreak",phb_nopc:"Non è su questo PC",phb_open:"Payload e homebrew",phb_payloads:"Payload",phb_running:"In esecuzione",phb_send:"Invia",phb_tip:"Payload e app homebrew, per la console che hai selezionato.",phb_title:"PAYLOAD E HOMEBREW",phb_unknown:"Niente è in ascolto per lui, quindi non è possibile saperlo",phb_upd:"{n} hanno una versione più recente",phb_upd_none:"Tutto è alla versione più recente",phb_working:"In corso…",
     all:"Tutti",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"Indietro",
@@ -8924,7 +8980,7 @@ var I18N={
     ui_aria_save_settings:"Salva impostazioni",
     ui_tip_rescan:"Rilegge subito la cartella dei giochi. Viene controllata automaticamente, quindi serve solo se hai appena copiato dei file.",
     ui_btn_stop_homebrew:"Ferma tutto l'homebrew adesso"},
-  ko:{phb_on_console:"콘솔에 있음",phb_on_peer:"다른 PC",phb_cancel:"취소",phb_notinstalled:"설치되지 않음",phb_ratelimited:"GitHub가 이 조회를 제한하고 있습니다. 몇 분 뒤 다시 시도하세요",phb_upd_private:"우리 릴리스는 아직 비공개여서 이 기기에서는 볼 수 없습니다",phb_reinstall:"다시 보내기",phb_run:"실행",phb_stopped:"실행 중 아님",phb_upd_problem:"{n}개를 확인하지 못했습니다",phb_update:"업데이트",phb_updates:"업데이트",phb_nocon:"이 콘솔에 없습니다",phb_arm_again:"이미 실행 중입니다 — 다시 누르면 두 번째가 실행됩니다",phb_arm_jb:"다시 누르면 보냅니다",phb_arm_reinstall:"이미 설치되어 있습니다 — 다시 누르면 교체합니다",phb_check:"업데이트 확인",phb_done:"완료",phb_empty:"이 콘솔용 항목이 없습니다",phb_failed:"되지 않았습니다",phb_folder:"폴더 형태의 앱입니다. 콘솔이 마운트하는 드라이브에 둡니다",phb_homebrews:"홈브류",phb_install:"설치",phb_installed:"설치됨",phb_jb:"탈옥 계층을 바꿉니다",phb_nopc:"이 PC에 없습니다",phb_open:"페이로드 및 홈브류",phb_payloads:"페이로드",phb_running:"실행 중",phb_send:"보내기",phb_tip:"선택한 콘솔을 위한 페이로드와 홈브류 앱입니다.",phb_title:"페이로드 및 홈브류",phb_unknown:"수신 대기가 없어 확인할 방법이 없습니다",phb_upd:"{n}개에 더 새 릴리스가 있습니다",phb_upd_none:"모두 최신 릴리스입니다",phb_where:"그 폴더는 이 PC에 없습니다: {root}",phb_working:"처리 중…",
+  ko:{phb_on_console:"콘솔에 있음",phb_on_peer:"다른 PC",phb_cancel:"취소",phb_notinstalled:"설치되지 않음",phb_ratelimited:"GitHub가 이 조회를 제한하고 있습니다. 몇 분 뒤 다시 시도하세요",phb_upd_all:"모두 업데이트",phb_reinstall:"다시 보내기",phb_run:"실행",phb_stopped:"실행 중 아님",phb_upd_problem:"{n}개를 확인하지 못했습니다",phb_update:"업데이트",phb_updates:"업데이트",phb_nocon:"이 콘솔에 없습니다",phb_arm_again:"이미 실행 중입니다 — 다시 누르면 두 번째가 실행됩니다",phb_arm_jb:"다시 누르면 보냅니다",phb_arm_reinstall:"이미 설치되어 있습니다 — 다시 누르면 교체합니다",phb_check:"업데이트 확인",phb_done:"완료",phb_empty:"이 콘솔용 항목이 없습니다",phb_failed:"되지 않았습니다",phb_folder:"폴더 형태의 앱입니다. 콘솔이 마운트하는 드라이브에 둡니다",phb_homebrews:"홈브류",phb_install:"설치",phb_installed:"설치됨",phb_jb:"탈옥 계층을 바꿉니다",phb_nopc:"이 PC에 없습니다",phb_open:"페이로드 및 홈브류",phb_payloads:"페이로드",phb_running:"실행 중",phb_send:"보내기",phb_tip:"선택한 콘솔을 위한 페이로드와 홈브류 앱입니다.",phb_title:"페이로드 및 홈브류",phb_unknown:"수신 대기가 없어 확인할 방법이 없습니다",phb_upd:"{n}개에 더 새 릴리스가 있습니다",phb_upd_none:"모두 최신 릴리스입니다",phb_working:"처리 중…",
     all:"전체",
     gp_addons_dlc_count:"DLC {n}개",
     gp_aria_back:"뒤로",
@@ -9615,7 +9671,7 @@ var I18N={
     ui_aria_save_settings:"설정 저장",
     ui_tip_rescan:"게임 폴더를 지금 다시 읽습니다. 자동으로 감시되므로 방금 파일을 복사한 경우에만 필요합니다.",
     ui_btn_stop_homebrew:"모든 홈브루 지금 중지"},
-  tr:{phb_on_console:"konsolda",phb_on_peer:"başka bir PC",phb_cancel:"Vazgeç",phb_notinstalled:"Kurulu değil",phb_ratelimited:"GitHub bu sorguları sınırlıyor — birkaç dakika sonra dene",phb_upd_private:"Kendi sürümlerimiz şimdilik özel, bu yüzden bu cihaz onları henüz göremiyor",phb_reinstall:"Yeniden gönder",phb_run:"Çalıştır",phb_stopped:"Çalışmıyor",phb_upd_problem:"{n} tanesi denetlenemedi",phb_update:"Güncelle",phb_updates:"Güncellemeler",phb_nocon:"Bu konsolda yok",phb_arm_again:"Zaten çalışıyor — ikinci bir kopya için tekrar bas",phb_arm_jb:"Göndermek için tekrar bas",phb_arm_reinstall:"Zaten kurulu — değiştirmek için tekrar bas",phb_check:"Güncellemeleri denetle",phb_done:"Bitti",phb_empty:"Bu konsol için burada bir şey yok",phb_failed:"Bu olmadı",phb_folder:"Klasör biçiminde bir uygulama: konsolun bağladığı bir diske gider",phb_homebrews:"Homebrew",phb_install:"Kur",phb_installed:"Kurulu",phb_jb:"Jailbreak katmanını değiştirir",phb_nopc:"Bu bilgisayarda yok",phb_open:"Payload ve homebrew",phb_payloads:"Payload",phb_running:"Çalışıyor",phb_send:"Gönder",phb_tip:"Seçtiğin konsol için payload ve homebrew uygulamaları.",phb_title:"PAYLOAD VE HOMEBREW",phb_unknown:"Onu dinleyen bir şey yok, bu yüzden anlaşılmıyor",phb_upd:"{n} tanesinin daha yeni sürümü var",phb_upd_none:"Her şey en yeni sürümde",phb_where:"O klasör bu bilgisayarda yok: {root}",phb_working:"Çalışıyor…",
+  tr:{phb_on_console:"konsolda",phb_on_peer:"başka bir PC",phb_cancel:"Vazgeç",phb_notinstalled:"Kurulu değil",phb_ratelimited:"GitHub bu sorguları sınırlıyor — birkaç dakika sonra dene",phb_upd_all:"Tümünü güncelle",phb_reinstall:"Yeniden gönder",phb_run:"Çalıştır",phb_stopped:"Çalışmıyor",phb_upd_problem:"{n} tanesi denetlenemedi",phb_update:"Güncelle",phb_updates:"Güncellemeler",phb_nocon:"Bu konsolda yok",phb_arm_again:"Zaten çalışıyor — ikinci bir kopya için tekrar bas",phb_arm_jb:"Göndermek için tekrar bas",phb_arm_reinstall:"Zaten kurulu — değiştirmek için tekrar bas",phb_check:"Güncellemeleri denetle",phb_done:"Bitti",phb_empty:"Bu konsol için burada bir şey yok",phb_failed:"Bu olmadı",phb_folder:"Klasör biçiminde bir uygulama: konsolun bağladığı bir diske gider",phb_homebrews:"Homebrew",phb_install:"Kur",phb_installed:"Kurulu",phb_jb:"Jailbreak katmanını değiştirir",phb_nopc:"Bu bilgisayarda yok",phb_open:"Payload ve homebrew",phb_payloads:"Payload",phb_running:"Çalışıyor",phb_send:"Gönder",phb_tip:"Seçtiğin konsol için payload ve homebrew uygulamaları.",phb_title:"PAYLOAD VE HOMEBREW",phb_unknown:"Onu dinleyen bir şey yok, bu yüzden anlaşılmıyor",phb_upd:"{n} tanesinin daha yeni sürümü var",phb_upd_none:"Her şey en yeni sürümde",phb_working:"Çalışıyor…",
     all:"Tümü",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"Geri",
@@ -10306,7 +10362,7 @@ var I18N={
     ui_aria_save_settings:"Ayarları kaydet",
     ui_tip_rescan:"Oyun klasörünü şimdi yeniden okur. Klasör otomatik izlenir, bu yüzden yalnızca az önce dosya kopyaladıysanız gerekir.",
     ui_btn_stop_homebrew:"Tüm homebrew'i şimdi durdur"},
-  pl:{phb_on_console:"na konsoli",phb_on_peer:"inny komputer",phb_cancel:"Anuluj",phb_notinstalled:"Nie zainstalowane",phb_ratelimited:"GitHub ogranicza te zapytania — spróbuj za kilka minut",phb_upd_private:"Nasze własne wydania są na razie prywatne, więc to urządzenie ich jeszcze nie widzi",phb_reinstall:"Wyślij ponownie",phb_run:"Uruchom",phb_stopped:"Nie działa",phb_upd_problem:"{n} nie udało się sprawdzić",phb_update:"Aktualizuj",phb_updates:"Aktualizacje",phb_nocon:"Nie ma jej na tej konsoli",phb_arm_again:"Już działa — naciśnij ponownie, by uruchomić drugą kopię",phb_arm_jb:"Naciśnij ponownie, aby wysłać",phb_arm_reinstall:"Już zainstalowane — naciśnij ponownie, by zastąpić",phb_check:"Sprawdź aktualizacje",phb_done:"Gotowe",phb_empty:"Nic tu dla tej konsoli",phb_failed:"Nie udało się",phb_folder:"Aplikacja w folderze: trafia na dysk, który konsola montuje",phb_homebrews:"Homebrew",phb_install:"Zainstaluj",phb_installed:"Zainstalowane",phb_jb:"Zmienia warstwę jailbreaka",phb_nopc:"Nie ma jej na tym komputerze",phb_open:"Payloady i homebrew",phb_payloads:"Payloady",phb_running:"Działa",phb_send:"Wyślij",phb_tip:"Payloady i aplikacje homebrew dla wybranej konsoli.",phb_title:"PAYLOADY I HOMEBREW",phb_unknown:"Nic go nie nasłuchuje, więc nie da się stwierdzić",phb_upd:"{n} ma nowsze wydanie",phb_upd_none:"Wszystko jest w najnowszym wydaniu",phb_where:"Tego folderu nie ma na tym komputerze: {root}",phb_working:"Pracuję…",
+  pl:{phb_on_console:"na konsoli",phb_on_peer:"inny komputer",phb_cancel:"Anuluj",phb_notinstalled:"Nie zainstalowane",phb_ratelimited:"GitHub ogranicza te zapytania — spróbuj za kilka minut",phb_upd_all:"Zaktualizuj wszystko",phb_reinstall:"Wyślij ponownie",phb_run:"Uruchom",phb_stopped:"Nie działa",phb_upd_problem:"{n} nie udało się sprawdzić",phb_update:"Aktualizuj",phb_updates:"Aktualizacje",phb_nocon:"Nie ma jej na tej konsoli",phb_arm_again:"Już działa — naciśnij ponownie, by uruchomić drugą kopię",phb_arm_jb:"Naciśnij ponownie, aby wysłać",phb_arm_reinstall:"Już zainstalowane — naciśnij ponownie, by zastąpić",phb_check:"Sprawdź aktualizacje",phb_done:"Gotowe",phb_empty:"Nic tu dla tej konsoli",phb_failed:"Nie udało się",phb_folder:"Aplikacja w folderze: trafia na dysk, który konsola montuje",phb_homebrews:"Homebrew",phb_install:"Zainstaluj",phb_installed:"Zainstalowane",phb_jb:"Zmienia warstwę jailbreaka",phb_nopc:"Nie ma jej na tym komputerze",phb_open:"Payloady i homebrew",phb_payloads:"Payloady",phb_running:"Działa",phb_send:"Wyślij",phb_tip:"Payloady i aplikacje homebrew dla wybranej konsoli.",phb_title:"PAYLOADY I HOMEBREW",phb_unknown:"Nic go nie nasłuchuje, więc nie da się stwierdzić",phb_upd:"{n} ma nowsze wydanie",phb_upd_none:"Wszystko jest w najnowszym wydaniu",phb_working:"Pracuję…",
     all:"Wszystko",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"Wstecz",
@@ -10997,7 +11053,7 @@ var I18N={
     ui_aria_save_settings:"Zapisz ustawienia",
     ui_tip_rescan:"Odczytaj folder gier ponownie teraz. Jest obserwowany automatycznie, więc to potrzebne tylko wtedy, gdy właśnie skopiowano pliki.",
     ui_btn_stop_homebrew:"Zatrzymaj cały homebrew teraz"},
-  nl:{phb_on_console:"op de console",phb_on_peer:"een andere pc",phb_cancel:"Annuleren",phb_notinstalled:"Niet geïnstalleerd",phb_ratelimited:"GitHub beperkt deze opvragingen — probeer het over een paar minuten",phb_upd_private:"Onze eigen uitgaven zijn voorlopig privé, dus dit apparaat kan ze nog niet zien",phb_reinstall:"Opnieuw versturen",phb_run:"Starten",phb_stopped:"Draait niet",phb_upd_problem:"{n} konden niet worden gecontroleerd",phb_update:"Bijwerken",phb_updates:"Updates",phb_nocon:"Niet op deze console",phb_arm_again:"Draait al — druk nogmaals voor een tweede kopie",phb_arm_jb:"Druk nogmaals om het te versturen",phb_arm_reinstall:"Al geïnstalleerd — druk nogmaals om te vervangen",phb_check:"Controleer op updates",phb_done:"Klaar",phb_empty:"Hier is niets voor deze console",phb_failed:"Dat is niet gelukt",phb_folder:"Een map-app: die hoort op een schijf die de console koppelt",phb_homebrews:"Homebrew",phb_install:"Installeren",phb_installed:"Geïnstalleerd",phb_jb:"Verandert de jailbreak-laag",phb_nopc:"Niet op deze pc",phb_open:"Payloads en homebrew",phb_payloads:"Payloads",phb_running:"Draait",phb_send:"Versturen",phb_tip:"Payloads en homebrew-apps voor de console die je hebt gekozen.",phb_title:"PAYLOADS EN HOMEBREW",phb_unknown:"Niets luistert ernaar, dus het is niet te zeggen",phb_upd:"{n} hebben een nieuwere uitgave",phb_upd_none:"Alles is de nieuwste uitgave",phb_where:"Die map staat niet op deze pc: {root}",phb_working:"Bezig…",
+  nl:{phb_on_console:"op de console",phb_on_peer:"een andere pc",phb_cancel:"Annuleren",phb_notinstalled:"Niet geïnstalleerd",phb_ratelimited:"GitHub beperkt deze opvragingen — probeer het over een paar minuten",phb_upd_all:"Alles bijwerken",phb_reinstall:"Opnieuw versturen",phb_run:"Starten",phb_stopped:"Draait niet",phb_upd_problem:"{n} konden niet worden gecontroleerd",phb_update:"Bijwerken",phb_updates:"Updates",phb_nocon:"Niet op deze console",phb_arm_again:"Draait al — druk nogmaals voor een tweede kopie",phb_arm_jb:"Druk nogmaals om het te versturen",phb_arm_reinstall:"Al geïnstalleerd — druk nogmaals om te vervangen",phb_check:"Controleer op updates",phb_done:"Klaar",phb_empty:"Hier is niets voor deze console",phb_failed:"Dat is niet gelukt",phb_folder:"Een map-app: die hoort op een schijf die de console koppelt",phb_homebrews:"Homebrew",phb_install:"Installeren",phb_installed:"Geïnstalleerd",phb_jb:"Verandert de jailbreak-laag",phb_nopc:"Niet op deze pc",phb_open:"Payloads en homebrew",phb_payloads:"Payloads",phb_running:"Draait",phb_send:"Versturen",phb_tip:"Payloads en homebrew-apps voor de console die je hebt gekozen.",phb_title:"PAYLOADS EN HOMEBREW",phb_unknown:"Niets luistert ernaar, dus het is niet te zeggen",phb_upd:"{n} hebben een nieuwere uitgave",phb_upd_none:"Alles is de nieuwste uitgave",phb_working:"Bezig…",
     all:"Alles",
     gp_addons_dlc_count:"{n} DLC",
     gp_aria_back:"Terug",
@@ -14196,7 +14252,11 @@ function _showSettings(v){ if(!v) ghostShield();var st=$("#settings"),was=st.cla
   else{st.classList.remove("show");if(was)_focusBack("settings");}}
 function _showPHB(v){ if(!v) ghostShield(); var st=$("#phb"),was=st.classList.contains("show");
   if(v){st.classList.add("show");if(!was)_focusInto("phb","#backPHB");}
-  else{st.classList.remove("show");PHB.open=false;if(was)_focusBack("phb");}}
+  else{st.classList.remove("show");PHB.open=false;
+       /* THE UPDATES DRAWER IS PARENTED TO <body>, so hiding the panel does not hide it - it would
+          be left floating over the library with nothing behind it. */
+       try{ phbUpdOpen(false); }catch(e){}
+       if(was)_focusBack("phb");}}
 function pushPanel(name){
   /* Re-opening the panel that is already on top - Save re-calling openSettings(), setLang
      rebuilding the drawer in place - used to push a second entry for the same panel. That ghost
@@ -15386,11 +15446,11 @@ function phbPaint(){
       if(b.textContent===PHB.platform) b.classList.add("active"); else b.classList.remove("active");
     });
   }
-  var bar=$("#phbBar"), w=$("#phbWhere");
-  if(w&&bar){
-    if(PHB.here===false&&!PHB.onConsole){ w.textContent=tsub("phb_where",{root:PHB.root||"?"}); bar.style.display=""; }
-    else bar.style.display="none";
-  }
+  /* THE "THAT FOLDER IS NOT ON THIS PC" STRIP IS GONE, and so is the condition it reported. The
+     app knows the path and knows the layout, so a missing folder is something it makes rather than
+     something it announces - companion/payloads.py creates the tree on startup and again the
+     moment the catalogue is read. What is left for the owner to read is the tiles, which already
+     say where each item can be had from. */
   phbFill($("#phbPay"), "payload");
   phbFill($("#phbHb"),  "homebrew");
   phbUpsPaint();
@@ -15565,69 +15625,139 @@ function phbDo(it,b,act){
   .then(function(){ PHB.busy[it._k]=0; PHB.sig=""; phbLoad(true); });
 }
 
-/* ---- updates -------------------------------------------------------------------------------
-   Each item that has a newer release upstream gets a row and its own button, because replacing a
-   working payload is a decision per payload - a single "update everything" is the one shape that
-   cannot be undone selectively. */
+/* ---- updates ---------------------------------------------------------------------------------
+   A DROPDOWN IN THE HEADER, NOT A BAND ACROSS THE PANEL. It used to be a strip above the tiles,
+   which cost height whenever it had anything to say and pushed the grid down. Now the pill lives
+   beside the close button, carries the count so it is visible without opening anything, and its
+   drawer floats - so opening it never reflows the grid behind it.
+
+   Each item still gets its own row and its own button, because replacing a working payload is a
+   decision per payload. "Update all" is offered as well, because taking six updates one press at
+   a time is not a decision, it is typing - but it runs them ONE AT A TIME and stops at the first
+   refusal, so a bad download cannot take the rest with it. */
+function phbUpdOpen(v){
+  var d=$("#phbUpdrop"), b=$("#phbUps"); if(!d||!b) return;
+  if(v){
+    d.classList.add("open");
+    /* VISIBILITY IS SET HERE, NOT LEFT TO CSS - the same decision, for the same reason, as the
+       install queue's drawer a few hundred lines up: expressing it as a delayed transition on the
+       resting rule was MEASURED not to hold, and the drawer's buttons stayed focusable after it
+       had faded out. An inline style is the one thing both console WebKits agree about. */
+    b.style.visibility="visible";
+    b.removeAttribute("aria-hidden"); b.removeAttribute("inert");
+    try{ b.inert=false; }catch(e){}
+    b.classList.add("show");
+    /* Measured and placed only once it is measurable - and placeMenu moves it to <body>, out of
+       the sheet that would otherwise clip it. */
+    try{ placeMenu(b,$("#phbUpdHead")); }catch(e){}
+  } else {
+    d.classList.remove("open");
+    b.classList.remove("show");
+    /* A CLOSED DRAWER MUST LEAVE THE FOCUS ORDER, and this is not theoretical - the install
+       queue's drawer documents the same thing further up this file, where the console's D-pad and
+       an ordinary Tab both landed on the buttons of a drawer nobody could see. Here that would be
+       an Update button pressed with no row on screen to say what it was about to replace.
+       Set after the fade so the drawer still fades rather than blinking away, and guarded in case
+       it was reopened in the meantime. */
+    setTimeout(function(){
+      var dd=$("#phbUpdrop"); if(dd&&dd.classList.contains("open")) return;
+      b.style.visibility="hidden";
+      b.setAttribute("aria-hidden","true"); b.setAttribute("inert","");
+      try{ b.inert=true; }catch(e){}
+    },180);
+  }
+  try{ $("#phbUpdHead").setAttribute("aria-expanded", v?"true":"false"); }catch(e){}
+}
+
+/* One item. Returns a promise that resolves true when it was taken, so "Update all" can chain. */
+function phbUpOne(u,btn){
+  if(btn){ btn.disabled=true; btn.textContent=t("phb_working"); }
+  return api("/api/payloads/update",{method:"POST",headers:{"Content-Type":"application/json"},
+             body:JSON.stringify({id:u.id,platform:u.platform})},600000)
+  .then(function(r){
+    if(r&&r.ok){
+      toast(r.message||t("phb_done"),"ok");
+      /* It is no longer an update once it has been taken. */
+      PHB.ups=PHB.ups.filter(function(x){return !(x.id===u.id&&x.platform===u.platform);});
+      PHB.sig=""; phbLoad(true); phbUpsPaint();
+      return true;
+    }
+    toast(errText(r,t("phb_failed")),"err");
+    if(btn){ btn.disabled=false; btn.textContent=t("phb_update"); }
+    return false;
+  }).catch(function(){
+    toast(t("phb_failed"),"err");
+    if(btn){ btn.disabled=false; btn.textContent=t("phb_update"); }
+    return false;
+  });
+}
+
 function phbUpsPaint(){
   var box=$("#phbUps"); if(!box) return;
   var rows=PHB.ups.filter(function(u){return u.newer;});
   var probs=PHB.ups.filter(function(u){return u.error;});
-  if(!rows.length && !probs.length && !PHB.checking){ box.style.display="none"; box.innerHTML=""; return; }
-  box.style.display="";
-  var h='<div class="uh">'+esc(t("phb_updates"))+
-        (rows.length?' <span class="c">'+rows.length+'</span>':'')+
-        (PHB.checking?' <span class="s" style="font-weight:600;letter-spacing:0;text-transform:none">'+esc(t("phb_working"))+'</span>':'')+
+  /* The pill is permanent - "Check for updates" lives inside the drawer and has to stay reachable
+     when there is nothing to report. Only the badge comes and goes. */
+  var drop=$("#phbUpdrop"), n=$("#phbUpN");
+  if(n) n.textContent=String(rows.length);
+  if(drop){ if(rows.length) drop.classList.add("has"); else drop.classList.remove("has"); }
+  var h='<div class="uh"><span>'+esc(t("phb_updates"))+'</span>'+
+        (rows.length?'<span class="c">'+rows.length+'</span>':'')+
+        (PHB.checking?'<span class="s">'+esc(t("phb_working"))+'</span>':'')+
+        '<span class="sp"></span>'+
+        (rows.length>1?'<button class="btn primary sm" type="button" id="phbUpAll">'+esc(t("phb_upd_all"))+'</button>':'')+
+        '<button class="btn ghost sm" type="button" id="phbUpChk">'+esc(t("phb_check"))+'</button>'+
         '</div>';
   rows.forEach(function(u){
     h+='<div class="ur" data-up="'+esc(u.id+"|"+u.platform)+'">'+
          '<span class="nm">'+esc(u.title||u.id)+' <span class="s" style="opacity:.6">'+esc(u.platform)+'</span></span>'+
-         '<span class="vv">'+esc(u.have||"?")+' → <b>'+esc(u.tag)+'</b></span>'+
+         '<span class="vv">'+esc(u.have||"?")+' \u2192 <b>'+esc(u.tag)+'</b></span>'+
          '<button class="btn ghost sm" type="button" data-go="'+esc(u.id+"|"+u.platform)+'">'+esc(t("phb_update"))+'</button>'+
        '</div>';
   });
+  if(!rows.length && !PHB.checking)
+    h+='<div class="ur"><span class="msg">'+esc(t("phb_upd_none"))+'</span></div>';
   if(probs.length){
+    /* Rate limiting is its own sentence because it is the ordinary failure here - ten projects
+       checked burns an unauthenticated hour of allowance in six presses. Everything else is
+       counted, which is all we can honestly say about it. */
     var rl=probs.filter(function(p){return p.error==="rate-limited";}).length;
-    /* "not visible" IS ITS OWN ANSWER, and it is ours. api.github.com returns the same 404 for a
-       private repository as for one that does not exist, so an unauthenticated check on our own
-       releases cannot honestly say "there are none" - it can only say it cannot see them. Naming
-       that is the difference between a person waiting for a release that is already out and a
-       person who knows the repository is still private. */
-    var pv=probs.filter(function(p){return p.error==="not visible";}).length;
     h+='<div class="ur"><span class="msg">'+
-       esc(rl?t("phb_ratelimited"):pv===probs.length?t("phb_upd_private")
-           :tsub("phb_upd_problem",{n:probs.length}))+'</span></div>';
+       esc(rl?t("phb_ratelimited"):tsub("phb_upd_problem",{n:probs.length}))+'</span></div>';
   }
   box.innerHTML=h;
+  var chk=box.querySelector("#phbUpChk");
+  if(chk) chk.onclick=function(){ phbCheck(true); };
+  var all=box.querySelector("#phbUpAll");
+  if(all) all.onclick=function(){
+    var list=PHB.ups.filter(function(u){return u.newer;});
+    all.disabled=true; all.textContent=t("phb_working");
+    /* ONE AT A TIME, AND STOP AT THE FIRST REFUSAL. Six parallel downloads over one connection is
+       how a 45 MB payload and a 9 MB one both arrive truncated, and a failure halfway through a
+       parallel run leaves nobody able to say which files were replaced. */
+    (function next(k){
+      if(k>=list.length){ all.disabled=false; all.textContent=t("phb_upd_all"); phbUpsPaint(); return; }
+      phbUpOne(list[k],null).then(function(ok){
+        if(!ok){ all.disabled=false; all.textContent=t("phb_upd_all"); phbUpsPaint(); return; }
+        next(k+1);
+      });
+    })(0);
+  };
   Array.prototype.forEach.call(box.querySelectorAll("[data-go]"),function(btn){
     btn.onclick=function(){
       var k=btn.getAttribute("data-go"), u=null;
       PHB.ups.forEach(function(x){ if(x.id+"|"+x.platform===k) u=x; });
-      if(!u) return;
-      btn.disabled=true; btn.textContent=t("phb_working");
-      api("/api/payloads/update",{method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({id:u.id,platform:u.platform})},600000)
-      .then(function(r){
-        if(r&&r.ok){
-          toast(r.message||t("phb_done"),"ok");
-          /* It is no longer an update once it has been taken. */
-          PHB.ups=PHB.ups.filter(function(x){return !(x.id===u.id&&x.platform===u.platform);});
-          PHB.sig=""; phbLoad(true); phbUpsPaint();
-        } else {
-          toast(errText(r,t("phb_failed")),"err");
-          btn.disabled=false; btn.textContent=t("phb_update");
-        }
-      }).catch(function(){
-        toast(t("phb_failed"),"err"); btn.disabled=false; btn.textContent=t("phb_update");
-      });
+      if(u) phbUpOne(u,btn);
     };
   });
+  /* The rows just changed, so the height did too - a drawer placed against the old height would
+     hang off the bottom of the screen. Only while it is open; placing a hidden menu is wasted work. */
+  if(box.classList.contains("show")){ try{ placeMenu(box,$("#phbUpdHead")); }catch(e){} }
 }
 
 function phbCheck(force){
   if(PHB.checking) return;
   PHB.checking=true; phbUpsPaint();
-  var b=$("#phbUpd"); if(b) b.disabled=true;
   api("/api/payloads/updates"+(force?"?force=1":""),{},120000).then(function(r){
     PHB.ups=(r&&r.items)||[];
     var n=PHB.ups.filter(function(u){return u.newer;}).length;
@@ -15635,14 +15765,42 @@ function phbCheck(force){
        panel opens is noise. A check the owner asked for always answers. */
     if(force||n) toast(n?tsub("phb_upd",{n:n}):t("phb_upd_none"),"ok");
   }).catch(function(){ if(force) toast(t("phb_failed"),"err"); })
-  .then(function(){ PHB.checking=false; if(b) b.disabled=false; phbUpsPaint(); phbPaint(); });
+  .then(function(){ PHB.checking=false; phbUpsPaint(); phbPaint(); });
 }
 
+(function(){
+  var head=$("#phbUpdHead"), drop=$("#phbUpdrop");
+  if(!head||!drop) return;
+  head.onclick=function(){ phbUpdOpen(!drop.classList.contains("open")); };
+  /* The console browser has D-pad focus as well as a stick cursor, so the pill must answer the
+     keyboard too - it is a div with role="button", which gets no key handling for free. */
+  head.onkeydown=function(e){
+    if(e.key==="Enter"||e.key===" "||e.key==="Spacebar"){
+      e.preventDefault(); phbUpdOpen(!drop.classList.contains("open"));
+    } else if(e.key==="Escape"){ phbUpdOpen(false); }
+  };
+  /* A press anywhere else in the sheet shuts it. Capture phase, and bound on the sheet rather than
+     the document, so it cannot fight the modal backdrop handler that closes the whole panel. */
+  var sheet=document.querySelector("#phb .sheet");
+  if(sheet) sheet.addEventListener("click",function(e){
+    if(drop.contains(e.target)) return;
+    if(drop.classList.contains("open")) phbUpdOpen(false);
+  },true);
+  /* A fixed drawer is placed once, against where the pill was. Rotating a phone or resizing a
+     window moves the pill and leaves the drawer behind, pointing at nothing - so it shuts. */
+  window.addEventListener("resize",function(){
+    if(drop.classList.contains("open")) phbUpdOpen(false);
+  });
+})();
+
+/* The panel's own buttons. These sat just after the updates block and were lost when it was
+   rewritten - with no opener bound, pressing "Payloads & Homebrews" did nothing at all and the
+   panel simply never appeared. Kept here, together, so the next rewrite of the block above cannot
+   take them with it again. */
 $("#openPHB").onclick=openPHB;
 $("#closePHB").onclick=dismissPanel;
 $("#backPHB").onclick=dismissPanel;
 $("#phb").onclick=function(e){ if(e.target===this) dismissPanel(); };
-$("#phbUpd").onclick=function(){ phbCheck(true); };
 
 $("#openSettings").onclick=function(){
   /* A FRESH OPEN STARTS CLEAN. Closing Settings throws away whatever was typed, so the amber

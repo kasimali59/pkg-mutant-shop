@@ -100,6 +100,48 @@ def catalog(web_dir):
     return data
 
 
+# THE SHAPE scan() WALKS, WRITTEN DOWN ONCE. scan() iterates
+# (("payload", "Payloads"), ("homebrew", "Homebrews")) x PLATFORMS, so these four directories are
+# exactly the places it will ever look. Keeping the list here rather than in the maker means the
+# folders that get created and the folders that get read cannot drift apart - and test_payloads.py
+# derives one from the other rather than hard-coding either.
+SOURCE_LAYOUT = tuple(os.path.join(top, plat)
+                      for top in ("Payloads", "Homebrews")
+                      for plat in ("PS4", "PS5"))
+
+
+def ensure_tree(root, subdirs):
+    """Create `root` and each of `subdirs` inside it. Returns {ok, root, created, error?}.
+
+    A MISSING FOLDER IS NOT A CONDITION TO REPORT, IT IS ONE TO FIX. The app used to tell the owner
+    "That folder is not on this PC: C:/Mutant Payloads & HomeBrews" and leave them to go and make
+    it - on a machine where the app knows the path, knows the layout, and had just decided it could
+    do nothing without it. The games side has had a button for this since early on; the only thing
+    a button adds over doing it is a chance to not press it.
+
+    Deliberately forgiving: it creates what is missing and says so, and a root that cannot be made
+    (a drive that is not there, a path with no permission) is an error returned, never an
+    exception - this runs on the startup path and from inside a request, and neither may die
+    because a folder could not be made.
+    """
+    created, base = [], os.path.normpath(root or "")
+    if not base:
+        return {"ok": False, "error": "no folder to create", "created": [], "root": base}
+    for p in [base] + [os.path.join(base, d) for d in (subdirs or ())]:
+        try:
+            if not os.path.isdir(p):
+                os.makedirs(p)
+                created.append(p)
+        except OSError as e:
+            return {"ok": False, "error": str(e), "created": created, "root": base}
+    return {"ok": True, "root": base, "created": created}
+
+
+def ensure_source_tree(cfg):
+    """Make sure the payloads/homebrews folder exists, with the four directories scan() reads."""
+    return ensure_tree(source_root(cfg), SOURCE_LAYOUT)
+
+
 def source_root(cfg):
     """Where the owner's folder is. Configurable, because a second PC will not have the same drive."""
     try:
@@ -998,7 +1040,16 @@ def live_catalog(cfg, web_dir):
     baked = catalog(web_dir)
     root = source_root(cfg)
     if not os.path.isdir(root):
-        return baked, ""
+        # MAKE IT, THEN CARRY ON. This is the moment the app discovers the folder is missing, so it
+        # is the moment to create it rather than to report it. This module is Python and therefore
+        # only ever runs on a PC companion - both consoles answer /api/payloads from their own C
+        # server and the baked catalogue - so there is no device here that should be left without
+        # the folder. If it still cannot be made (a drive that is not plugged in, a path with no
+        # permission) ensure_tree returns that as a value and the baked catalogue is served, which
+        # is exactly what happened before and is still the right fallback.
+        ensure_tree(root, SOURCE_LAYOUT)
+        if not os.path.isdir(root):
+            return baked, ""
     try:
         sig = folder_sig(root)
     except Exception:
@@ -1009,6 +1060,17 @@ def live_catalog(cfg, web_dir):
     try:
         cat = build(root, baked.get("curated") or {})
     except Exception:
+        return baked, sig
+    # AN EMPTY FOLDER IS NOT AN EMPTY CATALOGUE, and this became a live hazard the moment the folder
+    # above started being created automatically. Before that, a PC without the folder fell into the
+    # "not a directory" branch and served the BAKED catalogue - which is what puts eighteen tiles in
+    # front of a second PC that holds none of the files, sourced from the console or a peer. Create
+    # the folder and that branch stops being taken: the scan succeeds, finds nothing, and the panel
+    # that used to show the whole fleet's payloads goes blank.
+    #
+    # So an empty scan falls back to what this build knows exists. The signature is still the live
+    # one, so the first file dropped into the new folder is noticed on the next poll and takes over.
+    if not (cat.get("items") or []):
         return baked, sig
     with _live_lock:
         _live["sig"], _live["cat"] = sig, cat

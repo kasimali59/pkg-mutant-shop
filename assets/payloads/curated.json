@@ -126,7 +126,7 @@
       "port": 8710,
       "autostart": false,
       "ours": true,
-      "repo": "LuxGoldAI/pkg-mutant-shop",
+      "repo": "XavyProd/pkg-mutant-shop",
       "asset": "pkg-mutant-shop",
       "marker": "PKG MUTANT SHOP",
       "ver_re": "var APP_VERSION=\"([0-9][0-9.]*)\""

@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.86.0"
+VERSION = "3.87.0"
 
 _BUILD_ID = None
 
@@ -2090,6 +2090,45 @@ def ensure_library_tree(root, layout=LIBRARY_LAYOUT):
         except OSError as e:
             return {"ok": False, "error": str(e), "created": created, "root": base}
     return {"ok": True, "root": base, "created": created}
+
+
+def ensure_all_folders(cfg):
+    """Make every folder this app needs, on every start. Returns the list of what it had to create.
+
+    THE APP KNOWS THE PATH AND THE LAYOUT, SO IT SHOULD NOT BE ASKING. Two places used to tell the
+    owner a folder was missing and leave them to it: the games side had a "Create folders" button in
+    Settings, and the payloads panel simply printed "That folder is not on this PC: <path>" across
+    the top. Both of those are the app describing a job only it was in a position to do. The button
+    stays, because pressing it on a specific root is still a sensible thing to want; it is just no
+    longer the only way the folders come to exist.
+
+    THE TWO TREES ARE DELIBERATELY SEPARATE AND MUST STAY SEPARATE. The payloads root is NOT added
+    to library.local_paths - payloads.py states the reason in its own header and it is not a style
+    preference: Library.scan() registers every .pkg it finds as a game, and normalise_pkg_names()
+    RENAMES files on disk whose stem has characters outside [A-Za-z0-9._-]. Pointing the library at
+    the homebrew folder would rewrite the owner's filenames and put five homebrews on their game
+    shelf. So this creates both trees and crosses neither.
+
+    Every failure is swallowed per-path: a second PC with a drive that is not plugged in must still
+    boot, and a folder that cannot be made is not a reason for the app not to start.
+    """
+    made = []
+    for p in (cfg.get("library", {}).get("local_paths") or []):
+        try:
+            r = ensure_library_tree(p)
+            made.extend(r.get("created") or [])
+        except Exception as e:
+            print("[folders] %s: %s" % (p, e))
+    try:
+        r = payload_engine.ensure_source_tree(cfg)
+        made.extend(r.get("created") or [])
+        if not r.get("ok"):
+            print("[folders] payloads root: %s" % r.get("error"))
+    except Exception as e:
+        print("[folders] payloads root: %s" % e)
+    for p in made:
+        print("[folders] created %s" % p)
+    return made
 
 
 def console_probe(ip, timeout=1.5):
@@ -9670,7 +9709,7 @@ class Handler(BaseHTTPRequestHandler):
             # OUR OWN ENTRY IS CHECKED NOW, and it is the point of this whole lane: the app's tile
             # in this panel is where the owner - and anyone running the exe at home - is told a new
             # release exists and can take it. `ours` was skipped here because our entry had no
-            # upstream to ask; it has one now (LuxGoldAI/pkg-mutant-shop), so the same machinery
+            # upstream to ask; it has one now (XavyProd/pkg-mutant-shop), so the same machinery
             # that offers a new ftpsrv offers a new shop, down to verifying the marker INSIDE the
             # download before anything is replaced.
             if not repo:
@@ -11379,6 +11418,7 @@ def main():
         return 0
     os.makedirs(ICON_DIR, exist_ok=True)
     cfg = _adopt_library_root(cfg)
+    ensure_all_folders(cfg)              # before the scan, so the first scan sees a real tree
     sweep_mei_leftovers()
     library = Library(cfg)
     library.scan()
