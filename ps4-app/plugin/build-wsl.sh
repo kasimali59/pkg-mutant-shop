@@ -20,7 +20,7 @@ set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-export OO_PS4_TOOLCHAIN="${OO_PS4_TOOLCHAIN:-/home/<user>/ps4tool/OpenOrbis/OpenOrbis/PS4Toolchain}"
+export OO_PS4_TOOLCHAIN="${OO_PS4_TOOLCHAIN:-$HOME/ps4tool/OpenOrbis/OpenOrbis/PS4Toolchain}"
 T="$OO_PS4_TOOLCHAIN"
 CLANGBIN="${CLANGBIN:-$HOME/clang18/usr/lib/llvm-18/bin}"
 
