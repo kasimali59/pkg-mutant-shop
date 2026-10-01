@@ -296,6 +296,17 @@ def changelog_section(want):
 
 
 def gates():
+    # THE PAGE PEOPLE READ IS PART OF THE RELEASE. The README's badges were typed by hand and went
+    # three releases and three firmwares stale on a public repository before anyone noticed - and
+    # the notes had drifted into prose with the wrong firmware in the download table. Both are
+    # checked here, first, because they are cheap and they are what a stranger sees.
+    say("  the front page and the release notes (tools/check_docs.py)")
+    r = run([sys.executable, os.path.join(HERE, "check_docs.py")])
+    for l in (r.stdout + r.stderr).strip().splitlines()[-4:]:
+        say("     %s" % l)
+    if r.returncode != 0:
+        die("check_docs failed - the README or the notes do not match the build")
+
     say("  every gate (tools/ready_check.py)")
     r = run([sys.executable, os.path.join(HERE, "ready_check.py")])
     tail = (r.stdout + r.stderr).strip().splitlines()[-3:]

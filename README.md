@@ -8,8 +8,8 @@ A homebrew package manager and store front-end for a jailbroken **PlayStation 5*
 **PlayStation 4** — browse a library, see each game's updates, DLC, cheats and patches, and install
 straight to the console: from the console itself, from a PC, or from a phone.
 
-[![version](https://img.shields.io/badge/version-3.89.1-e8c547?style=flat-square)](CHANGELOG.md)
-[![PS5](https://img.shields.io/badge/PS5-12.70-2a6fdb?style=flat-square)](#supported-firmware)
+[![version](https://img.shields.io/badge/version-3.92.1-e8c547?style=flat-square)](CHANGELOG.md)
+[![PS5](https://img.shields.io/badge/PS5-13.60-2a6fdb?style=flat-square)](#supported-firmware)
 [![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
 [![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
 [![languages](https://img.shields.io/badge/languages-15-9b59b6?style=flat-square)](#fifteen-languages)
@@ -71,12 +71,18 @@ the helper payloads listed in the panel. Origins and licences are in
 
 | Console | Firmware | Jailbreak | Needs |
 |---|---|---|---|
-| PlayStation 5 | 12.70 | Y2JB / Kstuff | **Payload Manager** on `:8084` — the jailbreak's own loader. Nothing else. |
+| PlayStation 5 | up to **13.60** | Y2JB / Kstuff | **Payload Manager** on `:8084` — the jailbreak's own loader. Nothing else. |
 | PlayStation 4 | 13.52 | GoldHEN | GoldHEN's payload loader. The home-screen icon then reloads the app without a PC. |
 
-> **Never update the console.** A system update removes the jailbreak. This app never starts,
-> resumes or cancels a console-owned transfer, and it can block Sony's update hosts if you point the
-> console's DNS at the companion.
+The PS5 ceiling is the payload SDK's, not ours: the SDK carries the kernel offsets for each firmware
+it knows, and on one it does not know the app cannot start **at all** — Payload Manager reports
+success and nothing happens, with no message and nothing in any log. Each console reports its own
+firmware in the app, and you are told when it changes.
+
+> **Updating the console is a one-way door.** A system update removes the jailbreak until one exists
+> for that firmware, and even then this app has to be rebuilt against an SDK that knows it. The app
+> never starts, resumes or cancels a console-owned transfer, and it can block Sony's update hosts if
+> you point the console's DNS at the companion.
 
 ---
 
@@ -182,8 +188,14 @@ the console browser has both a stick cursor and D-pad focus, so the page uses `:
 Deploy a new PS5 build with `python companion/deploy.py elf`. Payload Manager resolves a load **by
 basename, from its own directory**, so the registered file is the one that has to change.
 
-Each console build needs its own SDK in WSL; the build scripts say which and where they
-expect it.
+Each console build needs its own SDK in WSL; the build scripts say which and where they expect it.
+The PS5 SDK is fetched **once**, so it stays on whatever was current the day the machine was set up
+— and that is what decides which console firmwares the build can run on:
+
+```bash
+bash ps5-app/update-sdk-wsl.sh --check   # firmwares yours knows, what upstream has, the difference
+bash ps5-app/update-sdk-wsl.sh           # update it, keeping the old one
+```
 
 ---
 

@@ -42,6 +42,14 @@ import sources as source_engine
 
 VERSION = "3.92.1"
 
+# The newest PS5 firmware this build can run on. It is the ceiling of the kernel-offset table in the
+# payload SDK the ELF was compiled against - past it the ELF cannot establish kernel read/write and
+# dies before main() reaches its first log line, with no process, no log and no message. Declared
+# here because the README, the release notes and the firmware badge all have to say the same number
+# and nothing was keeping them honest: the front page still said 12.70 three firmwares later.
+# `bash ps5-app/update-sdk-wsl.sh --check` prints what the installed toolchain actually knows.
+PS5_FW_SUPPORTED = "13.60"
+
 _BUILD_ID = None
 
 
