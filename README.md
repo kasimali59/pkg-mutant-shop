@@ -114,6 +114,10 @@ anything is replaced: the size must match, the marker must be present *inside* t
 old file is kept as `.bak` until the new one is proven complete. Taking an update replaces the file;
 sending it to a console stays a second, separate press.
 
+**The Windows app updates itself**, including the exe it is running from: it puts the new build in
+place, starts it and closes the old one, once you have stopped taking updates. Set
+`updates.auto_restart` to `false` in `config.json` to be told to reopen it instead.
+
 Nothing needs configuring for this: the releases are public, so any device finds them. Not every
 version is published — only the ones worth interrupting someone for.
 
