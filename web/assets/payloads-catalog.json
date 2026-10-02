@@ -511,11 +511,11 @@
    "platform": "PS5",
    "port": 8710,
    "repo": "XavyProd/pkg-mutant-shop",
-   "sha256": "7adc9c7f55af705231965a12a80e3131c7f2edeb172e252f66c6debbaa8ff1f3",
+   "sha256": "224ba2fb95cb0c8a613759b671a1fb2c7ba77e388a8d33d7775274d7381b5a34",
    "shape": "elf",
    "size": 45385408,
    "title": "PKG MUTANT SHOP",
-   "version": "3.93.0",
+   "version": "3.94.0",
    "version_from": "file"
   },
   {

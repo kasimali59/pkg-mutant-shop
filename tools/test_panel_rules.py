@@ -18,6 +18,8 @@ TWO DEFECTS, BOTH REPORTED BY THE OWNER AND BOTH MEASURED BEFORE BEING BELIEVED.
 
 Both rules are functions now, so this runs them instead of reading them.
 """
+import io
+import json
 import os
 import sys
 
@@ -159,24 +161,60 @@ def main():
     # list holding its own image, which is <exe>.old, so the sweep could not remove it and the NEXT
     # self-update failed trying to rename over it.
     ok(S.REPLACING_FLAG == "--replacing", "the handover has a flag of its own")
-    _killed = []
-    _real_run = S.subprocess.run
+    # IT IS GIVEN TIME TO GO BY ITSELF, AND THAT IS THE RULE THAT MATTERS. Killing it the instant
+    # the port came free landed in the middle of the bootloader deleting its own ~56 MB extraction
+    # folder: two folders from one day were left holding 17 files and 13.6 MB each, identical,
+    # because an interrupted rmtree stops in the same place every time. Forcing stays, for the one
+    # that genuinely wedges - measured once at nine minutes.
+    _killed, _asked = [], []
+    _real_run, _real_alive, _real_grace = S.subprocess.run, S._pid_alive, S.HANDOVER_GRACE_SEC
+
+    def _settle(secs=4.0):
+        """Wait for the clear-up thread; it must not hold up a build whose job is to serve."""
+        _end = _t.time() + secs
+        while _t.time() < _end:
+            if _killed or (_asked and not _alive_now[0]):
+                _t.sleep(0.3)
+                return
+            _t.sleep(0.05)
+
     try:
+        S.HANDOVER_GRACE_SEC = 0.8
         S.subprocess.run = lambda cmd, **kw: _killed.append(list(cmd))
+        _alive_now = [False]
+        S._pid_alive = lambda pid: (_asked.append(pid), _alive_now[0])[1]
+
+        # It has already gone: nothing is killed, which is what leaves its cleanup intact.
         S._clear_replaced([S.AFTER_UPDATE_FLAG, "8710", S.REPLACING_FLAG, "4242,4243"])
-        _pids = [c[-1] for c in _killed]
+        _settle()
+        ok(not _killed, "a predecessor that closed on its own is not killed", repr(_killed))
+        ok(sorted(set(_asked)) == [4242, 4243], "...both of them were asked about", repr(_asked))
+
+        # It wedged: both are ended, so <exe>.old can be replaced.
+        del _killed[:], _asked[:]
+        _alive_now[0] = True
+        S._clear_replaced([S.AFTER_UPDATE_FLAG, "8710", S.REPLACING_FLAG, "4242,4243"])
+        _settle()
+        _pids = sorted(c[-1] for c in _killed)
         ok(_pids == ["4242", "4243"],
-           "both the build that handed over and its bootloader are cleared", repr(_killed))
-        del _killed[:]
+           "one that will not close is ended, after the grace", repr(_killed))
+        ok(all("/T" not in c for c in _killed),
+           "...by pid alone - a tree kill would include this build, which descends from it")
+
+        del _killed[:], _asked[:]
         # NOTHING NAMED, NOTHING TOUCHED. A normal start must never kill anything.
         S._clear_replaced(["--after-update", "8710"])
-        ok(not _killed, "a normal start clears nothing", repr(_killed))
-        del _killed[:]
+        _t.sleep(0.3)
+        ok(not _killed and not _asked, "a normal start clears nothing", repr(_killed))
+        del _killed[:], _asked[:]
         # AND NEVER OURSELVES, whatever it is told.
         S._clear_replaced([S.REPLACING_FLAG, "%d,0,-1,abc" % os.getpid()])
-        ok(not _killed, "it refuses to kill its own process, or a nonsense pid", repr(_killed))
+        _t.sleep(0.3)
+        ok(not _killed and not _asked,
+           "it refuses to kill its own process, or a nonsense pid", repr(_killed))
     finally:
-        S.subprocess.run = _real_run
+        S.subprocess.run, S._pid_alive = _real_run, _real_alive
+        S.HANDOVER_GRACE_SEC = _real_grace
 
     # AND THE TWO ENDS ARE WIRED. A clear-up that is never told anything, or never called, is the
     # same as not having one - and neither end can be reached from inside this process: one starts
@@ -212,6 +250,171 @@ def main():
     finally:
         _PE.running_exe = _real_exe
         _sh.rmtree(_d, ignore_errors=True)
+
+    # ---- A HALF-EXTRACTED BUILD SAYS SO ---------------------------------------------------------
+    # A one-file build unpacks itself into %TEMP% before any of this runs, and it can come out
+    # incomplete. Measured 2026-10-01: a build started by its own self-update came up with no `web/`
+    # in its extraction folder at all, while the exe was byte-for-byte correct. catalog() returns {}
+    # for a missing file BY DESIGN, so the app kept answering every request with the entire curated
+    # layer gone - every payload lost its repo, the Updates list silently had nothing to offer, and
+    # the app could no longer see its own new version. It read as a bug in the update lane.
+    import tempfile as _tf2
+    import shutil as _sh2
+    _real_web, _real_frozen = S.WEB_DIR, getattr(sys, "frozen", False)
+    _d6 = _tf2.mkdtemp()
+    try:
+        sys.frozen = True                      # check_embedded() only speaks for a packaged build
+        # A complete unpack says nothing.
+        _ok_web = os.path.join(_d6, "web")
+        os.makedirs(os.path.join(_ok_web, "assets"))
+        for _p in (os.path.join(_ok_web, "index.html"),
+                   os.path.join(_ok_web, "assets", "logo.png"),
+                   os.path.join(_ok_web, "assets", "payloads-catalog.json")):
+            io.open(_p, "w", encoding="utf-8").write("x")
+        S.WEB_DIR = _ok_web
+        ok(S.check_embedded() == "", "a complete unpack reports nothing", S.check_embedded()[:70])
+
+        # The real failure: the folder is there and `web/` is not.
+        S.WEB_DIR = os.path.join(_d6, "gone", "web")
+        _msg = S.check_embedded()
+        ok(bool(_msg), "a missing web/ is reported")
+        ok("open it again" in _msg, "...and it says what to do about it", _msg[:70])
+        ok("wrong with the download" in _msg,
+           "...and that the download is not the problem, because it is not")
+
+        # One file short counts too - that is how it hides.
+        os.remove(os.path.join(_ok_web, "assets", "payloads-catalog.json"))
+        S.WEB_DIR = _ok_web
+        ok(bool(S.check_embedded()), "one missing file is still an incomplete unpack")
+
+        # Running from source has no extraction to check and must stay silent.
+        try:
+            del sys.frozen
+        except AttributeError:
+            pass
+        S.WEB_DIR = os.path.join(_d6, "gone", "web")
+        ok(S.check_embedded() == "", "running from source reports nothing")
+    finally:
+        S.WEB_DIR = _real_web
+        if _real_frozen:
+            sys.frozen = _real_frozen
+        else:
+            try:
+                del sys.frozen
+            except AttributeError:
+                pass
+        _sh2.rmtree(_d6, ignore_errors=True)
+
+    # ---- THE 88.9 MB THAT COULD NOT BE RECLAIMED ------------------------------------------------
+    # Every launch of the one-file exe unpacks ~56 MB into %TEMP% and deletes it on the way out. A
+    # handover used to interrupt that delete, and what was left had lost the marker files the
+    # sweeper proves ownership with - so it could never be claimed by anything again. Measured on
+    # this machine: 169 folders, 88.9 MB unclaimable. The fix is to be TOLD the path on the way out
+    # instead of inferring it, which also means another program's extraction can never be a
+    # candidate. The risk that creates is the opposite one - deleting a folder a live copy is
+    # running from - so the delete is gated on a rename, which Windows refuses while a file inside
+    # is open, and rmtree(ignore_errors=True) is never pointed at a folder that might be in use.
+    import tempfile as _tf3
+    import shutil as _sh3
+    _d7 = _tf3.mkdtemp()
+    _real_note, _real_web2, _real_mp = S.MEI_NOTE, S.WEB_DIR, getattr(sys, "_MEIPASS", None)
+    _real_frozen2 = getattr(sys, "frozen", False)
+    _real_gettmp = S.tempfile.gettempdir
+    _held = None
+    try:
+        sys.frozen = True
+        S.tempfile.gettempdir = lambda: _d7        # keep the real %TEMP% out of a test entirely
+        S.MEI_NOTE = os.path.join(_d7, "note.json")
+
+        def _mk(name, with_marker=True):
+            p = os.path.join(_d7, name)
+            os.makedirs(os.path.join(p, "web", "assets"))
+            if with_marker:
+                for q in (os.path.join(p, "web", "index.html"),
+                          os.path.join(p, "web", "assets", "logo.png")):
+                    io.open(q, "w", encoding="utf-8").write("x")
+            return p
+
+        gone = _mk("_MEIgone", with_marker=False)   # the half-deleted shape: no marker left
+        busy = _mk("_MEIbusy")                      # a live copy is running from this one
+        mine = _mk("_MEImine")                      # and this build is running from this one
+        vanished = os.path.join(_d7, "_MEIvanished")
+        sys._MEIPASS = mine
+        _held = io.open(os.path.join(busy, "web", "index.html"), "r", encoding="utf-8")
+
+        S._atomic_write_json(S.MEI_NOTE, [gone, busy, mine, vanished], indent=1)
+        S.sweep_mei_leftovers()
+        with io.open(S.MEI_NOTE, encoding="utf-8") as _fh:
+            _left = json.load(_fh)
+
+        ok(not os.path.isdir(gone), "a folder a killed cleanup left behind is reclaimed")
+        ok(gone not in _left, "...and drops off the list")
+        ok(os.path.isfile(os.path.join(busy, "web", "index.html")),
+           "a folder a live copy is running from is left completely alone")
+        ok(busy in _left, "...and stays on the list for a later launch", repr(_left))
+        ok(os.path.isfile(os.path.join(mine, "web", "index.html")),
+           "it never deletes the folder THIS build is running from")
+        ok(mine in _left, "...and keeps its own note for its successor", repr(_left))
+        ok(vanished not in _left, "a path that is already gone is forgotten", repr(_left))
+
+        # AND NOTHING IS WRITTEN DOWN BY A BUILD THAT IS STAYING. A note names a folder that is
+        # about to be abandoned; naming one at boot would hand a second copy, started from the same
+        # directory on another port, permission to delete an extraction in use.
+        _rl3 = _ssrc.split("def relaunch_self(", 1)[1].split("\ndef ", 1)[0]
+        ok("note_my_extraction()" in _rl3, "the folder is noted as the build hands over")
+        _main3 = _ssrc.split("\ndef main(", 1)[1].split("\ndef ", 1)[0]
+        ok("note_my_extraction()" not in _main3, "...and never merely because one started")
+    finally:
+        if _held is not None:
+            try:
+                _held.close()
+            except Exception:
+                pass
+        S.MEI_NOTE, S.WEB_DIR, S.tempfile.gettempdir = _real_note, _real_web2, _real_gettmp
+        if _real_mp is None:
+            try:
+                del sys._MEIPASS
+            except AttributeError:
+                pass
+        else:
+            sys._MEIPASS = _real_mp
+        if not _real_frozen2:
+            try:
+                del sys.frozen
+            except AttributeError:
+                pass
+        _sh3.rmtree(_d7, ignore_errors=True)
+
+    # ---- AND THE PANEL SAYS IT -------------------------------------------------------------------
+    # Server-side detection that no device displays is the same as no detection: the symptom of a
+    # half-unpacked copy is an EMPTY update list, which looks exactly like having nothing to do.
+    _web = _io2.open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    # BOTH PLACES IT ARRIVES. The panel builds itself from /api/payloads and refreshes from
+    # /api/payloads/updates; reading it in only one of the two is how a banner appears, then
+    # vanishes the moment the owner presses Check. Counted, because "is it mentioned anywhere"
+    # passed happily with one of the two sites deleted.
+    ok(_web.replace(" ", "").count("PHB.degraded=r.degraded") == 2,
+       "the panel reads whether the copy answering is complete, on both routes",
+       str(_web.replace(" ", "").count("PHB.degraded=r.degraded")))
+    ok('"degraded": _degraded,' in _ssrc and _ssrc.count('"degraded": _degraded,') >= 2,
+       "...and both routes it builds itself from carry it",
+       str(_ssrc.count('"degraded": _degraded,')))
+    ok('<div class="ur bad">' in _web, "there is a row for it above the update list")
+    ok("phb_app_incomplete" in _web, "...with a translated heading")
+
+    # NO DEAD BUTTON. Both rows can be on screen at once and both offer the same control, so an id
+    # made them duplicates - and querySelector binds the first, leaving the lower one inert. This
+    # panel has shipped a dead button before and it is not obvious from looking at it.
+    ok('id="phbRestart"' not in _web,
+       "the restart control is not an id, because there can be two of it")
+    ok(_web.count('class="btn primary sm phbRestart"') == 2,
+       "...both rows carry it", str(_web.count('class="btn primary sm phbRestart"')))
+    ok('querySelectorAll(".phbRestart")' in _web, "...and every one of them is bound")
+
+    # RESTARTING INTO THE SAME VERSION IS NORMALLY REFUSED, and this is the one case where it is
+    # the entire remedy - a fresh launch unpacks the files that are missing.
+    _rr = _ssrc.split('if path == "/api/app/restart":', 1)[1].split("if path ==", 1)[0]
+    ok("not _degraded" in _rr, "a copy that did not unpack properly is allowed to restart itself")
 
     if fails:
         print("test_panel_rules: FAIL")

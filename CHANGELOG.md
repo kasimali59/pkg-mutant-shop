@@ -9,6 +9,41 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.94.1] - 2026-10-01 - "What the restart left behind" `[VERIFIED]`
+
+### Fixed
+- **A self-update interrupted the outgoing build's cleanup.** The one-file exe unpacks ~56 MB into
+  `%TEMP%` and deletes it on the way out; `_clear_replaced` force-killed it the moment the port came
+  free, about three seconds after the handover, which is the middle of that delete. Two folders from
+  one day prove it - 17 files and 13.6 MB left in each, identical, because an interrupted rmtree
+  stops in the same place every time. It is now given twenty seconds to go by itself, and only
+  forced if it has not (measured once at nine minutes, which is why forcing stays).
+- **What it left could never be reclaimed.** `sweep_mei_leftovers` proves a folder is ours by the
+  marker files inside it, and those were among the ones already deleted - so the debris was
+  invisible to the only thing that could remove it. Measured on this PC: 169 folders, 88.9 MB. A
+  build now writes down its own extraction path as it hands over, and its successor removes it by
+  name. Nothing is inferred, so another program's folder can never be a candidate.
+- **Both of the panel's Restart buttons work.** The app-incomplete row and the update-ready row can
+  be on screen together and both offer the same control; as an `id` they were duplicates, and
+  `querySelector` binds the first - leaving the lower one inert.
+
+### Added
+- **A copy that did not unpack completely says so.** `check_embedded()` runs before the first scan
+  and reports it in the log, in `/api/health`, and in the Updates panel on every device, with a
+  **Restart now** button - which `/api/app/restart` accepts in this one case even though the version
+  is unchanged, because relaunching is the entire fix. Until now this was silent: `catalog()`
+  returns `{}` for a missing file by design, so the curated layer simply vanished - every payload
+  lost its repository, the Updates list had nothing to offer and the app could not see its own new
+  version. It read as a broken update lane.
+
+### Guarded
+- The delete is gated on a **rename**, which Windows refuses while a file inside the folder is open,
+  so a folder a live copy is running from is never touched - `rmtree(ignore_errors=True)` pointed at
+  a folder in use is what produces a half-deleted one in the first place. Perturbed eleven ways
+  across both files; each failure is caught by the check that names it.
+
+---
+
 ## [3.94.0] - 2026-10-01 - "The app that could not see its own version" `[VERIFIED]`
 
 ### Fixed

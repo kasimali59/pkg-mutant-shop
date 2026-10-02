@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.94.0"
+VERSION = "3.94.1"
 
 # The newest PS5 firmware this build can run on. It is the ceiling of the kernel-offset table in the
 # payload SDK the ELF was compiled against - past it the ELF cannot establish kernel read/write and
@@ -8150,6 +8150,9 @@ class Handler(BaseHTTPRequestHandler):
                                # restart. Health is what every device polls, so this is how a phone
                                # or a console learns that the PC it is talking to has one ready.
                                "update_ready": app_update_state(),
+                               # ...and the opposite: this copy came up without its own files. The
+                               # app still works, so nothing else would ever mention it.
+                               "degraded": _degraded,
                                "running_title": _run.get("titleId") or "",
                                "running_name": _run.get("titleName") or "",
                                "ps5_ip": (_ps5 or {}).get("ip") or srv.cfg.get("ps5_ip") or "",
@@ -9546,7 +9549,9 @@ class Handler(BaseHTTPRequestHandler):
             # disk, because restarting into the same version is a pointless interruption - and the
             # panel is where it is offered from, so the request can come from a console or a phone.
             st = app_update_state()
-            if not st.get("version"):
+            # A COPY THAT DID NOT UNPACK PROPERLY IS THE ONE CASE WHERE RESTARTING INTO THE SAME
+            # VERSION IS THE WHOLE POINT - a fresh launch unpacks itself again, which is the fix.
+            if not st.get("version") and not _degraded:
                 return self._json({"ok": False,
                                    "message": "There is no newer build waiting."}, 400)
             if not payload_engine.running_exe():
@@ -9554,7 +9559,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "message": "This is not the packaged app."}, 400)
             if relaunch_self(srv.cfg["companion"]["port"], log=lambda m: print(m)):
                 return self._json({"ok": True, "restarting": True,
-                                   "message": "Restarting into %s." % st.get("version", "")})
+                                   "message": ("Restarting into %s." % st["version"])
+                                   if st.get("version") else "Restarting this build."})
             return self._json({"ok": False, "message": "The new build would not start."}, 500)
         if path in ("/api/payloads/send", "/api/payloads/seed", "/api/payloads/install",
                     "/api/payloads/run"):
@@ -9806,6 +9812,9 @@ class Handler(BaseHTTPRequestHandler):
                            # A newer build of THIS app already on disk, waiting for a restart. The
                            # panel polls this every few seconds, so the banner appears by itself.
                            "update_ready": app_update_state(),
+                           # ...and the opposite: this copy came up without its own files. Said here
+                           # because this is the route the panel builds itself from.
+                           "degraded": _degraded,
                            "root": root, "source_here": os.path.isdir(root),
                            "sig": hashlib.sha256(state_sig.encode("utf-8")).hexdigest()[:16],
                            "items": items})
@@ -11562,6 +11571,41 @@ def probe_cache_hit(cache, key, now, ttl=4.0):
     return None
 
 
+# Set at boot when the files this exe carries are not where they should be. See check_embedded().
+_degraded = ""
+
+
+def check_embedded():
+    """Are the files this build carries actually on disk? Returns a sentence, or "" when fine.
+
+    A ONE-FILE BUILD UNPACKS ITSELF INTO %TEMP% BEFORE ANY OF THIS RUNS, and that can come out
+    incomplete. Measured here on 2026-10-01: a build started by its own self-update came up with an
+    extraction folder that had no `web/` in it at all - no index.html, no catalogue, an empty assets
+    directory - while the exe itself was byte-for-byte correct and a plain restart was fine.
+
+    WHAT THAT COSTS IS NOT OBVIOUS, WHICH IS THE PROBLEM. catalog() returns {} when the file is
+    missing, by design, so the app kept running and answered every request - with the whole curated
+    layer gone. Every payload lost its repo, so the Updates list silently had nothing to offer and
+    the app could no longer see its own new version. It looked like a bug in the update lane and it
+    was a bug in a launch.
+
+    So this is checked once, said plainly in the log, and reported to every device. It does not
+    exit: a working-but-degraded app the owner can see is better than one that will not start.
+    """
+    if not getattr(sys, "frozen", False):
+        return ""
+    want = [os.path.join(WEB_DIR, "index.html"),
+            payload_engine.catalog_path(WEB_DIR),
+            os.path.join(WEB_DIR, "assets", "logo.png")]
+    missing = [p for p in want if not os.path.isfile(p)]
+    if not missing:
+        return ""
+    print("[boot] extraction folder: %s" % (getattr(sys, "_MEIPASS", "?") or "?"))
+    return ("This copy did not unpack completely - %d of its own files are missing from %s. "
+            "Close the app and open it again; nothing is wrong with the download."
+            % (len(missing), os.path.dirname(os.path.dirname(missing[0]))))
+
+
 AFTER_UPDATE_FLAG = "--after-update"
 REPLACING_FLAG = "--replacing"
 _relaunching = False      # see relaunch_self(): one replacement, however many tiles ask
@@ -11615,6 +11659,8 @@ def self_update_once(cfg, force=False, log=None):
             return True, "A newer build is already in place - restart to use it."
     repo = our_repo(cfg)
     if not repo:
+        if _degraded:
+            return False, _degraded          # the catalogue is one of the files that did not unpack
         return False, "There is no upstream recorded for this app."
     rel = payload_engine.github_latest(repo, force=force, token=payload_engine.gh_token(cfg))
     if rel.get("error"):
@@ -11668,6 +11714,52 @@ _relaunch_timer = None    # see schedule_relaunch(): armed, and pushed back whil
 _relaunch_lock = threading.Lock()
 
 
+HANDOVER_GRACE_SEC = 20.0
+
+# Extraction folders this build has handed over from, by absolute path. See note_my_extraction().
+MEI_NOTE = os.path.join(HERE, "extraction-leftovers.json")
+
+
+def note_my_extraction():
+    """Write down the extraction folder this process is leaving, for its successor to remove.
+
+    MEASURED ON THIS MACHINE, 2026-10-01: 88.9 MB across 169 folders in %TEMP% that the sweeper
+    below could not touch, including two from today with the SAME signature - 17 files, 13.6 MB,
+    no web/ - at 14:00:57 and 22:15:43, both moments a self-update restarted the app. That is one
+    rmtree interrupted at the same point twice: the bootloader was deleting its own folder and was
+    force-killed partway (see _clear_replaced). What is left has lost the marker files the sweeper
+    proves ownership with, so it could never be claimed again, by anything.
+
+    Being TOLD the path removes the guessing entirely. Nothing is inferred from a folder's name or
+    contents, so another program's extraction folder can never be a candidate.
+    """
+    mine = getattr(sys, "_MEIPASS", "") or ""
+    if not (getattr(sys, "frozen", False) and mine):
+        return
+    try:
+        old = []
+        if os.path.isfile(MEI_NOTE):
+            with io.open(MEI_NOTE, encoding="utf-8") as fh:
+                old = json.load(fh) or []
+        if not isinstance(old, list):
+            old = []
+        keep = [p for p in old if isinstance(p, str) and p != mine][-19:] + [mine]
+        _atomic_write_json(MEI_NOTE, keep, indent=1)
+    except Exception:
+        pass            # a note for the tidy-up must not be able to stop a handover
+
+
+def _pid_alive(pid):
+    """Is this pid in the task list? True when it is, or when we could not find out."""
+    try:
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=15).stdout
+        return (b"%d" % pid) in (out or b"")
+    except Exception:
+        return True
+
+
 def _clear_replaced(argv):
     """End the processes this build was started to replace. Only the ones it was NAMED.
 
@@ -11678,26 +11770,57 @@ def _clear_replaced(argv):
     Both are usually gone already: the one that handed over exits on its own. This is for the
     bootloader that outlives it (see relaunch_self), because while it lives it holds <exe>.old open
     and the next self-update cannot rename over it.
+
+    IT IS GIVEN TIME TO GO BY ITSELF, AND THAT IS THE POINT OF THE WAIT. A one-file bootloader
+    deletes its ~56 MB extraction folder on the way out, and this used to fire the instant the port
+    came free - about three seconds after the handover, which is the middle of that delete. Two
+    half-deleted folders from one day prove it: 17 files and 13.6 MB left in each, identical,
+    because an interrupted rmtree stops in the same place every time. Forcing is still here for the
+    bootloader that genuinely wedges (measured once at nine minutes), so nothing is lost by asking
+    politely for twenty seconds first.
+
+    All of it on a thread: the point of this build starting is to serve, not to watch the last one
+    leave, and sweep_old_exe() already retries in the background for the file that is held.
     """
     try:
         i = argv.index(REPLACING_FLAG)
         raw = argv[i + 1]
     except (ValueError, IndexError):
         return
+    pids = []
     for part in str(raw).split(","):
         try:
             pid = int(part)
         except ValueError:
             continue
-        if pid <= 0 or pid == os.getpid():
-            continue
-        try:
-            # taskkill, not os.kill: on Windows os.kill() with any signal is TerminateProcess, and
-            # a stale pid that has been reused would be somebody else's program.
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        except Exception:
-            pass
+        if pid > 0 and pid != os.getpid():
+            pids.append(pid)
+    if not pids:
+        return
+
+    def clear(every=1.0):
+        grace = HANDOVER_GRACE_SEC
+        left = list(pids)
+        end = time.time() + grace
+        while left and time.time() < end:
+            left = [p for p in left if _pid_alive(p)]
+            if not left:
+                print("[boot] the build that handed over has finished closing")
+                return
+            time.sleep(min(every, max(0.05, grace / 4.0)))
+        for pid in left:
+            try:
+                # taskkill, not os.kill: on Windows os.kill() with any signal is TerminateProcess,
+                # and a stale pid that has been reused would be somebody else's program. No /T
+                # either - this build is a descendant of that tree.
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                print("[boot] pid %d had not closed after %gs - ended it, so <exe>.old can be "
+                      "replaced" % (pid, grace))
+            except Exception:
+                pass
+
+    threading.Thread(target=clear, daemon=True).start()
 
 
 def _wait_for_port_release(port, secs=90.0):
@@ -11797,6 +11920,7 @@ def relaunch_self(port, log=None):
         # AND THE NEXT SELF-UPDATE CANNOT RENAME OVER IT - which is exactly the PermissionError this
         # whole lane exists to avoid. Enumerating processes to find it would mean guessing which
         # ones are ours; being told the two numbers does not.
+        note_my_extraction()      # for the build starting now to tidy up after this one, by name
         subprocess.Popen([exe, AFTER_UPDATE_FLAG, str(port),
                           REPLACING_FLAG, "%d,%d" % (os.getpid(), os.getppid())],
                          cwd=os.path.dirname(exe) or None,
@@ -11847,6 +11971,40 @@ def sweep_mei_leftovers(max_age_sec=24 * 3600):
         return
     mine = os.path.normcase(os.path.realpath(getattr(sys, "_MEIPASS", "") or ""))
     now, n = time.time(), 0
+
+    # FIRST, THE ONES A PREVIOUS BUILD NAMED. These need no marker and no age: a folder we wrote
+    # down ourselves is ours by definition, which is the only way to reclaim one whose contents a
+    # killed cleanup already took (that is where 88.9 MB of this machine went). Paths that are gone
+    # drop off the list; a path still in use by a live copy is left alone and stays on it.
+    try:
+        named = []
+        if os.path.isfile(MEI_NOTE):
+            with io.open(MEI_NOTE, encoding="utf-8") as fh:
+                named = json.load(fh) or []
+        rest = []
+        for p in (named if isinstance(named, list) else []):
+            if not isinstance(p, str) or not p:
+                continue
+            try:
+                if os.path.normcase(os.path.realpath(p)) == mine:
+                    rest.append(p)                      # this build's own; keep the note for later
+                    continue
+                if not os.path.isdir(p):
+                    continue                            # already gone - forget it
+                aside = p + ".gone"
+                if os.path.isdir(aside):
+                    shutil.rmtree(aside, ignore_errors=True)
+                os.rename(p, aside)                     # raises while anything inside is open
+                shutil.rmtree(aside, ignore_errors=True)
+                n += 1
+            except OSError:
+                rest.append(p)                          # in use by a live copy; leave it alone
+            except Exception:
+                rest.append(p)
+        if rest != named:
+            _atomic_write_json(MEI_NOTE, rest, indent=1)
+    except Exception:
+        pass
     try:
         tmp = tempfile.gettempdir()
         for fn in os.listdir(tmp):
@@ -11905,6 +12063,14 @@ def main():
         return 0
     os.makedirs(ICON_DIR, exist_ok=True)
     cfg = _adopt_library_root(cfg)
+    # BEFORE THE FIRST SCAN, because everything downstream reads files this is about to look for.
+    global _degraded
+    _degraded = check_embedded()
+    if _degraded:
+        print("=" * 78)
+        print("[boot] %s" % _degraded)
+        print("=" * 78)
+
     ensure_all_folders(cfg)              # before the scan, so the first scan sees a real tree
     # THE PREVIOUS BUILD, IF THIS START IS THE ONE AFTER AN UPDATE. It could not be deleted at the
     # moment of the swap, because at that moment it was the file the process was executing from.

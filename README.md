@@ -8,7 +8,7 @@ A homebrew package manager and store front-end for a jailbroken **PlayStation 5*
 **PlayStation 4** — browse a library, see each game's updates, DLC, cheats and patches, and install
 straight to the console: from the console itself, from a PC, or from a phone.
 
-[![version](https://img.shields.io/badge/version-3.94.0-e8c547?style=flat-square)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-3.94.1-e8c547?style=flat-square)](CHANGELOG.md)
 [![PS5](https://img.shields.io/badge/PS5-13.60-2a6fdb?style=flat-square)](#supported-firmware)
 [![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
 [![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
