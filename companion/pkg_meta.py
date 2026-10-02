@@ -10,6 +10,7 @@ Verified against retail fpkgs (e.g. DARK SOULS: REMASTERED CUSA08692).
 PKG header is big-endian; param.sfo is little-endian. param.sfo (entry id 0x1000)
 and icon0.png (entry id 0x1200) are stored plaintext in scene fpkgs.
 """
+import json
 import os
 import struct
 
@@ -198,6 +199,35 @@ def pkg_completeness(path):
         return info
     info.update(complete=True, confident=False, reason="no pfs image fields — completeness inconclusive")
     return info
+
+
+def title_from_param_json(folder):
+    """Real title for an unpacked PS5 dump folder (sce_sys/param.json), or None.
+
+    A PS5 dump carries no param.sfo (that is PS4-only); its metadata lives in
+    sce_sys/param.json instead, under localizedParameters.<locale>.titleName.
+    Without this the folder's only "name" is its own directory name, which for a
+    ShadowMount-style dump is just the title id plus -app0/-patch0 - the mount_name()
+    stripper only removes a bare trailing "app"/"patch", not the digit after it, so
+    these folders showed up in the library literally named "App0" / "Patch0".
+    """
+    path = os.path.join(folder, "sce_sys", "param.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    loc = data.get("localizedParameters") or {}
+    default_locale = data.get("localizedDefaultLanguage") or "en-US"
+    for locale in (default_locale, "en-US"):
+        name = (loc.get(locale) or {}).get("titleName")
+        if name:
+            return clean_text(name)
+    for entry in loc.values():
+        name = (entry or {}).get("titleName") if isinstance(entry, dict) else None
+        if name:
+            return clean_text(name)
+    return None
 
 
 if __name__ == "__main__":

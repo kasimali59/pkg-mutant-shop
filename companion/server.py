@@ -3125,8 +3125,12 @@ class Library:
                     elif re.search(r"\[\s*PS4\s*\]", d, re.I): fplat = "PS4"
                     elif ftid:                                 fplat = "PS5" if ftid.startswith("PPSA") else "PS4"
                     else:                                       fplat = "BACKUP"
+                    # A PS5 dump has no param.sfo, but it does carry sce_sys/param.json with the
+                    # real title - prefer that over the folder name, which for a bare -app0/-patch0
+                    # dump has nothing left to show after the title id and suffix are stripped.
+                    fname = pkg_meta.title_from_param_json(full) or mount_name(d)
                     mounts.append({"install_key": fkey, "file": d, "size": sizes.get(fkey, 0),
-                                   "kind": "backup", "name": mount_name(d), "title_id": ftid,
+                                   "kind": "backup", "name": fname, "title_id": ftid,
                                    "platform": fplat, "format": "folder", "is_dir": True})
                     claimed.append(d)
                 if claimed:
