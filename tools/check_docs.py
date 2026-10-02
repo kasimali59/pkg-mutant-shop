@@ -65,6 +65,18 @@ def main():
     ok(bool(m) and m.group(1) == fw,
        "the README PS5 firmware badge matches PS5_FW_SUPPORTED",
        "%s vs %s" % (m.group(1) if m else "?", fw))
+    # EXACTLY ONE VERSION IN THAT CELL. stamp_version rewrites the first version-looking token it
+    # finds there, so a cell reading "1.00 - 13.60" gets silently turned into "13.60 - 13.60" - which
+    # is what happened the moment the cell was reworded to show a range. A second number in it is a
+    # mangling waiting to happen, so it is refused rather than rewritten.
+    cell = re.search(r"\| PlayStation 5 \|([^|]*)\|", rd)
+    ok(bool(cell), "the README has a PS5 firmware row")
+    if cell:
+        nums = re.findall(r"[0-9]+\.[0-9]+", cell.group(1))
+        ok(len(nums) == 1,
+           "the PS5 firmware cell names exactly one version - stamp_version rewrites the first one "
+           "it finds, so a range there gets mangled",
+           "found %s" % (nums or "none"))
     m = re.search(r"\| PlayStation 5 \| (?:up to )?\*{0,2}([0-9.]+)\*{0,2} \|", rd)
     ok(bool(m) and m.group(1) == fw,
        "the README supported-firmware table matches too",

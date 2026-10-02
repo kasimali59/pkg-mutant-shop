@@ -8,7 +8,7 @@ A homebrew package manager and store front-end for a jailbroken **PlayStation 5*
 **PlayStation 4** — browse a library, see each game's updates, DLC, cheats and patches, and install
 straight to the console: from the console itself, from a PC, or from a phone.
 
-[![version](https://img.shields.io/badge/version-3.93.0-e8c547?style=flat-square)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-3.94.0-e8c547?style=flat-square)](CHANGELOG.md)
 [![PS5](https://img.shields.io/badge/PS5-13.60-2a6fdb?style=flat-square)](#supported-firmware)
 [![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
 [![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
@@ -86,15 +86,38 @@ the helper payloads listed in the panel. Origins and licences are in
 
 ## Supported firmware
 
-| Console | Firmware | Jailbreak | Needs |
-|---|---|---|---|
-| PlayStation 5 | up to **13.60** | Y2JB / Kstuff | **Payload Manager** on `:8084` — the jailbreak's own loader. Nothing else. |
-| PlayStation 4 | 13.52 | GoldHEN | GoldHEN's payload loader. The home-screen icon then reloads the app without a PC. |
+| Console | Firmware | Needs |
+|---|---|---|
+| PlayStation 5 | up to **13.60** | Already jailbroken, with **Payload Manager** running on `:8084`. 67 firmwares are supported, all the way back to the launch build — the full list is below. |
+| PlayStation 4 | 13.52 | Already jailbroken with **GoldHEN**. The home-screen icon then reloads the app without a PC. |
 
-The PS5 ceiling is the payload SDK's, not ours: the SDK carries the kernel offsets for each firmware
-it knows, and on one it does not know the app cannot start **at all** — Payload Manager reports
-success and nothing happens, with no message and nothing in any log. Each console reports its own
-firmware in the app, and you are told when it changes.
+**Which jailbreak you use is not this app's business.** It does not install one, replace one or care
+how you got there — it needs kernel access to already exist and Payload Manager (PS5) or GoldHEN
+(PS4) to be running, because those are what load a payload. Any chain that gives you those works.
+
+**The PS5 range is the payload SDK's, not ours.** The SDK carries the kernel offsets for each
+firmware it knows; on one it does not know, the app cannot start **at all** — Payload Manager
+reports success and nothing happens, with no message and nothing in any log. That is the single most
+confusing failure this project has, so: each console reports its own firmware in the app, and you
+are told when it changes.
+
+<details>
+<summary><b>Every PS5 firmware this build supports</b> (67)</summary>
+
+```
+1.00 1.01 1.02 1.05 1.10 1.11 1.12 1.13 1.14 2.00
+2.20 2.25 2.26 2.30 2.50 2.70 3.00 3.10 3.20 3.21
+4.00 4.02 4.03 4.50 4.51 5.00 5.02 5.10 5.50 6.00
+6.02 6.50 7.00 7.01 7.20 7.40 7.60 7.61 8.00 8.20
+8.40 8.60 9.00 9.05 9.20 9.40 9.60 10.00 10.01 10.20
+10.40 10.60 11.00 11.20 11.40 11.60 12.00 12.02 12.20 12.40
+12.60 12.70 13.00 13.20 13.40 13.42 13.60
+```
+
+Building it yourself? `bash ps5-app/update-sdk-wsl.sh --check` prints what your toolchain knows,
+what is available upstream, and the difference. The list above is that output.
+
+</details>
 
 > **Updating the console is a one-way door.** A system update removes the jailbreak until one exists
 > for that firmware, and even then this app has to be rebuilt against an SDK that knows it. The app

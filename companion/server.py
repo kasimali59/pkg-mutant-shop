@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.93.0"
+VERSION = "3.94.0"
 
 # The newest PS5 firmware this build can run on. It is the ceiling of the kernel-offset table in the
 # payload SDK the ELF was compiled against - past it the ELF cannot establish kernel read/write and
@@ -415,11 +415,15 @@ DEFAULT_CONFIG = {
     # `github_token` is needed ONLY while our repository is private; every third-party upstream in
     # curated.json is public and reads fine without it. It is never logged and goes nowhere except
     # api.github.com.
-    # auto_restart: after the app has replaced its OWN exe, start the new build and quit, so the
-    # owner does not have to. Set it false to be told to reopen the app instead; nothing else
-    # changes, and the update itself is already on disk either way.
+    # auto_restart: restart the moment the new build is in place, without asking. OFF by default
+    # now: the app fetches and installs its own update on its own, and then says "ready - restart
+    # when you like", the way every other desktop app does. Closing the window someone is using,
+    # mid-install-queue, because a release happened is not a thing to do unasked. The update is on
+    # disk either way; this only decides who picks the moment.
+    # self_update: the background check that keeps THIS app current. Off makes the app behave as it
+    # did before - the panel still offers the update, it just will not go and get it by itself.
     "updates": {"channel": "stable", "github_token": "", "check_on_start": True,
-                "auto_restart": True},
+                "auto_restart": False, "self_update": True, "check_every_hours": 6},
     "content_ownership_ack": False,
 }
 
@@ -8142,6 +8146,10 @@ class Handler(BaseHTTPRequestHandler):
                                # reporting the same version and behaving differently is what this
                                # exists to make visible.
                                "build": build_id(),
+                               # A newer build of this app already installed and waiting for a
+                               # restart. Health is what every device polls, so this is how a phone
+                               # or a console learns that the PC it is talking to has one ready.
+                               "update_ready": app_update_state(),
                                "running_title": _run.get("titleId") or "",
                                "running_name": _run.get("titleName") or "",
                                "ps5_ip": (_ps5 or {}).get("ip") or srv.cfg.get("ps5_ip") or "",
@@ -9527,6 +9535,27 @@ class Handler(BaseHTTPRequestHandler):
                                "from": src_game.get("source_pc"), "dest": dest})
         if path == "/api/payloads/update":
             return self._payloads_update(body)
+        if path == "/api/app/update":
+            # FETCH AND INSTALL A NEWER BUILD OF THIS APP, NOW. The same thing the background check
+            # does on its own clock, for somebody who does not want to wait for it. It installs
+            # nothing on a console and never restarts on its own - that is the next route.
+            ok, msg = self_update_once(srv.cfg, force=True, log=lambda m: print(m))
+            return self._json({"ok": ok, "message": msg, "update_ready": app_update_state()})
+        if path == "/api/app/restart":
+            # THE OWNER PICKING THE MOMENT. Only ever offered once a newer build is actually on
+            # disk, because restarting into the same version is a pointless interruption - and the
+            # panel is where it is offered from, so the request can come from a console or a phone.
+            st = app_update_state()
+            if not st.get("version"):
+                return self._json({"ok": False,
+                                   "message": "There is no newer build waiting."}, 400)
+            if not payload_engine.running_exe():
+                return self._json({"ok": False,
+                                   "message": "This is not the packaged app."}, 400)
+            if relaunch_self(srv.cfg["companion"]["port"], log=lambda m: print(m)):
+                return self._json({"ok": True, "restarting": True,
+                                   "message": "Restarting into %s." % st.get("version", "")})
+            return self._json({"ok": False, "message": "The new build would not start."}, 500)
         if path in ("/api/payloads/send", "/api/payloads/seed", "/api/payloads/install",
                     "/api/payloads/run"):
             return self._payloads_act(path.rsplit("/", 1)[-1], body)
@@ -9774,6 +9803,9 @@ class Handler(BaseHTTPRequestHandler):
                            # the catalogue: the catalogue records what the owner's folder held when
                            # the ELF was built, so it is one release behind by construction.
                            "console_version": (cst or {}).get("version", ""),
+                           # A newer build of THIS app already on disk, waiting for a restart. The
+                           # panel polls this every few seconds, so the banner appears by itself.
+                           "update_ready": app_update_state(),
                            "root": root, "source_here": os.path.isdir(root),
                            "sig": hashlib.sha256(state_sig.encode("utf-8")).hexdigest()[:16],
                            "items": items})
@@ -9819,7 +9851,17 @@ class Handler(BaseHTTPRequestHandler):
             # AN ITEM, NOT A REPO. One project can supply both consoles (ftpsrv does), and the two
             # files update independently - so the answer is per item, with the asset that would
             # actually replace THIS file. A release with no matching file is not an update.
+            # OUR OWN ROW ALSO ANSWERS FOR THE APP DOING THE ASKING. `have` above is the version
+            # of the ELF in the owner's folder, which is the right answer for every other payload
+            # and only half of ours: a PC whose folder was already current reported "everything
+            # matches" while running a build three releases old, and the only way out was copying
+            # the exe across by hand. The row is offered when EITHER half is behind, and says which.
+            app_have, app_newer = "", False
+            if it.get("ours") and payload_engine.running_exe():
+                app_have = VERSION
+                app_newer = payload_engine.newer_than(tag, VERSION)
             out.append({
+                "app_have": app_have, "app_newer": app_newer,
                 "id": it.get("id"), "platform": it.get("platform"),
                 "title": it.get("title"), "repo": repo,
                 "have": have, "tag": tag, "have_from": ("release" if from_release
@@ -9830,11 +9872,12 @@ class Handler(BaseHTTPRequestHandler):
                 "size": (asset or {}).get("size", 0),
                 # If the file we hold IS this release, there is nothing to offer - whatever the
                 # version strings look like.
-                "newer": (bool(asset) and not from_release
-                          and payload_engine.newer_than(tag, have)),
+                "newer": ((bool(asset) and not from_release
+                           and payload_engine.newer_than(tag, have)) or app_newer),
             })
         out.sort(key=lambda r: (not r["newer"], str(r["title"] or "").lower()))
         return self._json({"ok": True, "items": out,
+                           "update_ready": app_update_state(),
                            "count": sum(1 for r in out if r["newer"])})
 
     def _payloads_update(self, body):
@@ -9903,10 +9946,19 @@ class Handler(BaseHTTPRequestHandler):
                 # and open it again - which is exactly the step an owner does not do, and then
                 # reports the update as not having worked. The new build is started here and this
                 # one stands down; `relaunched` tells the panel which sentence to show.
-                if sok and (srv.cfg.get("updates") or {}).get("auto_restart", True):
-                    if schedule_relaunch(srv.cfg["companion"]["port"], log=lambda m: print(m)):
-                        relaunched = True
-                        smsg = "Updated. The app will restart itself in a moment."
+                if sok:
+                    # ONE PLACE KNOWS THE APP HAS BEEN REPLACED, however it happened - this press or
+                    # the background check. Every device that asks is then told the same thing.
+                    with _update_lock:
+                        _update_ready.update({"version": str(rel.get("tag") or "").lstrip("vV"),
+                                              "was": VERSION, "at": int(time.time())})
+                    if (srv.cfg.get("updates") or {}).get("auto_restart", False):
+                        if schedule_relaunch(srv.cfg["companion"]["port"], log=lambda m: print(m)):
+                            relaunched = True
+                            smsg = "Updated. The app will restart itself in a moment."
+                    else:
+                        smsg = ("Version %s is ready. Restart the app to use it."
+                                % str(rel.get("tag") or "").lstrip("vV"))
                 # BOTH HALVES ARE REPORTED, and a failure here does not undo the ELF that was just
                 # fetched - it is on disk, it is good, and it can be sent. Saying "updated" and
                 # leaving the old companion running is the one outcome this must never produce.
@@ -11513,6 +11565,105 @@ def probe_cache_hit(cache, key, now, ttl=4.0):
 AFTER_UPDATE_FLAG = "--after-update"
 REPLACING_FLAG = "--replacing"
 _relaunching = False      # see relaunch_self(): one replacement, however many tiles ask
+# Set once the exe ON DISK is a newer build than the one running. From then on every device that
+# asks is told, and the only thing left is picking a moment to restart.
+_update_ready = {}
+_update_lock = threading.Lock()
+
+
+def our_repo(cfg):
+    """The GitHub project this app updates itself from, read from our own catalogue entry.
+
+    Not a constant typed here: the catalogue already carries it (`ours: true` + `repo`), it is what
+    the Updates list asks for every other payload, and two places naming the same repository is how
+    one of them ends up pointing at an account nobody uses any more.
+    """
+    try:
+        cat, _sig = payload_engine.live_catalog(cfg, WEB_DIR)
+        for it in (cat.get("items") or []):
+            if it.get("ours") and it.get("repo"):
+                return str(it["repo"])
+    except Exception:
+        pass
+    return ""
+
+
+def app_update_state():
+    """What every device is told about THIS app's own update. {} when there is nothing to say."""
+    with _update_lock:
+        return dict(_update_ready)
+
+
+def self_update_once(cfg, force=False, log=None):
+    """Fetch and install a newer build of this app, if there is one. Returns (ok, sentence).
+
+    WHY THIS EXISTS, AND WHY IT IS NOT THE TILE. The Payloads panel offers our own entry like any
+    other payload - but what it compares is the ELF SITTING IN THE OWNER'S FOLDER, not the app doing
+    the comparing. So a PC whose folder was already current was told everything matched while the
+    exe it was running was three releases old, and the only way out was to copy the file across by
+    hand or go to the releases page. That is exactly how the owner had been updating their second
+    PC, and it is what this removes.
+
+    Nothing is installed anywhere else: the console's ELF stays a separate, deliberate press.
+    """
+    say = log or (lambda m: print(m))
+    if not payload_engine.running_exe():
+        # A console, or a source run. There is no exe here to replace and nothing to download.
+        return False, "This is not the packaged app, so there is nothing to update."
+    with _update_lock:
+        if _update_ready.get("version"):
+            return True, "A newer build is already in place - restart to use it."
+    repo = our_repo(cfg)
+    if not repo:
+        return False, "There is no upstream recorded for this app."
+    rel = payload_engine.github_latest(repo, force=force, token=payload_engine.gh_token(cfg))
+    if rel.get("error"):
+        return False, "Could not reach GitHub (%s)." % rel["error"]
+    tag = str(rel.get("tag") or "")
+    if not payload_engine.newer_than(tag, VERSION):
+        return False, "This is already the newest build."
+    ok, msg = payload_engine.update_self(cfg, rel, log=say)
+    if not ok:
+        return False, msg
+    with _update_lock:
+        _update_ready.update({"version": tag.lstrip("vV"), "was": VERSION, "at": int(time.time())})
+    say("[update] %s is on disk; this build is %s" % (tag, VERSION))
+    if (cfg.get("updates") or {}).get("auto_restart", False):
+        schedule_relaunch(cfg["companion"]["port"], log=say)
+        return True, "Updated. The app is restarting itself now."
+    return True, "Version %s is ready. Restart the app to use it." % tag.lstrip("vV")
+
+
+def start_self_update_watch(httpd):
+    """Check for a newer build of this app on a slow clock, and install it when there is one.
+
+    Only on a packaged PC build - a console has no exe to replace, and a source run is somebody
+    working on the code. The first check waits, because startup already has a library scan, a LAN
+    sweep and two consoles to talk to, and none of them should queue behind a GitHub request.
+    """
+    cfg = httpd.cfg
+    if not (cfg.get("updates") or {}).get("self_update", True):
+        return
+    if not payload_engine.running_exe():
+        return
+    every = max(1.0, float((cfg.get("updates") or {}).get("check_every_hours", 6) or 6)) * 3600.0
+
+    def loop():
+        time.sleep(120)
+        while True:
+            try:
+                ok, msg = self_update_once(cfg, force=True)
+                if ok:
+                    print("[update] %s" % msg)
+            except Exception as e:
+                print("[update] check skipped: %r" % e)
+            with _update_lock:
+                done = bool(_update_ready.get("version"))
+            if done:
+                return          # it is on disk; nothing further to look for
+            time.sleep(every)
+
+    threading.Thread(target=loop, daemon=True).start()
 _relaunch_timer = None    # see schedule_relaunch(): armed, and pushed back while work continues
 _relaunch_lock = threading.Lock()
 
@@ -12037,6 +12188,10 @@ def main():
     start_cheat_sync_thread(httpd)  # ships the cheat library to a console that is missing it
     start_console_tracker(httpd)    # follows a console that changes address, by its durable id
     start_console_autostart(httpd)  # a PS4 that is switched on gets its shop back by itself
+    # KEEP THIS APP CURRENT WITHOUT ANYBODY GOING TO LOOK. A PC only: a console has no exe to
+    # replace. It installs the new build and then says so - it does not close a window somebody is
+    # using (updates.auto_restart is how you ask for that instead).
+    start_self_update_watch(httpd)
 
     start_ps5_log_listener(port=cfg.get("console", {}).get("log_port", 9097))
     start_pc_register_thread(cfg, fleet)   # announce our address to the on-console shop server

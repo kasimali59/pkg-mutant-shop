@@ -79,6 +79,37 @@ except Exception:
     pass
 
 
+ZIP_README = """PKG MUTANT SHOP %(v)s
+================================================================
+
+WHAT IS IN HERE
+  PKG-MUTANT-SHOP.exe        the Windows companion - run this on a PC
+  PKG-MUTANT-SHOP.elf        the PS5 payload - load it from Payload Manager
+  PKG-MUTANT-SHOP-PS4.elf    the PS4 payload - load it through GoldHEN
+  SHA256SUMS.txt             the checksum of each file, as published
+
+GETTING STARTED
+  On a PC      run PKG-MUTANT-SHOP.exe. It makes its own folders, finds the
+               consoles on your network, and opens in your browser.
+  On the PS5   load PKG-MUTANT-SHOP.elf from Payload Manager, once. After that
+               the app sends payloads for you.
+  On the PS4   load PKG-MUTANT-SHOP-PS4.elf through GoldHEN, or press the
+               home-screen icon once it has been installed.
+  On a phone   open http://<your-pc>:8710 - the same app, nothing to install.
+
+CHECKING WHAT YOU DOWNLOADED
+  Every file's SHA-256 is in SHA256SUMS.txt and on the release page:
+        Get-FileHash .\PKG-MUTANT-SHOP.exe -Algorithm SHA256
+  The whole program is source-available under GPL-3.0, so you can build it
+  yourself, or run it from source with Python 3.8+:
+        python companion/server.py
+
+CHECKSUMS
+%(sums)s
+Project: https://github.com/XavyProd/pkg-mutant-shop
+"""
+
+
 def say(msg):
     print(msg)
 
@@ -368,11 +399,33 @@ def main():
     commit = run(["git", "rev-parse", "HEAD"]).stdout.strip()[:12]
     mp, sp = write_release_dir(want, arts, commit)
 
-    # THE THREE ARTIFACTS, AND NOTHING ELSE. A release is a download page, not a build directory:
-    # the manifest and the checksum file were ours, and nobody downloading the app needs either to
-    # use it. The hashes are still written into release/ for us, and GitHub shows its own digest
-    # for every asset.
-    uploads = [p for _rel, p, _sz, _h in arts]
+    # THE THREE ARTIFACTS, AND A ZIP OF ALL THREE.
+    #
+    # WHY THE ZIP. It is the one-download option: all three files and their checksums, for somebody
+    # setting up a PC and both consoles in one go, and for any browser that would rather hand over
+    # an archive than a bare executable.
+    #
+    # The loose files stay beside it and are not going anywhere: the app's own update lane picks a
+    # console's file out of a release BY NAME (companion/payloads.py pick_asset), so those names are
+    # a contract. The zip is additional, never a replacement.
+    #
+    # SHA256SUMS travels inside it so anyone can check that what they extracted is what was
+    # published, without having to take anybody's word for it.
+    zip_path = os.path.join(ROOT, "release", "PKG-MUTANT-SHOP-%s.zip" % want)
+    sums = "\n".join("%s  %s" % (h, os.path.basename(p)) for _rel, p, _sz, h in arts) + "\n"
+    try:
+        os.remove(zip_path)
+    except OSError:
+        pass
+    import zipfile
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for _rel, p, _sz, _h in arts:
+            z.write(p, os.path.basename(p))
+        z.writestr("SHA256SUMS.txt", sums)
+        z.writestr("READ ME FIRST.txt", ZIP_README % {"v": want, "sums": sums})
+    say("  packed %s (%.1f MB)" % (os.path.basename(zip_path), os.path.getsize(zip_path) / 1e6))
+
+    uploads = [p for _rel, p, _sz, _h in arts] + [zip_path]
     if a.dry_run:
         say("\n  would tag %s at %s and upload:" % (tag, commit))
         for u in uploads:

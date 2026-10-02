@@ -9,6 +9,51 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.94.0] - 2026-10-01 - "The app that could not see its own version" `[VERIFIED]`
+
+### Fixed
+- **The Updates list never asked what the APP was running.** `_payloads_updates` built every row
+  from the catalogue item's `version` - the ELF sitting in the owner's folder - which is the right
+  answer for every other payload and only half of ours. A PC whose folder was already current was
+  told everything matched while the exe doing the telling was several releases old, and the only way
+  out was copying the file across by hand or going to the releases page. That is exactly how the
+  owner had been updating their second PC. Our row now carries `app_have` / `app_newer` as well, and
+  is offered when EITHER half is behind.
+
+### Added
+- **`self_update_once()` and a background watch.** A packaged PC build checks its own repository on
+  a slow clock (`updates.check_every_hours`, 6), installs a newer build with the existing
+  `update_self()` swap, and records it. Nothing runs on a console: `running_exe()` answers None
+  there, so there is no exe to replace and no download is attempted - which is also what makes
+  "there is no companion" the no-op it should be rather than a special case.
+- **`update_ready` on the wire** - in `/api/health`, `/api/payloads` and `/api/payloads/updates` -
+  so a phone or a console learns that the PC it is talking to has a new build waiting.
+- **`POST /api/app/update`** (fetch now) and **`POST /api/app/restart`** (take it). The restart
+  route refuses unless a newer build is actually on disk; restarting into the same version is a
+  pointless interruption.
+- **The panel says so.** A row above the update list: *"Version X is ready"* with **Restart now**,
+  in all fifteen languages.
+- **A zip asset per release**, with all three artifacts, `SHA256SUMS.txt` and a read-me. The loose
+  files stay - `pick_asset()` matches release assets BY NAME, so those names are a contract.
+
+### Changed
+- **`updates.auto_restart` now defaults to false.** 3.91.0 restarted the moment the new build was in
+  place; closing a window somebody is using, mid-queue, because a release happened is not a thing to
+  do unasked. The update still installs itself; only the moment is now the owner's. Set it true for
+  the old behaviour.
+- **README: the full supported firmware list** (67, from the launch build to 13.60, read out of the
+  SDK) and **no named jailbreak** - the app needs Payload Manager or GoldHEN to be running and has
+  no opinion about how kernel access was obtained. The old table said "Y2JB / Kstuff", which was
+  true of 12.70 and is not what the owner's console runs now.
+
+### Guarded
+- `check_docs.py` refuses a PS5 firmware cell containing more than one version. `stamp_version`
+  rewrites the FIRST version-looking token in that cell, so rewording it to a range silently turned
+  "1.00 - 13.60" into "13.60 - 13.60" - which is precisely what happened while writing this entry.
+  Perturbed with that exact string; caught.
+
+---
+
 ## [3.93.0] - 2026-10-01 - "An item with no order jumps to the front" `[VERIFIED]`
 
 ### Fixed - the phone layout
