@@ -13,6 +13,7 @@ straight to the console: from the console itself, from a PC, or from a phone.
 [![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
 [![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
 [![languages](https://img.shields.io/badge/languages-15-9b59b6?style=flat-square)](#fifteen-languages)
+[![YouTube](https://img.shields.io/badge/YouTube-%40XavyProd-ff0000?style=flat-square&logo=youtube&logoColor=white)](https://www.youtube.com/@XavyProd)
 
 ![The library](docs/images/library.png)
 
@@ -46,6 +47,22 @@ straight to the console: from the console itself, from a PC, or from a phone.
 <td width="50%"><img src="docs/images/library.png" alt="The library"><br><sub><b>The library</b> — every drive on both consoles, and every PC in the fleet, with free space.</sub></td>
 </tr>
 </table>
+
+---
+
+## Watch it
+
+<div align="center">
+
+[<img src="https://img.youtube.com/vi/pIPGQ9wJhUI/maxresdefault.jpg" alt="PKG MUTANT SHOP walkthrough" width="640">](https://youtu.be/pIPGQ9wJhUI)
+
+**[PKG MUTANT SHOP — walkthrough](https://youtu.be/pIPGQ9wJhUI)** · more on **[@XavyProd](https://www.youtube.com/@XavyProd)**
+
+</div>
+
+That video was recorded on an older build, so some of it looks different now — the panel, the phone
+layout and the install flow have all moved on. It is still the quickest way to see what the app is
+for. A current one is coming.
 
 ---
 
@@ -314,4 +331,4 @@ Payload Manager, ShadowMountPlus, GoldHEN, ftpsrv, nanoDNS, OnionHEN, the WebKit
 Itemzflow, FPKGi, RetroArch and PS4-Xplorer. This app replaces none of them, and the injection lane
 on the PS4 is GoldHEN's, not ours.
 
-Built by **XavyProd**.
+Built by **XavyProd** — [YouTube](https://www.youtube.com/@XavyProd) · [walkthrough](https://youtu.be/pIPGQ9wJhUI)
