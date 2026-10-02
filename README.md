@@ -8,7 +8,7 @@ A homebrew package manager and store front-end for a jailbroken **PlayStation 5*
 **PlayStation 4** — browse a library, see each game's updates, DLC, cheats and patches, and install
 straight to the console: from the console itself, from a PC, or from a phone.
 
-[![version](https://img.shields.io/badge/version-3.92.1-e8c547?style=flat-square)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-3.93.0-e8c547?style=flat-square)](CHANGELOG.md)
 [![PS5](https://img.shields.io/badge/PS5-13.60-2a6fdb?style=flat-square)](#supported-firmware)
 [![PS4](https://img.shields.io/badge/PS4-13.52-2a6fdb?style=flat-square)](#supported-firmware)
 [![licence](https://img.shields.io/badge/licence-GPL--3.0-6aa84f?style=flat-square)](LICENSE)
@@ -25,12 +25,12 @@ straight to the console: from the console itself, from a PC, or from a phone.
 |   |   |
 |---|---|
 | **Two consoles, one app** | A PS5 payload and a PS4 payload — one binary cannot run on both, which was measured, not assumed — behind one UI, one companion, one queue, one set of build gates. Both consoles get an icon on their home screen. |
-| **Installs through Sony's own installer** | The console downloads each package *itself*, over HTTP Range, through BGFT. The PC serves bytes and keeps the queue; it never pushes a game over FTP. |
-| **A verdict you can trust** | "Installed" means a `bgft.db` status of **1036** (base) or **1026** (update/DLC) *and* a full-size `app.pkg` on disk. A row in `app.db` alone is never treated as proof. |
+| **Installs through Sony's own installer** | The console downloads each package *itself*, over HTTP Range, through BGFT. The PC serves bytes and keeps the queue — it never pushes a package into the console's installer. (One legacy path still pushes: a backup going to a console running an ELF too old to fetch for itself.) |
+| **A verdict you can trust** | Never a guess. On the PS5 "installed" means a `bgft.db` status of **1036** (base) or **1026** (update/DLC) *and* a full-size `app.pkg` on disk. The PS4 keeps no such database, so there the proof is the title's own package *changing* — size and timestamp — which is the only honest test for an update, where the file was already there. A row in `app.db` alone is never proof on either. |
 | **Cheats and patches, live** | Applied to the *running* game by our own engine — expect-gated and revertable. Thousands of cheat files ship inside the app. |
-| **Payloads & Homebrews** | Send payload ELFs to either console and install homebrew packages through the same engine the games use — and update them from their own upstream GitHub releases. |
+| **Payloads & Homebrews** | **The app is the sender.** Pick a payload and it goes to the console and starts, from any device — you do not go back to Payload Manager or GoldHEN by hand. Homebrew packages install through the same engine the games use, and both update from their own upstream GitHub releases. |
 | **Every device is one fleet** | Companions find each other on the LAN. A PC that does not hold a file can still press the button: whoever has the bytes is asked. |
-| **Works with the PC switched off** | All three artifacts carry the UI, the payload set, the catalogue and the cheat library. A console on its own is not a degraded mode. |
+| **Works with the PC switched off** | Every artifact carries the UI and the homebrew catalogue, and each console's payload carries the payloads it can start by itself. A console on its own is not a degraded mode. (The cheat library rides inside the PS5 payload and inside the Windows app; a PS4 takes it from a PC, which is why that one feature wants a companion.) |
 
 ---
 
@@ -88,21 +88,104 @@ firmware in the app, and you are told when it changes.
 
 ## Run it
 
+You load the app **once per console, by hand**. After that the app does the loading — see
+[Sending payloads](#sending-payloads-and-homebrews) below.
+
 **On a PC** — run `PKG-MUTANT-SHOP.exe`. It creates `C:\Mutant Games\PS4` and `\PS5`, scans them,
 finds the consoles on the LAN, opens <http://localhost:8710> and sits in the tray. `config.json` is
 written beside the exe. Drop `.pkg` files into the folders.
 
 **On the PS5** — with Payload Manager running, load `PKG-MUTANT-SHOP.elf` from it. The ELF writes
-the UI, starts ShadowMountPlus if it is not already up, puts the **PKG MUTANT SHOP** tile under
-Media if it is missing, and toasts that it is ready.
+the UI, starts the helper payloads that are not already running (today ShadowMountPlus and
+`ftpsrv`) once somebody has signed in, puts the **PKG MUTANT SHOP** tile under Media if it is
+missing, and toasts that it is ready. Autostart can be delayed or switched off in the panel.
 
 **On the PS4** — load `PKG-MUTANT-SHOP-PS4.elf` through GoldHEN, or press the home-screen icon. The
 payload installs and updates that icon itself, from inside the ELF, with every PC switched off.
+A PS4 payload does not survive a reboot and GoldHEN has no autoload folder, so **a running companion
+hands it over again by itself** — after a restart the shop usually comes back with nobody pressing
+anything.
 
 **From source** — `python companion/server.py` (Python 3.8+, standard library only; Pillow optional,
-for card thumbnails and the tray icon), or `start.cmd`.
+for card thumbnails; pystray optional, for the system-tray icon), or `start.cmd`.
 
 Ports, config keys, adding a second PC, triage: **[SETUP.md](SETUP.md)**.
+
+---
+
+## Using it from each device
+
+The same page runs everywhere. Whichever device you open it on, the **console you are acting on** is
+the one in the picker at the top — not the device you happen to be holding.
+
+### On the PS5
+
+Open **PKG MUTANT SHOP** under Media on the home screen. The console serves the page itself, so this
+works with every PC switched off: your installed games, the backups on your drives, the cheats and
+patches, and anything already on the console. When a PC companion is on the network the page finds it
+and the PC's library appears too — the page re-points itself at whichever companion announced itself
+most recently, so you do not configure an address.
+
+The console's own browser has both a stick cursor and D-pad focus, and the page is built for both.
+
+### On the PS4
+
+Press the **PKG MUTANT SHOP** icon on the home screen. The icon re-loads the payload and opens the
+page, so it is also how you bring the shop back after a restart without touching a PC. Everything the
+PS5 page does is here, aimed at the PS4: its library, its drives, its payloads and homebrews, its
+cheats.
+
+Two differences worth knowing, both the console's and neither a bug: the PS4 keeps no `bgft.db`, so
+"installed" is decided by the title's own data on disk; and the cheat library lives on the PC rather
+than inside the PS4 payload, so cheats on that console want a companion running.
+
+### On a PC
+
+Run the exe. It is the only device that **holds files**: it scans your folders, serves packages to
+the consoles over HTTP Range, keeps the install queue, and confirms every install against the
+console's own records. It also finds other PCs running the same app — if this one does not have a
+file, whoever does is asked for it.
+
+More than one PC is normal. Each keeps its own folders and they fill in for each other.
+
+### On a phone or tablet
+
+Open the same address in any browser: **`http://<pc>:8710`** for a companion, or
+**`http://<console>:8710`** for a console. The app prints the exact address under
+**Settings → Devices & sources**, which is the easiest way to get it right.
+
+There is nothing to install and no app store build — it is the same page, laid out for a narrow
+screen: the controls fold into four rows, the filter and storage strips scroll sideways with a fade
+to show there is more, and every control is a real touch target. A phone is a first-class way to
+drive an install while the console is doing something else.
+
+---
+
+## Sending payloads and homebrews
+
+**You load this app by hand once. After that, the app does the loading.**
+
+Open **Payloads & Homebrews**, pick the console at the top, and press a tile. The app reads what that
+console is already running, sends what is missing, and starts it — you do not go back to Payload
+Manager or GoldHEN to load anything else.
+
+| Press | What happens |
+|---|---|
+| **Send it** | The file goes to the console and starts. On the PS5 the app writes it into Payload Manager's own folder and asks Payload Manager to run it; on the PS4 it hands the bytes straight to GoldHEN's loader. |
+| **Run** | It is already on the console, so nothing is copied — the console starts its own copy. The app checks first that the copy really is the one you are looking at. |
+| **Install** | A homebrew package goes through the same install engine your games use, and gets the same verdict. |
+| **Update** | The app checks each project's own GitHub releases and replaces the file in your folder. Taking an update and sending it are two separate presses, on purpose. |
+
+A tile is green only when a port answered or the console's loader listed the process — never because
+a file exists. Anything that changes the jailbreak layer says so and asks twice.
+
+**The app does not replace your jailbreak.** Payload Manager and GoldHEN are still the loaders, and
+they stay other people's work — the app drives them instead of making you do it. The one thing it
+cannot do is load itself onto a console that has no shop yet, which is why the first load is manual
+and a PS4 restart is handled by the icon or by a running companion.
+
+Your payload and homebrew files live in `Mutant Payloads & HomeBrews` beside your games folders; the
+app creates it, and each console's payload also carries the ones it can start on its own.
 
 ---
 
@@ -129,14 +212,18 @@ version is published — only the ones worth interrupting someone for.
    console.
 2. The PC asks the console:
    `GET http://<console>:8710/api/engine/install-spawn?uri=http://<pc>:8710/library/<key>&name=…`
-3. The ELF writes the request, writes its embedded `pms-installer.elf` into Payload Manager's own
-   directory, and asks Payload Manager to **spawn** it.
+3. **On the PS5**, the ELF writes the request, writes its embedded `pms-installer.elf` into Payload
+   Manager's own directory, and asks Payload Manager to **spawn** it.
 4. `pms-installer.elf` — a *fresh process*, not injected code — calls
    `sceAppInstUtilInstallByPackage(uri)`, writes its verdict, and exits. From an injected payload
    the same call answers `0x80B2116F`; that is the whole reason for the separate process.
+   **On the PS4** there is no spawn and no Payload Manager: the payload calls that console's own
+   background-download service directly, from inside itself.
 5. BGFT downloads the package from the PC with HTTP Range requests and installs it. The PC's byte
    counter on `/library/<key>` is the progress bar.
-6. **Done** means `bgft.db` 1036 / 1026 *and* a full-size `app.pkg` on disk.
+6. **Done** means, on the PS5, `bgft.db` 1036 / 1026 *and* a full-size `app.pkg` on disk. The PS4
+   keeps no such database: there the console watches its own package change — size and timestamp —
+   which is the only test that can tell an update apart from the file that was already on disk.
 
 Where a PKG lands is the console's own *Installation Location* setting; the app does not guess it.
 PS5 **backups** take a different lane: the console copies the file to the drive you pick — staged as
@@ -162,7 +249,7 @@ PS5 **backups** take a different lane: the console copies the file to the drive 
    │ • serves packages (HTTP Range)  │◄──┤ ps4-app/onconsole/server_ps4.c            │
    │ • install queue, one per console│   │ • serves the UI from its own disk         │
    │ • confirms via bgft.db          │   │ • spawns the installer per install         │
-   │ • finds other PCs (federation)  │   │ • cheat / patch engine (PS5)               │
+   │ • finds other PCs (federation)  │   │ • cheat / patch engine (both)              │
    │ • announces itself every 8 s    │   │ • home-screen icon, backups, payloads      │
    └─────────────────────────────────┘   └───────────────────────────────────────────┘
 ```
@@ -209,7 +296,8 @@ bash ps5-app/update-sdk-wsl.sh           # update it, keeping the old one
 |---|---|
 | [docs/FEATURES.md](docs/FEATURES.md) | The full feature list, by area. |
 | [SETUP.md](SETUP.md) | The current runbook: PC side, console side, triage. |
-| [CHANGELOG.md](CHANGELOG.md) | Every version. |
+| [CHANGELOG.md](CHANGELOG.md) | Every version, in full. |
+| [docs/release-notes/](docs/release-notes/) | What changed in each published release, and what to download. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the pieces fit together. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Reporting something, and what a change has to pass. |
 | [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | Everything we ship that we did not write. |

@@ -144,6 +144,28 @@ def offline():
                        # moving the cursor back, so a broken regex renders as if it were
                        # right and the check it belongs to passes whatever the code does.
                        ("check_control_chars.py", []),
+                       # The public page and the release notes are part of what ships. The README's
+                       # badges went three releases and three firmwares stale before a person
+                       # noticed, and check_docs also runs stamp_version - a reworded stamp point
+                       # still has every value correct while ABORTING both console builds.
+                       ("check_docs.py", []),
+                       # A header child with no `order` does not stay where it was on a phone - it
+                       # jumps to the FRONT, and nothing else in the suite looks at the layout.
+                       ("check_mobile.py", []),
+                       # EVERY LOCAL SUITE, because "python tools/ready_check.py - that is every
+                       # gate" is what CONTRIBUTING.md promises and nine of them were not in this
+                       # list. They cost about seventeen seconds between them and each pins
+                       # something that has gone wrong here before. The only one still left out is
+                       # test_fleet_two_consoles.py, which needs BOTH consoles awake and skips
+                       # itself otherwise - a gate that silently skips is not one this can rely on.
+                       ("lint_python.py", []),
+                       ("test_panel_rules.py", []),
+                       ("test_etag.py", []),
+                       ("test_job_claim.py", []),
+                       ("test_viewer_platform.py", []),
+                       ("test_reconcile_consoles.py", []),
+                       ("test_pkg_serving.py", []),
+                       ("test_psn_blocker.py", []),
                        ("i18n_report.py", ["--check"]), ("test_storage_tiles.py", []),
                        ("test_mods_tabs.py", []),
                        ("test_console_tracker.py", []),

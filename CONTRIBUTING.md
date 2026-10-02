@@ -17,11 +17,22 @@ were looking at it — a console's own browser, a PC, or a phone. Those three be
 python tools/ready_check.py
 ```
 
-That is every gate. All of them are fatal, and none of them are advisory:
+That is every gate that can run on one machine — thirty tools, and all of them are fatal. None are
+advisory, and none report a problem without failing.
+
+The one exception is `test_fleet_two_consoles.py`, which needs **both** consoles awake and skips
+itself otherwise. A gate that can skip silently cannot be relied on, so it is run by hand when both
+consoles are on rather than being counted here.
+
+Some gates read the owner's `Mutant Payloads & HomeBrews` folder (`gen_payload_catalog.py --check`,
+`sync_payload_bins.py --check`). On a machine that has never had it, those describe your folder
+rather than the code — rebuild them only if you actually changed a payload.
 
 | Gate | What it refuses |
 |---|---|
-| `check_web.py` | a `web/index.html` whose single inline script does not parse |
+| `check_web.py` | a `web/index.html` whose single inline script does not parse, or uses something the console's browser does not have |
+| `check_mobile.py` | a header child with no place in the phone layout — an unplaced one jumps to the front, not to where it was |
+| `check_docs.py` | a README whose badges no longer match the build, a release note that does not say what changed, or a stamp point that has been reworded past the stamper |
 | `i18n_report.py --check` | a string the app uses that is missing from any of the fifteen languages |
 | `message_report.py --check` | a user-facing string that breaks the house style |
 | `gen_payload_catalog.py --check` | a payload catalogue that has drifted from the folder it describes |

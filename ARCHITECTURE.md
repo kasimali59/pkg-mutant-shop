@@ -60,13 +60,19 @@ The PC serves bytes and keeps the queue; it never pushes a game over FTP.
 1. **Install** is pressed on any device. The companion's queue claims the job — one running install
    per console, claimed with a token rather than a flag so two devices cannot both win.
 2. The companion asks the console to start it, handing over a URL on its own `/library/<key>`.
-3. The ELF writes the request, writes its embedded `pms-installer.elf` into Payload Manager's
-   directory, and asks Payload Manager to **spawn** it.
-4. `pms-installer.elf` — a *fresh process*, not injected code — calls
+3. **PS5:** the ELF writes the request, writes its embedded `pms-installer.elf` into Payload
+   Manager's directory, and asks Payload Manager to **spawn** it.
+4. **PS5:** `pms-installer.elf` — a *fresh process*, not injected code — calls
    `sceAppInstUtilInstallByPackage` and exits. The same call answers `0x80B2116F` from an injected
    payload; that is the entire reason for a separate process.
-5. **Done** means a `bgft.db` status of 1036 (base) or 1026 (update/DLC) *and* a full-size `app.pkg`
-   on disk. A row in `app.db` alone is never treated as proof — it survives a database reset.
+
+   **PS4:** there is no spawn and no Payload Manager. The payload calls that console's own
+   background-download service from inside itself, which is why steps 3 and 4 collapse into one
+   there and why nothing on a PS4 needs a second process.
+5. **Done** means, on the PS5, a `bgft.db` status of 1036 (base) or 1026 (update/DLC) *and* a
+   full-size `app.pkg` on disk. The PS4 has no `bgft.db`, so there the title's own data on disk is
+   the proof. A row in `app.db` alone is never treated as proof on either — it survives a database
+   reset.
 
 Where a package lands is the console's own *Installation Location* setting. The app does not guess
 it and refuses an install only when the package fits on no drive at all.
@@ -94,9 +100,16 @@ The PS5 ELF carries its own engine: it walks CR3 to reach the running game's mem
 where the bytes it expects are present, and can put the originals back. A cheat is a **code patch,
 not a value poke** — nothing changes until the patched instruction runs.
 
-On the PS4 the library browses but cannot be applied. That jailbreak gives a payload no way to write
-another process's memory: `mdbg` and `ptrace` both return `EPERM` and GoldHEN's syscall gateway is
-caller-only. It is measured and documented rather than worked around.
+**The PS4 applies them too**, and this paragraph used to say it could not. The obstacle was real and
+is still real from OUTSIDE a game: `mdbg` and `ptrace` both answer `EPERM` and GoldHEN's syscall
+gateway is caller-only, all measured. The way past it is not to work from outside - the payload lists
+a small plugin for the titles your library covers, GoldHEN loads it into the game at launch, and the
+writing happens from inside the process that owns the memory. Same engine, same expect-gating, same
+revert.
+
+Two consequences worth knowing: the plugin is read by GoldHEN only at game START, so a title has to
+be armed before it is launched; and the cheat library itself is not inside the PS4 payload - that
+console takes it from a PC, which is why cheats there want a companion running.
 
 ---
 

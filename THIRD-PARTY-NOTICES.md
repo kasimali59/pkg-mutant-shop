@@ -104,5 +104,12 @@ own engine.
   install mechanism only (CHANGELOG); no code from it is used.
 - **Game Compressor** (juma-sayeh) - the `.ffpfsc` backups it produces are recognised by the backup
   lane; nothing of it is shipped.
-- **Payload Manager (pldmgr)**, **Y2JB**, **kstuff_lite** - the user's own jailbreak stack; the app
-  requires Payload Manager to be running and ships none of them.
+- **Y2JB** - the user's own jailbreak; not bundled, not started, not spoken to.
+
+  **Payload Manager and kstuff are NOT in this list, and used to be.** This file said the app
+  "ships none of them" while the table above, sixty lines earlier, correctly recorded both as
+  embedded - and `ps5-app/onconsole/payload_bundle.h` settles it: `PB_INCBIN(pb_pldmgr,
+  "payloads/pldmgr.elf")` and `PB_INCBIN(pb_kstuff, "payloads/kstuff.elf")` link their bytes
+  straight into the shipped PS5 ELF. They are redistributed, under their own licences, and are
+  credited in the table. Neither is ever auto-started: the app requires Payload Manager to already
+  be running, and starting either is the owner's call.

@@ -13,9 +13,10 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
   guessed from a filename. *(PC)*
 * **Grouped by game, not by file.** Base game, updates, DLC and add-ons collapse into one title, so
   a game with six files is one card with six rows. *(all)*
-* **Install state from the console**, read live: `bgft.db` plus a full-size `app.pkg` on disk. A row
-  in `app.db` alone is never treated as proof — it survives a database reset and once produced 53
-  phantom "installed" titles. *(all)*
+* **Install state from the console**, read live. On the PS5 that is `bgft.db` plus a full-size
+  `app.pkg` on disk; the PS4 keeps no `bgft.db`, so there the title's own data on disk decides. A row
+  in `app.db` alone is never treated as proof on either — it survives a database reset and once
+  produced 53 phantom "installed" titles. *(all)*
 * **Every drive, with free space** — internal, extended storage, and each USB — for both consoles at
   once, plus every PC in the fleet. *(all)*
 * **Search, filters and sort**: installed / not installed / has an update / add-ons, by platform, by
@@ -92,7 +93,13 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
 
 ## On the console, with every PC switched off *(both)*
 
-* All three artifacts embed the UI, the payload set, the catalogue and the cheat library.
+* Every artifact embeds the UI and the homebrew catalogue. What else each one carries differs, and
+  the difference is what you can do with a PC switched off:
+  | | UI | catalogue | payloads it can start | cheat library |
+  |---|---|---|---|---|
+  | `PKG-MUTANT-SHOP.elf` (PS5) | yes | yes | yes | yes |
+  | `PKG-MUTANT-SHOP-PS4.elf` (PS4) | yes | yes | yes | **no** — taken from a PC |
+  | `PKG-MUTANT-SHOP.exe` (PC) | yes | yes | the PS4's payload, to hand it over | yes |
 * Each console serves the page itself, and the page then re-points its API at the newest companion
   that announced itself — so the same page is a full app with a PC and a working app without one.
 * **A home-screen icon on both consoles.** The PS5 gets a tile; the PS4 gets a real application, and
@@ -108,7 +115,7 @@ Legend: **PS5** · **PS4** · **PC** — where the feature lives. "Both" means b
 * **PSN blocking** — point the console's DNS at the companion and Sony's update and telemetry hosts
   stop resolving. The app never starts, resumes or cancels a console-owned transfer.
 * **Notifications that actually render.** The icon form of the PS5 toast returns success and draws
-  nothing on 12.70, so the app sends the plain form.
+  nothing on this firmware, so the app sends the plain form.
 
 ## How it is kept honest
 

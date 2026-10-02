@@ -40,7 +40,7 @@ import pkg_meta
 import payloads as payload_engine
 import sources as source_engine
 
-VERSION = "3.92.1"
+VERSION = "3.93.0"
 
 # The newest PS5 firmware this build can run on. It is the ceiling of the kernel-offset table in the
 # payload SDK the ELF was compiled against - past it the ELF cannot establish kernel read/write and

@@ -1,4 +1,4 @@
-# PKG MUTANT SHOP 3.92.1 - setup and runbook
+# PKG MUTANT SHOP 3.93.0 - setup and runbook
 
 This is the one current document for installing, running, updating and triaging the app. Every
 sentence in it was read out of the code as it is today (`companion/server.py`,
@@ -11,7 +11,7 @@ Three artifacts, nothing else:
 | Artifact | Runs on | What it is |
 |---|---|---|
 | `PKG-MUTANT-SHOP.exe` | a Windows PC | the companion: scans your game folder, serves the packages over HTTP, runs the install queue, serves the UI |
-| `PKG-MUTANT-SHOP.elf` | the PS5 (FW 12.70, jailbroken) | the on-console server on `:8710`: the UI, the install engine, the cheat engine, the dashboard tile, and the helpers it carries inside itself |
+| `PKG-MUTANT-SHOP.elf` | the PS5 (jailbroken, firmware up to 13.60) | the on-console server on `:8710`: the UI, the install engine, the cheat engine, the dashboard tile, and the helpers it carries inside itself |
 | `PKG-MUTANT-SHOP-PS4.elf` | the PS4 (FW 13.52, GoldHEN) | the same server and the same UI on `:8710`, plus the home-screen application it installs itself |
 
 Nothing has to be downloaded separately. Each ELF embeds the UI, the helper payloads, the homebrew
@@ -326,19 +326,32 @@ sending it to a console is a second, separate press.
 
 ### 5.3 The exe (the PC)
 
-Quit the tray app (right-click the tray icon - Quit), copy the new `PKG-MUTANT-SHOP.exe` over the old
-one, start it. `config.json`, `installed.json` and `.cache\` beside it are kept. The copy silently
-does nothing if the app is still running - Windows will not replace a mapped image - so quit first
-and check the version in Settings > About afterwards.
+**It updates itself.** Open **Payloads & Homebrews -> Updates** and take the PKG MUTANT SHOP row:
+the app replaces its own exe, starts the new build and closes the old one, once you have stopped
+taking updates. `config.json`, `installed.json` and `.cache\` beside it are kept. Set
+`updates.auto_restart` to `false` in `config.json` to be told to reopen it instead.
+
+By hand, if you prefer: quit the tray app (right-click the tray icon - Quit), copy the new
+`PKG-MUTANT-SHOP.exe` over the old one, start it. The copy silently does nothing while the app is
+running - Windows will not replace a mapped image - so quit first and check the version afterwards.
 
 ### 5.4 Building
 
 - exe: `build_exe.cmd` (runs `companion/PKG-MUTANT-SHOP.spec`, whose gates - version stamp, UI
   parse check, i18n, message style, storage-tile test - are all fatal). Output `companion/dist/`.
-- ELF: in WSL, `bash ps5-app/onconsole/build-wsl.sh` (syntax pass, the installer first, the same
-  gates, both bundles, then the link). Output `ps5-app/onconsole/PKG-MUTANT-SHOP.elf`.
+- PS5 ELF: in WSL, `bash ps5-app/onconsole/build-wsl.sh` (syntax pass, the installer first, the
+  same gates, both bundles, then the link). Output `ps5-app/onconsole/PKG-MUTANT-SHOP.elf`.
+- PS4 ELF: in WSL, `bash ps4-app/build-all-wsl.sh` - **the whole chain, not just the ELF.** The
+  home-screen icon package carries its own copy of the payload, so building only the ELF leaves a
+  stale icon that re-loads the previous build. This had no entry here at all.
 - Toolchain: `bash ps5-app/payload/build-wsl.sh` once, fetches the ps5-payload-dev SDK and clang 18
   into `~/sdk` and `~/clang18` (no sudo).
+- Toolchain, later: that fetch is guarded by `if [ ! -d ~/sdk/ps5-payload-sdk ]`, so it happens
+  **once per machine and never again** - and the SDK is what decides which console firmwares the PS5
+  build can run on. When a console is updated past it, the ELF cannot establish kernel read/write
+  and dies before it logs anything: Payload Manager reports success and nothing starts.
+  `bash ps5-app/update-sdk-wsl.sh --check` prints what yours knows against upstream; without
+  `--check` it updates it and keeps the old one.
 
 `python tools/ready_check.py --offline` checks the repo without a console;
 `python tools/ready_check.py` waits for the console and checks the live lane.
@@ -351,6 +364,7 @@ and check the version in Settings > About afterwards.
 |---|---|---|
 | Engine LED red, "not ready to install" | `http://<ps5>:8710/api/health` - `engine_ready` | `engine_ready` is "does Payload Manager answer on :8084". Reload Payload Manager on the console; nothing else is involved |
 | Shop not answering (`http://<ps5>:8710` dead) | Payload Manager's page on `:8084` | the ELF is not loaded (it does not survive a reboot). Load it - section 2.2 - then check `version` in `/api/health` |
+| Shop not answering, **and loading it changes nothing** | Payload Manager's `/log`, then `fw` in `/api/health` | it loads and no process appears: pldmgr logs `Sent <n> bytes to loader` and nothing starts, nothing reaches `install.log`, no toast. **The console's firmware is past what this build's SDK knows** - it cannot establish kernel read/write and dies before its first log line. `bash ps5-app/update-sdk-wsl.sh --check`, then rebuild. Beware: an OLD third-party payload fails the same way, so "somebody else's payload also will not start" does not mean the loader is broken |
 | "Only packages already on the PS5 can be installed" | from the console's network, `http://<pc>:8710/api/health` | the console page found no PC. Start the exe; check the firewall on 8710; the PC announces itself every 8 s |
 | Install refused, **0x80B21104**, no row in `bgft.db` | free space on the drive *Installation Location* points to | **out of space** - the installer refuses before it starts, so there is no download row. Free space or change the setting; the package is fine |
 | **0x80B22404** | can the console reach `http://<pc>:8710/library/...`? | the console could not fetch the file: firewall, PC asleep, wrong network. Not an engine fault |
@@ -361,4 +375,4 @@ and check the version in Settings > About afterwards.
 | Backup mounts half-written / crashes the console | how it was uploaded | a file placed in a watch folder under its final name is mounted the instant it appears. Let the app copy it (it stages `.part`) |
 | Blank page on every device, servers answer 200 | `python tools/check_web.py` | one bad token in `web/index.html`; both artifacts embed it |
 | Console panics entering rest mode | Power > prepare for rest in the app (`/api/rest/prepare`) | it stops the helper payloads that do not survive suspend; the shop is reloaded by Payload Manager afterwards |
-| Toasts never appear | - | the ELF sends the plain notification form only; the icon form draws nothing on 12.70. If a build stops toasting, that is what changed |
+| Toasts never appear | - | the ELF sends the plain notification form only; the icon form returns 0 and draws nothing on this firmware. If a build stops toasting, that is what changed |

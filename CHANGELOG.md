@@ -9,6 +9,65 @@ Legend: `[VERIFIED]` = tested/confirmed · `[WIRED]` = implemented against a kno
 
 ---
 
+## [3.93.0] - 2026-10-01 - "An item with no order jumps to the front" `[VERIFIED]`
+
+### Fixed - the phone layout
+- **Two of the header's eleven children had no `order`.** The header is a wrapping flexbox
+  re-sequenced on a phone, and an item with no order defaults to 0 - which sorts BEFORE `order:1`.
+  So `.qcol` (the install queue AND the Payloads & Homebrews button) and `#consoleSel` (the console
+  picker) were drawn ABOVE the logo. Measured at 375px: a 319px header on an 812px screen, five
+  ragged rows with the icon buttons interleaved between the status pill and the search field, and
+  56% of the screen spent before the first game. Now 186px, four rows, 47%.
+- **`.dock{order:3}` was a dead rule.** It named the install queue, which is a GRANDchild - it lives
+  inside `.qcol` - and `order` only applies to flex items. It had done nothing since `.qcol` was
+  introduced, while the comment above it described a row it could not produce.
+- **The filter chips could not be scrolled at all**, so the last one was simply unreachable on a
+  phone, and the drive strip hid 688px of its 1039px with no affordance. Both fade at the edge and
+  snap now, and `edgeFade()` takes the fade away when there is nothing left - checked on scroll, on
+  resize, and on a 1.5s tick because the strip is rebuilt whenever a console answers.
+- **The queue pill wrapped inside itself** because its head needs 226px of content and the row gave
+  it 193. The two recovery buttons (clear the install lane, clear finished) leave the pill on a
+  phone - the first is documented by its own tooltip as something the app already does after every
+  install - and at 320px the pill and the Payloads button stack rather than cram.
+- **The panel header was three rows** with the close button stranded alone on the last one. Two now,
+  title and close together.
+- `tools/check_mobile.py` refuses a header child with no order, an order on something that is not a
+  header child, and a scroller with no fade. Four perturbations, four caught. It parses the markup a
+  TAG at a time - counting angle brackets per line found one child out of eleven, which would have
+  reported OK for a header that was entirely unplaced.
+
+### Fixed - a build break from earlier the same day
+- Rewording the README's firmware cell to "up to **13.60**" left `tools/stamp_version.py` with no
+  stamp point. It exits non-zero, and both console builds treat that as fatal. The pattern now
+  matches the number whatever is written around it, and `check_docs.py` RUNS the stamper - checking
+  that the values agree is not enough, because a reworded stamp point leaves every value correct.
+
+### Changed - the documentation, against the code
+Audited with 112 findings across eight documents; these are the ones that were verified against the
+source rather than taken on trust.
+- **The app sends payloads and homebrews itself**, and no public document said so - every one of
+  them described loading by hand through Payload Manager or GoldHEN. New README section.
+- **The README explains each device**: PS5, PS4, PC, phone.
+- **PS5-only facts were stated as both consoles'**: the `bgft.db` 1036/1026 verdict (the PS4 has no
+  `bgft.db` - 0 occurrences in its server), the spawn-an-installer step (the PS4 calls its own
+  download service from inside itself), and "all three artifacts carry the cheat library" (only the
+  PS5 ELF includes `cheat_bundle.h`; the PS4 takes the library from a PC).
+- **ARCHITECTURE said the PS4 cannot apply cheats.** It can - `/api/cheat/apply` at
+  `server_ps4.c:6426`. The obstacle it describes is real from outside a game and the way past it is
+  a plugin loaded into the game at launch.
+- **THIRD-PARTY-NOTICES contradicted itself**: "ships none of them" about Payload Manager and
+  kstuff, sixty lines after listing both as embedded. `payload_bundle.h` settles it -
+  `PB_INCBIN(pb_pldmgr, ...)` and `PB_INCBIN(pb_kstuff, ...)`. Both are redistributed, under their
+  own licences.
+- **CONTRIBUTING said `ready_check.py` is every gate** and nine suites were not in it. They are now
+  (77 checks, up from 67); `test_fleet_two_consoles.py` stays out and is named, because it needs
+  both consoles awake and skips itself otherwise.
+- **SETUP** had no entry for the PS4 build at all, still said FW 12.70, still described replacing
+  the exe by hand, and its triage had one cause for a dead shop. It now has the second: a console
+  updated past the build's SDK, which looks like success and starts nothing.
+
+---
+
 ## [3.92.1] - 2026-10-01 - "Recorded is not shown" `[VERIFIED]`
 
 ### Fixed
